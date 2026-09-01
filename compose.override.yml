@@ -4,7 +4,7 @@ services:
     image: traefik:3.6
     ports:
       - "80:80"
-      - "8180:8080"
+      - "8190:8080"
     # Duplicate the command from compose.yml to add --api.insecure=true
     command:
       # Enable Docker in Traefik, so that it reads labels from Docker services
@@ -97,4 +97,4 @@ services:
       - ./frontend/blob-report:/app/frontend/blob-report
       - ./frontend/test-results:/app/frontend/test-results
     ports:
-      - 9423:9323
+      - 9323:9323

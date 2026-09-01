@@ -86,3 +86,14 @@ Check the file [release-notes.md](./release-notes.md).
 ## License
 
 The Full Stack FastAPI Template is licensed under the terms of the MIT license.
+
+
+## App
+To run the backend and built frontend in Docker Compose:
+
+```bash
+# setup first user then delete the container (db service will be kept), admin@example.com : changethis
+docker compose run --rm backend bash scripts/prestart.sh
+# start all the services and update the files directly without rebuild
+docker compose watch
+```
