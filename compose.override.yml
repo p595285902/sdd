@@ -4,7 +4,7 @@ services:
     image: traefik:3.6
     ports:
       - "80:80"
-      - "8090:8080"
+      - "8180:8080"
     # Duplicate the command from compose.yml to add --api.insecure=true
     command:
       # Enable Docker in Traefik, so that it reads labels from Docker services
@@ -25,15 +25,15 @@ services:
       - --api.insecure=true
   db:
     ports:
-      - "5432:5432"
+      - "5532:5432"
 
   adminer:
     ports:
-      - "8080:8080"
+      - "8180:8080"
 
   backend:
     ports:
-      - "8000:8000"
+      - "8100:8000"
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -87,8 +87,8 @@ services:
     environment:
       - FIRST_SUPERUSER=${FIRST_SUPERUSER:?Variable not set}
       - FIRST_SUPERUSER_PASSWORD=${FIRST_SUPERUSER_PASSWORD:?Variable not set}
-      - PLAYWRIGHT_BASE_URL=http://backend:8000
-      - VITE_API_URL=http://backend:8000
+      - PLAYWRIGHT_BASE_URL=http://backend:8100
+      - VITE_API_URL=http://backend:8100
       - MAILPIT_HOST=http://mailpit:8025
       # For the reports when run locally
       - PLAYWRIGHT_HTML_HOST=0.0.0.0
@@ -97,4 +97,4 @@ services:
       - ./frontend/blob-report:/app/frontend/blob-report
       - ./frontend/test-results:/app/frontend/test-results
     ports:
-      - 9323:9323
+      - 9423:9323
