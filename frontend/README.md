@@ -100,7 +100,7 @@ docker compose run --rm backend bash scripts/prestart.sh
 docker compose up -d --wait backend
 ```
 
-Then, you can run the tests with the following command:
+Then, go to the folder `frontend` and you can run the tests with the following command:
 
 ```bash
 bunx playwright test
