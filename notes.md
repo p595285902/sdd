@@ -22,7 +22,7 @@ Details can be found here: https://opencode.ai/docs/rules/
 - CLAUDE.md
 - openspec-propse/SKILL.md
 - openspec/config.yaml relevant fields only such as context, rules for proposal
-- active schema `schemas/app-spec-driven/schema.yaml`
+- active schema `schemas/behavior-driven/schema.yaml`
 - artifact templates for the schema
 - artifact files (if they were dependencies). IE Tasks depends on design and spec
 - relevant repo files
