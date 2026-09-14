@@ -8,7 +8,8 @@ Superusers can currently delete only one user at a time from the admin page. Man
 - Disable selection for the current user's row.
 - Add a `Delete User(s)` button next to `Add User`, always visible and disabled when no user is selected.
 - Limit select-all behavior to the currently visible table page.
-- Confirm bulk deletion with the number of selected users and the existing warning that their Items are also permanently deleted.
+- Confirm bulk deletion with the number of selected users and the existing warning that their Items are also permanently deleted; upon confirmation, disable the button and show a spinner until the dialog closes automatically upon response.
+- Display a success notification on successful deletion and a failure notification when the operation is rejected.
 - Add a dedicated atomic backend bulk-delete endpoint for selected user IDs.
 - Reject the entire bulk operation when any target is invalid or includes the current user; delete nothing in that case.
 - Preserve cascading deletion of Items owned by deleted users.

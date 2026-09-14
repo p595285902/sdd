@@ -25,7 +25,7 @@ The admin page currently renders users through the shared DataTable and supports
 
 2. **Add a dedicated bulk endpoint.** Introduce a superuser-only endpoint accepting a list of user UUIDs, likely under `/users/bulk-delete`. The backend validates the full target set before mutating data, then deletes owned Items and Users inside one transaction. A single request is preferred over N frontend calls because it gives the backend one place to enforce authorization and atomicity.
 
-3. **Use the existing destructive confirmation pattern.** The bulk dialog displays the selected count and the existing Item-deletion warning. Cancel performs no request; confirmation calls the generated bulk service method and invalidates the relevant queries after success.
+3. **Use the existing destructive confirmation pattern.** The bulk dialog displays the selected count and the existing Item-deletion warning. When the user confirms, the dialog remains open with the confirm button disabled and a spinning icon displayed. Upon receiving any response (success or failure), the dialog closes automatically. Cancel performs no request; confirmation calls the generated bulk service method, shows a success notification or a failure notification that includes the backend-provided rejection reason, and invalidates the relevant queries after success.
 
 4. **Regenerate the API client.** Update the OpenAPI-generated client through the repository's existing generation script after the backend contract is finalized rather than maintaining handwritten client types.
 
