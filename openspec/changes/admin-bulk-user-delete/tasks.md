@@ -1,6 +1,6 @@
 ## 1. Specification and acceptance setup
 
-- [ ] 1.1 Confirm the acceptance stack by reading `stack:` from `openspec/config.yaml`; if absent, ask the user and add the chosen value in a separate specs-only change before scaffolding acceptance infrastructure
+- [x] 1.1 Confirm the acceptance stack by reading `stack:` from `openspec/config.yaml`; if absent, ask the user and add the chosen value in a separate specs-only change before scaffolding acceptance infrastructure
 - [ ] 1.2 Extract the new Gherkin spec and lint the extracted output with the repository's configured acceptance-test tooling
 
 ## 2. Backend bulk-delete contract
