@@ -56,6 +56,12 @@ Add a bulk-delete component beside `Add User`. It receives selected UUIDs, remai
 
 Alternative considered: reuse the row-level `DeleteUser` component. Its single-ID contract and dropdown trigger would couple two distinct interaction flows and make count-based confirmation and selection cleanup awkward.
 
+### Drive client-rendered acceptance scenarios with Playwright
+
+Keep `acceptance-tests/` as an independent Cucumber project and include `@playwright/test` as its browser driver. Use Playwright-backed page objects for the client-rendered admin UI and `cheerio` only for HTTP responses that can be inspected without executing JavaScript. This keeps selectors, routes, and browser operations out of step definitions while allowing the executable Gherkin scenarios to exercise the real React application.
+
+Alternative considered: import Playwright from `frontend/node_modules`. That couples the independent acceptance project to another package's installation layout and dependency lifecycle. An API-only suite cannot implement the specified UI scenarios.
+
 ### Regenerate the client from the backend OpenAPI document
 
 After adding the backend model and route, regenerate `frontend/src/client` with the existing OpenAPI generation workflow. Frontend code will call the generated service method rather than hand-writing an HTTP request, keeping request and response types aligned with the backend contract.

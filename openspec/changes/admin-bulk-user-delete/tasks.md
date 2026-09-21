@@ -1,7 +1,7 @@
 ## 1. First-time acceptance setup
 
-- [ ] 1.1 Confirm `stack: javascript` remains configured in `openspec/config.yaml` and treat the generated-only `acceptance-tests/.extracted/` directory as not yet scaffolded
-- [ ] 1.2 Create `acceptance-tests/package.json` as an independent Node project with `@cucumber/cucumber`, `glob`, `cheerio`, and `gherkin-lint`, plus `test`, `test:specs`, and `lint:specs` scripts
+- [x] 1.1 Confirm `stack: javascript` remains configured in `openspec/config.yaml` and treat the generated-only `acceptance-tests/.extracted/` directory as not yet scaffolded
+- [ ] 1.2 Create `acceptance-tests/package.json` as an independent Node project with `@cucumber/cucumber`, `@playwright/test`, `glob`, `cheerio`, and `gherkin-lint`, plus `test`, `test:specs`, and `lint:specs` scripts
 - [ ] 1.3 Copy the skill references to `acceptance-tests/extract-gherkin.cjs`, `acceptance-tests/cucumber.cjs`, `acceptance-tests/openspec-effective-paths.cjs`, and `acceptance-tests/.gherkin-lintrc` without modifying them
 - [ ] 1.4 Add `acceptance-tests/features/support/hooks.js` and `acceptance-tests/features/support/world.js` so one test command starts the application, provides isolated test state, and always shuts the application down
 - [ ] 1.5 Configure the cucumber-js default and source-of-truth profiles to generate HTML reports under `acceptance-tests/reports/`
