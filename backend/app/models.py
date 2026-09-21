@@ -70,6 +70,10 @@ class UsersPublic(SQLModel):
     count: int
 
 
+class UsersBulkDelete(SQLModel):
+    user_ids: list[uuid.UUID] = Field(min_length=1)
+
+
 # Shared properties
 class ItemBase(SQLModel):
     title: str = Field(min_length=1, max_length=255)

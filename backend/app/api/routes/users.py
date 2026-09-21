@@ -20,6 +20,7 @@ from app.models import (
     UserCreate,
     UserPublic,
     UserRegister,
+    UsersBulkDelete,
     UsersPublic,
     UserUpdate,
     UserUpdateMe,
@@ -157,6 +158,31 @@ def register_user(session: SessionDep, user_in: UserRegister) -> Any:
     user_create = UserCreate.model_validate(user_in)
     user = crud.create_user(session=session, user_create=user_create)
     return user
+
+
+@router.post(
+    "/bulk-delete",
+    dependencies=[Depends(get_current_active_superuser)],
+    response_model=Message,
+)
+def bulk_delete_users(
+    *, session: SessionDep, current_user: CurrentUser, body: UsersBulkDelete
+) -> Message:
+    target_ids = set(body.user_ids)
+    users = session.exec(select(User).where(col(User.id).in_(target_ids))).all()
+    found_ids = {user.id for user in users}
+
+    if found_ids != target_ids:
+        raise HTTPException(status_code=404, detail="User not found")
+    if current_user.id in target_ids:
+        raise HTTPException(
+            status_code=403, detail="Super users are not allowed to delete themselves"
+        )
+
+    session.exec(delete(Item).where(col(Item.owner_id).in_(target_ids)))
+    session.exec(delete(User).where(col(User.id).in_(target_ids)))
+    session.commit()
+    return Message(message="Users deleted successfully")
 
 
 @router.get("/{user_id}", response_model=UserPublic)

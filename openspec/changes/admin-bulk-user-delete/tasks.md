@@ -10,11 +10,11 @@
 
 ## 2. Backend contract and atomic deletion
 
-- [ ] 2.1 Add failing backend route tests for an empty request, a non-superuser, all-valid IDs, a nonexistent ID mixed with a valid ID, the current user's ID mixed with another ID, duplicate IDs, and deletion of owned Items
-- [ ] 2.2 Add the non-empty bulk user-ID request model in `backend/app/models.py` and verify its OpenAPI schema
-- [ ] 2.3 Add `POST /users/bulk-delete` before dynamic user-ID routes in `backend/app/api/routes/users.py`, protected by `get_current_active_superuser`
-- [ ] 2.4 Fetch and validate the normalized target set before mutation, rejecting missing users or the current user without pending deletes
-- [ ] 2.5 Delete target-owned Items and target users in the same session transaction with one commit, then make all focused backend tests pass
+- [x] 2.1 Add failing backend route tests for an empty request, a non-superuser, all-valid IDs, a nonexistent ID mixed with a valid ID, the current user's ID mixed with another ID, duplicate IDs, and deletion of owned Items
+- [x] 2.2 Add the non-empty bulk user-ID request model in `backend/app/models.py` and verify its OpenAPI schema
+- [x] 2.3 Add `POST /users/bulk-delete` before dynamic user-ID routes in `backend/app/api/routes/users.py`, protected by `get_current_active_superuser`
+- [x] 2.4 Fetch and validate the normalized target set before mutation, rejecting missing users or the current user without pending deletes
+- [x] 2.5 Delete target-owned Items and target users in the same session transaction with one commit, then make all focused backend tests pass
 
 ## 3. API acceptance steps
 
