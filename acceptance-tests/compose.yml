@@ -1,0 +1,10 @@
+services:
+  db:
+    ports: []
+
+  backend:
+    ports:
+      - "127.0.0.1:${ACCEPTANCE_PORT:?Variable not set}:8000"
+    environment:
+      FASTAPI_ENV: development
+      FRONTEND_HOST: "http://127.0.0.1:${ACCEPTANCE_PORT:?Variable not set}"
