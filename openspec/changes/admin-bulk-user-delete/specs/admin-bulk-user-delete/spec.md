@@ -1,149 +1,201 @@
 # admin-bulk-user-delete
 
+Superusers manage accounts from the admin Users page. This capability lets them
+select several users at once from the currently visible table page and delete
+them in a single atomic operation, while keeping the existing protection that a
+superuser can never delete their own account. See proposal.md for motivation.
+
 ## ADDED Requirements
 
-### Requirement: Admin users can select deletable users on the current page
+### Requirement: Admin users are selectable on the current table page
 
-The admin Users table MUST provide a checkbox for each displayed user and MUST prevent the current superuser from being selected as a delete target.
+The admin Users table MUST render a selection checkbox on every displayed user row, MUST disable the checkbox on the current user's row so the current user can never become a delete target, and MUST scope select-all to the users visible on the current table page.
 
-#### Scenario: Select an eligible user
+#### Scenario: Selecting an eligible user
 
 ```gherkin
 Given a superuser is viewing the admin Users table
 And an eligible user is displayed on the current page
 When the superuser selects that user's checkbox
-Then the user is marked as selected
-And the Delete User(s) action becomes enabled
+Then that user is marked as selected
+And the selected-user count is one
 ```
 
-#### Scenario: Current user cannot be selected
+#### Scenario: The current user's row cannot be selected
 
 ```gherkin
 Given a superuser is viewing the admin Users table
 And the current superuser is displayed on the current page
-Then the current user's checkbox is disabled
-And the current user is not included in the selected-user count
+When the superuser inspects the current user's row
+Then the current user's selection checkbox is disabled
+And the current user is excluded from the selected-user count
 ```
 
-#### Scenario: Select all is limited to the current page
+#### Scenario: Select all covers only the current page
 
 ```gherkin
 Given a superuser is viewing a paginated admin Users table
-And users are displayed on the current page
-When the superuser selects the table select-all checkbox
+And eligible users are displayed on the current page
+When the superuser selects the select-all checkbox
 Then every eligible user on the current page is selected
-And users on other pages are not selected
+And no user on another page is selected
 ```
 
-### Requirement: Admin users can initiate bulk deletion
+#### Scenario: Deselecting a user removes it from the selection
 
-The admin Users page MUST show a `Delete User(s)` action next to `Add User`, and the action MUST be disabled when no eligible users are selected. When confirmed, the confirmation dialog MUST remain open with the confirm button disabled and a spinning icon displayed until the dialog closes automatically upon receiving any response.
+```gherkin
+Given a superuser has selected two eligible users on the current page
+When the superuser clears one of those checkboxes
+Then the selected-user count is one
+And the remaining user stays selected
+```
 
-#### Scenario: Bulk action is disabled without a selection
+### Requirement: The bulk delete action is always visible and selection-gated
+
+The admin Users page MUST display a `Delete User(s)` action next to `Add User` at all times, and the action MUST be disabled whenever no eligible user is selected and enabled as soon as at least one eligible user is selected.
+
+#### Scenario: The action is disabled without a selection
 
 ```gherkin
 Given a superuser is viewing the admin Users page
-And no eligible users are selected
-Then the Delete User(s) action is visible next to Add User
+And no eligible user is selected
+When the superuser looks at the page actions
+Then the Delete User(s) action is displayed next to Add User
 And the Delete User(s) action is disabled
 ```
 
-#### Scenario: Bulk action opens a count-based confirmation
+#### Scenario: The action becomes enabled with a selection
+
+```gherkin
+Given a superuser is viewing the admin Users page
+When the superuser selects an eligible user
+Then the Delete User(s) action is enabled
+```
+
+### Requirement: Bulk deletion is confirmed before any data is removed
+
+Activating `Delete User(s)` MUST open a confirmation dialog that states how many users will be deleted and warns that the Items owned by those users are also permanently deleted. Cancelling the dialog MUST NOT send any delete request. After the superuser confirms, the dialog MUST stay open with its confirm control disabled and a spinner displayed, and MUST close automatically once a response is received.
+
+#### Scenario: Confirmation states the selected count and the Items warning
 
 ```gherkin
 Given a superuser has selected three eligible users on the current page
-When the superuser clicks Delete User(s)
+When the superuser activates Delete User(s)
 Then a confirmation dialog is displayed
 And the dialog states that three users will be deleted
-And the dialog warns that Items owned by those users will also be permanently deleted
+And the dialog warns that the Items owned by those users are permanently deleted
 ```
 
-#### Scenario: Confirming bulk deletion shows loading state and closes on response
+#### Scenario: Cancelling the confirmation deletes nothing
 
 ```gherkin
-Given the bulk-delete confirmation dialog is open
-When the superuser confirms bulk deletion
-Then the confirmation dialog remains open
-And the confirm button is disabled
-And a spinning icon is displayed within the confirm button
+Given a superuser has selected eligible users on the current page
+And the bulk delete confirmation dialog is displayed
+When the superuser cancels the dialog
+Then no bulk delete request is sent
+And the selected users are still displayed in the admin Users table
+```
+
+#### Scenario: Confirming shows a pending state until a response arrives
+
+```gherkin
+Given the bulk delete confirmation dialog is displayed for two selected users
+When the superuser confirms the deletion
+Then the confirmation dialog stays open
+And the confirm control is disabled
+And a spinner is displayed in the confirm control
 And the confirmation dialog closes automatically when a response is received
 ```
 
-### Requirement: Bulk deletion is atomic and authorized
+### Requirement: Bulk deletion is superuser-only and atomic
 
-The system MUST provide a superuser-only bulk-delete operation that accepts selected user IDs, rejects an empty or duplicate target list, deletes all valid targets and their owned Items in one transaction, and rejects the entire operation without deletion when any target is invalid or is the current user. When a bulk-delete request is rejected, the failure notification MUST include the specific reason the request failed so the user understands why the operation was blocked.
+The system MUST expose a bulk delete operation that accepts a list of user identifiers, is restricted to superusers, and validates the whole target list before mutating any data. The operation MUST reject an empty list, a list containing duplicate identifiers, a list containing an unknown identifier, and a list containing the requesting superuser's own identifier. A rejected operation MUST delete no user and no Item. An accepted operation MUST delete every targeted user together with the Items they own in a single transaction.
 
-#### Scenario: Bulk deletion rejects an empty target list
-
-```gherkin
-Given an authenticated superuser
-When the superuser submits a bulk-delete request with no user IDs
-Then the operation is rejected
-And no users or Items are deleted
-And a failure notification is displayed
-And the failure notification explains that no users were selected for deletion
-```
-
-#### Scenario: Bulk deletion rejects duplicate target IDs
+#### Scenario: A superuser deletes the selected users
 
 ```gherkin
 Given an authenticated superuser
-When the superuser submits a bulk-delete request containing the same user ID more than once
-Then the operation is rejected
-And no users or Items are deleted
-And a failure notification is displayed
-And the failure notification explains that duplicate users were included in the request
-```
-
-#### Scenario: Superuser deletes selected users successfully
-
-```gherkin
-Given an authenticated superuser has selected two other users
-When the superuser confirms bulk deletion
-Then the system deletes both users atomically
-And the system deletes all Items owned by those users
+And two other users exist, each owning Items
+When the superuser submits a bulk delete request for both users
+Then both users are deleted
+And the Items owned by both users are deleted
 And the admin Users table no longer displays those users
-And a success notification is displayed
 ```
 
-#### Scenario: Bulk deletion rejects the current user
+#### Scenario: A non-superuser cannot bulk delete
 
 ```gherkin
-Given an authenticated superuser submits a bulk-delete request containing their own user ID
-When the bulk-delete operation is processed
-Then the operation is rejected
-And no users or Items from the request are deleted
-And a failure notification is displayed
-And the failure notification explains that the current user cannot be deleted
+Given an authenticated user who is not a superuser
+When the user submits a bulk delete request
+Then the request is rejected as unauthorized
+And no user is deleted
+And no Item is deleted
 ```
 
-#### Scenario: Bulk deletion rejects an invalid target atomically
+#### Scenario: An empty target list is rejected
 
 ```gherkin
-Given an authenticated superuser submits a bulk-delete request containing one nonexistent user ID and one existing user ID
-When the bulk-delete operation is processed
-Then the operation is rejected
+Given an authenticated superuser
+When the superuser submits a bulk delete request with no user identifiers
+Then the request is rejected
+And the rejection reason states that no user was selected for deletion
+And no user is deleted
+```
+
+#### Scenario: A duplicated target identifier is rejected
+
+```gherkin
+Given an authenticated superuser
+When the superuser submits a bulk delete request containing the same user identifier twice
+Then the request is rejected
+And the rejection reason states that the request contains duplicate users
+And no user is deleted
+```
+
+#### Scenario: An unknown target identifier rejects the whole request
+
+```gherkin
+Given an authenticated superuser
+And an existing user who owns Items
+When the superuser submits a bulk delete request for that user and an unknown user identifier
+Then the request is rejected
+And the rejection reason states that a user was not found
 And the existing user is not deleted
-And the existing user's Items are not deleted
-And a failure notification is displayed
-And the failure notification explains that user ID is not found
+And the Items owned by the existing user are not deleted
 ```
 
-#### Scenario: Non-superuser cannot bulk delete
+#### Scenario: Targeting the current user rejects the whole request
 
 ```gherkin
-Given an authenticated non-superuser
-When the user submits a bulk-delete request
-Then the operation is rejected as unauthorized
-And no users or Items are deleted
+Given an authenticated superuser
+And an existing user who owns Items
+When the superuser submits a bulk delete request for that user and their own identifier
+Then the request is rejected
+And the rejection reason states that a superuser cannot delete themselves
+And the existing user is not deleted
+And the Items owned by the existing user are not deleted
 ```
 
-#### Scenario: Cancelling confirmation does not delete users
+### Requirement: The outcome of a bulk deletion is reported to the superuser
+
+The admin Users page MUST display a success notification when a bulk deletion succeeds and MUST refresh the users table so the deleted users disappear. When a bulk deletion is rejected, the page MUST display a failure notification carrying the rejection reason returned by the system, and the table MUST keep showing the still-existing users.
+
+#### Scenario: Success is reported
 
 ```gherkin
-Given a superuser has selected one or more eligible users
-And the bulk-delete confirmation dialog is open
-When the superuser cancels the dialog
-Then the selected users remain in the table
-And no users or Items are deleted
+Given a superuser has confirmed the bulk deletion of two selected users
+When the deletion succeeds
+Then a success notification is displayed
+And the admin Users table no longer displays the deleted users
+And no user remains selected
+```
+
+#### Scenario: Failure is reported with its reason
+
+```gherkin
+Given a superuser has confirmed the bulk deletion of two selected users
+When the deletion is rejected with a reason
+Then a failure notification is displayed
+And the failure notification contains the rejection reason
+And the admin Users table still displays both users
 ```
