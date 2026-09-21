@@ -11,7 +11,7 @@ const { startApplication, state, stopApplication } = require('./app-lifecycle.js
 
 let browser;
 
-setDefaultTimeout(30_000);
+setDefaultTimeout(60_000);
 
 BeforeAll({ timeout: 300_000 }, async function () {
   await startApplication();

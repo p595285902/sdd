@@ -2,6 +2,7 @@ import type { ColumnDef } from "@tanstack/react-table"
 
 import type { UserPublic } from "@/client"
 import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
 import { cn } from "@/lib/utils"
 import { UserActionsMenu } from "./UserActionsMenu"
 
@@ -10,6 +11,31 @@ export type UserTableData = UserPublic & {
 }
 
 export const columns: ColumnDef<UserTableData>[] = [
+  {
+    id: "select",
+    header: ({ table }) => (
+      <Checkbox
+        aria-label="Select all users on current page"
+        checked={
+          table.getIsAllPageRowsSelected() ||
+          (table.getIsSomePageRowsSelected() && "indeterminate")
+        }
+        disabled={!table.getRowModel().rows.some((row) => row.getCanSelect())}
+        onCheckedChange={(checked) =>
+          table.toggleAllPageRowsSelected(checked === true)
+        }
+      />
+    ),
+    cell: ({ row }) => (
+      <Checkbox
+        aria-label={`Select ${row.original.email}`}
+        checked={row.getIsSelected()}
+        disabled={!row.getCanSelect()}
+        onCheckedChange={(checked) => row.toggleSelected(checked === true)}
+      />
+    ),
+    enableHiding: false,
+  },
   {
     accessorKey: "full_name",
     header: "Full Name",

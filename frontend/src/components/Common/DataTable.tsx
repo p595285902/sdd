@@ -3,6 +3,9 @@ import {
   flexRender,
   getCoreRowModel,
   getPaginationRowModel,
+  type OnChangeFn,
+  type Row,
+  type RowSelectionState,
   useReactTable,
 } from "@tanstack/react-table"
 import {
@@ -32,15 +35,27 @@ import {
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[]
   data: TData[]
+  rowSelection?: RowSelectionState
+  onRowSelectionChange?: OnChangeFn<RowSelectionState>
+  getRowId?: (row: TData, index: number, parent?: Row<TData>) => string
+  enableRowSelection?: boolean | ((row: Row<TData>) => boolean)
 }
 
 export function DataTable<TData, TValue>({
   columns,
   data,
+  rowSelection,
+  onRowSelectionChange,
+  getRowId,
+  enableRowSelection,
 }: DataTableProps<TData, TValue>) {
   const table = useReactTable({
     data,
     columns,
+    state: rowSelection === undefined ? undefined : { rowSelection },
+    onRowSelectionChange,
+    getRowId,
+    enableRowSelection,
     getCoreRowModel: getCoreRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
   })
