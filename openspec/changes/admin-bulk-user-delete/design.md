@@ -30,7 +30,7 @@ Alternative considered: issue one existing delete request per selected user. Thi
 
 ### Validate the complete target set before mutation
 
-Normalize duplicate IDs, reject an empty request at model validation, fetch all target users in one query, and compare the returned ID set with the requested set. Reject the request if any ID is missing or if the current user's ID is present. Only after all checks pass will the route delete Items owned by the targets, delete the users, and commit once.
+Reject duplicate IDs, reject an empty request at model validation, fetch all target users in one query, and compare the returned ID set with the requested set. Reject the request if any ID is missing or if the current user's ID is present. Only after all checks pass will the route delete Items owned by the targets, delete the users, and commit once.
 
 The existing explicit Item deletion behavior will be applied to the full target set before deleting users. Both statements and the single commit use the same session transaction; validation errors occur before either statement. Unexpected database errors are left uncommitted so session cleanup can roll back the transaction.
 
