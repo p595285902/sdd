@@ -27,8 +27,8 @@
 
 ## 4. Generated frontend client
 
-- [ ] 4.1 Regenerate the backend OpenAPI document and run the existing `frontend` client-generation command
-- [ ] 4.2 Verify the generated request type and `UsersService` bulk-delete method match the non-empty UUID-list contract, with no hand-written client edits
+- [x] 4.1 Regenerate the backend OpenAPI document and run the existing `frontend` client-generation command
+- [x] 4.2 Verify the generated request type and `UsersService` bulk-delete method match the non-empty UUID-list contract, with no hand-written client edits
 
 ## 5. Admin selection behavior
 

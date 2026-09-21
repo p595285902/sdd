@@ -301,6 +301,16 @@ export type UserUpdateMe = {
 };
 
 /**
+ * UsersBulkDelete
+ */
+export type UsersBulkDelete = {
+    /**
+     * User Ids
+     */
+    user_ids: Array<string>;
+};
+
+/**
  * UsersPublic
  */
 export type UsersPublic = {
@@ -633,6 +643,31 @@ export type usersRegisterUserResponses = {
 };
 
 export type usersRegisterUserResponse = usersRegisterUserResponses[keyof usersRegisterUserResponses];
+
+export type usersBulkDeleteUsersData = {
+    body: UsersBulkDelete;
+    path?: never;
+    query?: never;
+    url: '/api/v1/users/bulk-delete';
+};
+
+export type usersBulkDeleteUsersErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type usersBulkDeleteUsersError = usersBulkDeleteUsersErrors[keyof usersBulkDeleteUsersErrors];
+
+export type usersBulkDeleteUsersResponses = {
+    /**
+     * Successful Response
+     */
+    200: Message;
+};
+
+export type usersBulkDeleteUsersResponse = usersBulkDeleteUsersResponses[keyof usersBulkDeleteUsersResponses];
 
 export type usersDeleteUserData = {
     body?: never;
