@@ -18,3 +18,20 @@ context: |
 #       - Always include a "Non-goals" section
 #     tasks:
 #       - Break tasks into chunks of max 2 hours
+rules:
+     specs:
+          - >-
+               Specs are Markdown: specs/<capability>/spec.md, with prose anywhere and 
+               all executable Gherkin inside column-o '''gherkin fences. 
+               Extraction is line-preserving, so reported lint/test line numbers map 1:1 to the spec.md.
+          - |-
+               Before considering a spec complete, extract the Gherkin and 
+               lint it with the gherkin-lint npm module, fixing all reported issues:
+                    
+                    node .claude/skills/acceptance-test-authoring/references/extract-gherkin.cjs openspec acceptance-tests/ extracted \ 
+                         && npx --yes gherkin-lint --config .claude/skills/acceptance-test-authoring/references/gherkin-lintrc.json acceptance-tests/.extracted
+     
+               (or 'npm --prefix acceptance-tests run lint:specs" once the runner project exists). Pass acceptance-tests/.extracted as a DIRECTORY argument, never a quoted glob - globs silently match nothing through the dot-directory - and always pass --config: gherkin-lint has no default rules. The extraction output is gitignored and written via Bash, which the spec/code zone guard does not intercept (it guards file edits only)
+               - running this in a specs-zone session is legal by design; do not "fix" it. Use ctx7 for documentation on gherkin-line.
+     tasks:
+          - Use ctx7 for any documentation on npm modules
