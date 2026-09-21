@@ -149,6 +149,24 @@ Then the bulk deletion is rejected
 And neither user is deleted
 ```
 
+#### Scenario: Duplicate targets is rejected
+
+```gherkin
+Given a superuser submits the same existing eligible user ID more than once
+When the bulk deletion is processed
+Then the bulk deletion is rejected
+And neither user is deleted
+```
+
+#### Scenario: Empty target set is rejected
+
+```gherkin
+Given a superuser submits an empty user ID set for bulk deletion
+When the bulk deletion is processed
+Then the bulk deletion is rejected
+And no users are deleted
+```
+
 ### Requirement: Deleting users removes their owned Items
 The system MUST permanently delete Items owned by every user deleted through the bulk-delete endpoint.
 
