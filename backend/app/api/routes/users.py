@@ -169,6 +169,11 @@ def bulk_delete_users(
     *, session: SessionDep, current_user: CurrentUser, body: UsersBulkDelete
 ) -> Message:
     target_ids = set(body.user_ids)
+    if len(target_ids) != len(body.user_ids):
+        raise HTTPException(
+            status_code=422, detail="Duplicate user IDs are not allowed"
+        )
+
     users = session.exec(select(User).where(col(User.id).in_(target_ids))).all()
     found_ids = {user.id for user in users}
 

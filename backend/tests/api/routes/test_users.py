@@ -601,7 +601,7 @@ def test_bulk_delete_users_rejects_current_user_atomically(
     assert db.get(User, other_user.id) is not None
 
 
-def test_bulk_delete_users_normalizes_duplicate_ids(
+def test_bulk_delete_users_rejects_duplicate_ids(
     client: TestClient, superuser_token_headers: dict[str, str], db: Session
 ) -> None:
     user = create_random_user(db)
@@ -612,9 +612,9 @@ def test_bulk_delete_users_normalizes_duplicate_ids(
         json={"user_ids": [str(user.id), str(user.id)]},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 422
     remaining_user = db.exec(select(User).where(User.id == user.id)).first()
-    assert remaining_user is None
+    assert remaining_user is not None
 
 
 def test_bulk_delete_users_deletes_owned_items(

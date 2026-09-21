@@ -234,15 +234,29 @@ Then('the existing user is not deleted', async function () {
 
 Given('a superuser submits their own ID and another existing user ID', async function () {
   this.requestToken = await this.apiClient.authenticateSuperuser();
-  const currentUser = await this.apiClient.currentUser();
+  this.currentUser = await this.apiClient.currentUser();
   this.users = [await this.apiClient.createUser()];
-  this.requestedIds = [currentUser.id, this.users[0].id];
+  this.requestedIds = [this.currentUser.id, this.users[0].id];
+});
+
+Given('a superuser submits the same existing eligible user ID more than once', async function () {
+  this.requestToken = await this.apiClient.authenticateSuperuser();
+  this.users = [await this.apiClient.createUser()];
+  this.requestedIds = [this.users[0].id, this.users[0].id];
+});
+
+Given('a superuser submits an empty user ID set for bulk deletion', async function () {
+  this.requestToken = await this.apiClient.authenticateSuperuser();
+  this.users = [];
+  this.requestedIds = [];
 });
 
 Then('neither user is deleted', async function () {
-  const currentUser = await this.apiClient.currentUser();
-  assert.equal(currentUser.id, this.requestedIds[0]);
-  assert.equal(await this.apiClient.userExists(this.users[0].id), true);
+  if (this.currentUser) {
+    const currentUser = await this.apiClient.currentUser();
+    assert.equal(currentUser.id, this.currentUser.id);
+  }
+  for (const user of this.users) assert.equal(await this.apiClient.userExists(user.id), true);
 });
 
 Given('selected users own Items', async function () {

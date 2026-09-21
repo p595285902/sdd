@@ -19,7 +19,7 @@
 ## 3. API acceptance steps
 
 - [x] 3.1 Implement authentication-context steps for authenticated superusers and non-superusers — red → green → commit
-- [ ] 3.2 Implement request steps for eligible, missing, current-user, duplicate, and empty user-ID sets — red → green → commit
+- [x] 3.2 Implement request steps for eligible, missing, current-user, duplicate, and empty user-ID sets — red → green → commit
 - [x] 3.3 Implement authorization and bulk-processing action steps through the real HTTP endpoint — red → green → commit
 - [x] 3.4 Implement rejection and unchanged-user assertions proving invalid requests delete no users — red → green → commit
 - [x] 3.5 Implement successful user-deletion assertions for every requested unique ID — red → green → commit
