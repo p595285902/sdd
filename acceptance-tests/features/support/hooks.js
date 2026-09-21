@@ -15,7 +15,10 @@ setDefaultTimeout(60_000);
 
 BeforeAll({ timeout: 300_000 }, async function () {
   await startApplication();
-  browser = await chromium.launch();
+  browser = await chromium.launch({
+    headless: !process.env.PWDEBUG,
+    slowMo: process.env.PWDEBUG ? 1000 : 0
+  });
 });
 
 Before(async function () {
