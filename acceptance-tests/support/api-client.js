@@ -1,4 +1,29 @@
 const { randomUUID } = require('node:crypto');
+const { runBackendPython } = require('../features/support/app-lifecycle.js');
+
+const seedMessagesScript = `
+import sys
+import uuid
+from datetime import timedelta
+from sqlmodel import Session
+from app.core.db import engine
+from app.models import DevelopmentChat, DevelopmentMessage
+
+chat_id = uuid.UUID(sys.argv[1])
+count = int(sys.argv[2])
+with Session(engine) as session:
+  chat = session.get(DevelopmentChat, chat_id)
+  if chat is None:
+    raise RuntimeError("Development Chat not found")
+  for index in range(1, count + 1):
+    session.add(DevelopmentMessage(
+      role="assistant",
+      content=f"Seeded message {index}",
+      chat_id=chat.id,
+      created_at=chat.created_at + timedelta(seconds=index),
+    ))
+  session.commit()
+`;
 
 class ApiClient {
   constructor(world) {
@@ -120,6 +145,10 @@ class ApiClient {
       throw new Error(`Unable to list Development Messages: ${response.status()}`);
     }
     return response.json();
+  }
+
+  async seedDevelopmentMessages(chatId, count) {
+    await runBackendPython(seedMessagesScript, chatId, String(count));
   }
 }
 

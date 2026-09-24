@@ -167,3 +167,40 @@ Then('the request is rejected without revealing the chat', async function () {
   assert.equal(this.missingResponse.status(), 404);
   assert.deepEqual(await this.response.json(), await this.missingResponse.json());
 });
+
+Given(
+  'a Development Chat contains more messages than one message page',
+  async function () {
+    this.userToken = await this.apiClient.authenticateSuperuser();
+    this.firstMessage = `Pagination first message ${Date.now()}`;
+    this.developmentChat = await this.apiClient.createDevelopmentChat(
+      this.userToken,
+      this.firstMessage,
+    );
+    this.seededMessageCount = 50;
+    await this.apiClient.seedDevelopmentMessages(
+      this.developmentChat.id,
+      this.seededMessageCount,
+    );
+    await this.developPage.open(this.userToken);
+  },
+);
+
+When(
+  'the user requests messages older than the oldest displayed message',
+  async function () {
+    await this.developPage.loadOlderMessages();
+  },
+);
+
+Then(
+  'the next older message page is returned in conversation order',
+  async function () {
+    const contents = await this.developPage.visibleMessageContents();
+    assert.equal(contents.length, this.seededMessageCount + 1);
+    assert.equal(contents[0], this.firstMessage);
+    for (let index = 1; index <= this.seededMessageCount; index += 1) {
+      assert.equal(contents[index], `Seeded message ${index}`);
+    }
+  },
+);

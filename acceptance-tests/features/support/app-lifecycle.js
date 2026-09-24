@@ -108,4 +108,21 @@ async function stopApplication() {
   );
 }
 
-module.exports = { startApplication, state, stopApplication };
+async function runBackendPython(code, ...args) {
+  await run(
+    'docker',
+    composeArgs(
+      state.projectName,
+      'exec',
+      '--no-TTY',
+      'backend',
+      'python',
+      '-c',
+      code,
+      ...args,
+    ),
+    state.env,
+  );
+}
+
+module.exports = { runBackendPython, startApplication, state, stopApplication };

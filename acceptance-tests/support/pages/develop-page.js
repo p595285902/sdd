@@ -69,6 +69,18 @@ class DevelopPage {
     await this.page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(this.page.getByRole('heading', { name: title })).toBeVisible();
   }
+
+  async loadOlderMessages() {
+    await this.page.getByRole('button', { name: 'Load older messages' }).click();
+  }
+
+  async visibleMessageContents() {
+    return this.page.locator('article').evaluateAll((messages) =>
+      messages.map((message) =>
+        message.textContent.replace(/^(user|assistant): /, ''),
+      ),
+    );
+  }
 }
 
 module.exports = { DevelopPage };
