@@ -1,0 +1,3 @@
+# Dedicated atomic bulk-delete endpoint for Users
+
+The admin page needs to delete multiple selected Users at once. Instead of having the frontend fire one `DELETE /users/{id}` request per selected User, we're adding a single new backend endpoint that accepts a list of User IDs and deletes them (and their cascaded Items) in one atomic, all-or-nothing transaction. We chose this over N client-side calls because per-row calls can partially fail (leaving the table in a mixed state that's hard to explain to the admin) and don't give the backend a single point to enforce batch-level invariants (e.g. rejecting the current user's own ID). The trade-off is a new endpoint to maintain, but the atomicity and simpler frontend error handling are worth it.

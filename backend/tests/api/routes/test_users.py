@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 from app import crud
 from app.core.config import settings
 from app.core.security import verify_password
-from app.models import User, UserCreate
+from app.models import Item, ItemCreate, User, UserCreate
 from tests.utils.user import create_random_user
 from tests.utils.utils import random_email, random_lower_string
 
@@ -519,3 +519,127 @@ def test_delete_user_without_privileges(
     )
     assert r.status_code == 403
     assert r.json()["detail"] == "The user doesn't have enough privileges"
+
+
+def test_bulk_delete_users_rejects_empty_request(
+    client: TestClient, superuser_token_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        f"{settings.API_V1_STR}/users/bulk-delete",
+        headers=superuser_token_headers,
+        json={"user_ids": []},
+    )
+
+    assert response.status_code == 422
+
+
+def test_bulk_delete_users_requires_superuser(
+    client: TestClient, normal_user_token_headers: dict[str, str], db: Session
+) -> None:
+    user = create_random_user(db)
+
+    response = client.post(
+        f"{settings.API_V1_STR}/users/bulk-delete",
+        headers=normal_user_token_headers,
+        json={"user_ids": [str(user.id)]},
+    )
+
+    assert response.status_code == 403
+    assert db.get(User, user.id) is not None
+
+
+def test_bulk_delete_users_deletes_all_valid_targets(
+    client: TestClient, superuser_token_headers: dict[str, str], db: Session
+) -> None:
+    users = [create_random_user(db), create_random_user(db)]
+    user_ids = [user.id for user in users]
+
+    response = client.post(
+        f"{settings.API_V1_STR}/users/bulk-delete",
+        headers=superuser_token_headers,
+        json={"user_ids": [str(user_id) for user_id in user_ids]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "Users deleted successfully"}
+    remaining_users = db.exec(select(User).where(User.id.in_(user_ids))).all()
+    assert remaining_users == []
+
+
+def test_bulk_delete_users_rejects_missing_target_atomically(
+    client: TestClient, superuser_token_headers: dict[str, str], db: Session
+) -> None:
+    user = create_random_user(db)
+
+    response = client.post(
+        f"{settings.API_V1_STR}/users/bulk-delete",
+        headers=superuser_token_headers,
+        json={"user_ids": [str(user.id), str(uuid.uuid4())]},
+    )
+
+    assert response.status_code == 404
+    assert db.get(User, user.id) is not None
+
+
+def test_bulk_delete_users_rejects_current_user_atomically(
+    client: TestClient, superuser_token_headers: dict[str, str], db: Session
+) -> None:
+    current_user = crud.get_user_by_email(
+        session=db, email=settings.FIRST_SUPERUSER
+    )
+    assert current_user
+    other_user = create_random_user(db)
+
+    response = client.post(
+        f"{settings.API_V1_STR}/users/bulk-delete",
+        headers=superuser_token_headers,
+        json={"user_ids": [str(current_user.id), str(other_user.id)]},
+    )
+
+    assert response.status_code == 403
+    assert db.get(User, current_user.id) is not None
+    assert db.get(User, other_user.id) is not None
+
+
+def test_bulk_delete_users_rejects_duplicate_ids(
+    client: TestClient, superuser_token_headers: dict[str, str], db: Session
+) -> None:
+    user = create_random_user(db)
+
+    response = client.post(
+        f"{settings.API_V1_STR}/users/bulk-delete",
+        headers=superuser_token_headers,
+        json={"user_ids": [str(user.id), str(user.id)]},
+    )
+
+    assert response.status_code == 422
+    remaining_user = db.exec(select(User).where(User.id == user.id)).first()
+    assert remaining_user is not None
+
+
+def test_bulk_delete_users_deletes_owned_items(
+    client: TestClient, superuser_token_headers: dict[str, str], db: Session
+) -> None:
+    users = [create_random_user(db), create_random_user(db)]
+    items = [
+        crud.create_item(
+            session=db,
+            item_in=ItemCreate(title=f"item-{index}"),
+            owner_id=user.id,
+        )
+        for index, user in enumerate(users)
+    ]
+    user_ids = [user.id for user in users]
+    item_ids = [item.id for item in items]
+
+    response = client.post(
+        f"{settings.API_V1_STR}/users/bulk-delete",
+        headers=superuser_token_headers,
+        json={"user_ids": [str(user_id) for user_id in user_ids]},
+    )
+
+    assert response.status_code == 200
+    remaining_users = db.exec(select(User).where(User.id.in_(user_ids))).all()
+    remaining_items = db.exec(select(Item).where(Item.id.in_(item_ids))).all()
+    assert remaining_users == []
+    assert remaining_items == []

@@ -1,0 +1,1 @@
+require('../features/support/hooks.js');

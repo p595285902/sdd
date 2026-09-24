@@ -17,6 +17,149 @@ test("Add User button is visible", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Add User" })).toBeVisible()
 })
 
+test.describe("Admin bulk user deletion", () => {
+  test("selects eligible users but not the current user", async ({ page }) => {
+    const firstUser = await createUser({
+      email: randomEmail(),
+      password: randomPassword(),
+    })
+    const secondUser = await createUser({
+      email: randomEmail(),
+      password: randomPassword(),
+    })
+
+    await page.goto("/admin")
+
+    const deleteButton = page.getByRole("button", { name: "Delete User(s)" })
+    await expect(deleteButton).toBeDisabled()
+    await page.getByLabel(`Select ${firstUser.email}`).check()
+    await page.getByLabel(`Select ${secondUser.email}`).check()
+
+    await expect(page.getByLabel(`Select ${firstUser.email}`)).toBeChecked()
+    await expect(page.getByLabel(`Select ${secondUser.email}`)).toBeChecked()
+    await expect(page.getByLabel(`Select ${firstSuperuser}`)).toBeDisabled()
+    await expect(deleteButton).toBeEnabled()
+  })
+
+  test("select all is limited to the visible page and becomes indeterminate", async ({
+    page,
+  }) => {
+    await Promise.all(
+      Array.from({ length: 10 }, () =>
+        createUser({ email: randomEmail(), password: randomPassword() }),
+      ),
+    )
+
+    await page.goto("/admin")
+    await page.getByRole("combobox").click()
+    await page.getByRole("option", { name: "5", exact: true }).click()
+
+    const selectPage = page.getByLabel("Select all users on current page")
+    await selectPage.check()
+    const rowCheckboxes = page.getByRole("checkbox", {
+      name: /^Select (?!all users)/,
+    })
+    await expect(rowCheckboxes).toHaveCount(5)
+    for (let index = 0; index < 5; index += 1) {
+      await expect(rowCheckboxes.nth(index)).toBeChecked()
+    }
+
+    await page.getByRole("button", { name: "Go to next page" }).click()
+    for (const checkbox of await rowCheckboxes.all()) {
+      await expect(checkbox).not.toBeChecked()
+    }
+
+    await page.getByRole("button", { name: "Go to previous page" }).click()
+    await rowCheckboxes.first().uncheck()
+    await expect(selectPage).toHaveAttribute("data-state", "indeterminate")
+  })
+
+  test("confirmation describes count and permanent Item deletion", async ({
+    page,
+  }) => {
+    const users = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        createUser({ email: randomEmail(), password: randomPassword() }),
+      ),
+    )
+    await page.goto("/admin")
+    for (const user of users)
+      await page.getByLabel(`Select ${user.email}`).check()
+
+    await page.getByRole("button", { name: "Delete User(s)" }).click()
+
+    const dialog = page.getByRole("dialog")
+    await expect(dialog).toContainText("3 users")
+    await expect(dialog).toContainText("Items")
+    await expect(dialog).toContainText("permanently deleted")
+  })
+
+  test("prevents duplicate submission while pending", async ({ page }) => {
+    const user = await createUser({
+      email: randomEmail(),
+      password: randomPassword(),
+    })
+    let releaseRequest: (() => void) | undefined
+    await page.route("**/api/v1/users/bulk-delete", async (route) => {
+      await new Promise<void>((resolve) => {
+        releaseRequest = resolve
+      })
+      await route.fulfill({ status: 200, json: { message: "ok" } })
+    })
+    await page.goto("/admin")
+    await page.getByLabel(`Select ${user.email}`).check()
+    await page.getByRole("button", { name: "Delete User(s)" }).click()
+
+    const confirmButton = page.getByRole("button", { name: "Delete users" })
+    await confirmButton.click()
+    await expect(confirmButton).toBeDisabled()
+    await expect(confirmButton.locator("svg.animate-spin")).toBeVisible()
+
+    releaseRequest?.()
+    await expect(page.getByRole("dialog")).not.toBeVisible()
+  })
+
+  test("reports success, removes rows, and clears selection", async ({
+    page,
+  }) => {
+    const user = await createUser({
+      email: randomEmail(),
+      password: randomPassword(),
+    })
+    await page.goto("/admin")
+    await page.getByLabel(`Select ${user.email}`).check()
+    await page.getByRole("button", { name: "Delete User(s)" }).click()
+    await page.getByRole("button", { name: "Delete users" }).click()
+
+    await expect(page.getByText("Users deleted successfully")).toBeVisible()
+    await expect(page.getByRole("dialog")).not.toBeVisible()
+    await expect(
+      page.getByRole("row").filter({ hasText: user.email }),
+    ).not.toBeVisible()
+    await expect(
+      page.getByRole("button", { name: "Delete User(s)" }),
+    ).toBeDisabled()
+  })
+
+  test("reports rejection and closes the dialog", async ({ page }) => {
+    const user = await createUser({
+      email: randomEmail(),
+      password: randomPassword(),
+    })
+    await page.route("**/api/v1/users/bulk-delete", (route) =>
+      route.fulfill({ status: 404, json: { detail: "User not found" } }),
+    )
+    await page.goto("/admin")
+    await page.getByLabel(`Select ${user.email}`).check()
+    await page.getByRole("button", { name: "Delete User(s)" }).click()
+    await page.getByRole("button", { name: "Delete users" }).click()
+
+    await expect(page.getByText("Something went wrong!")).toBeVisible()
+    await expect(page.getByText("User not found")).toBeVisible()
+    await expect(page.getByRole("dialog")).not.toBeVisible()
+  })
+})
+
 test.describe("Admin user management", () => {
   test("Create a new user successfully", async ({ page }) => {
     await page.goto("/admin")
