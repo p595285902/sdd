@@ -1,5 +1,6 @@
 const { Given, Then, When } = require('@cucumber/cucumber');
 const assert = require('node:assert/strict');
+const { randomUUID } = require('node:crypto');
 
 Given('an authenticated user is viewing the application', async function () {
   this.userToken = await this.apiClient.authenticateSuperuser();
@@ -123,4 +124,46 @@ Then('the new title is stored without changing the chat activity order', async f
     afterRename.data.map((chat) => chat.id),
     this.chatOrderBeforeRename,
   );
+});
+
+Given('two users own separate Development Chats', async function () {
+  await this.apiClient.authenticateSuperuser();
+  this.developmentUsers = [
+    await this.apiClient.createUser(),
+    await this.apiClient.createUser(),
+  ];
+  this.developmentTokens = await Promise.all(
+    this.developmentUsers.map((user) =>
+      this.apiClient.authenticate(user.email, user.password),
+    ),
+  );
+  this.developmentChats = await Promise.all([
+    this.apiClient.createDevelopmentChat(
+      this.developmentTokens[0],
+      'First private chat',
+    ),
+    this.apiClient.createDevelopmentChat(
+      this.developmentTokens[1],
+      'Second private chat',
+    ),
+  ]);
+});
+
+When("one user requests the other user's Development Chat", async function () {
+  this.response = await this.apiClient.request(
+    this.developmentTokens[0],
+    'get',
+    `/api/v1/develop/chats/${this.developmentChats[1].id}`,
+  );
+  this.missingResponse = await this.apiClient.request(
+    this.developmentTokens[0],
+    'get',
+    `/api/v1/develop/chats/${randomUUID()}`,
+  );
+});
+
+Then('the request is rejected without revealing the chat', async function () {
+  assert.equal(this.response.status(), 404);
+  assert.equal(this.missingResponse.status(), 404);
+  assert.deepEqual(await this.response.json(), await this.missingResponse.json());
 });
