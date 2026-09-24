@@ -55,6 +55,20 @@ class DevelopPage {
       .getByRole('button')
       .allTextContents();
   }
+
+  async selectChat(title) {
+    await this.page
+      .getByRole('navigation', { name: 'Development Chats' })
+      .getByRole('button', { name: title, exact: true })
+      .click();
+  }
+
+  async renameSelectedChat(title) {
+    await this.page.getByRole('button', { name: 'Rename Development Chat' }).click();
+    await this.page.getByLabel('Development Chat title').fill(title);
+    await this.page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(this.page.getByRole('heading', { name: title })).toBeVisible();
+  }
 }
 
 module.exports = { DevelopPage };

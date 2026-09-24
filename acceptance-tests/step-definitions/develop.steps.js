@@ -90,3 +90,37 @@ Then('the most recently active Development Chat appears first', function () {
     this.developmentChats.at(-1).title,
   );
 });
+
+Given('an authenticated user owns a Development Chat', async function () {
+  this.userToken = await this.apiClient.authenticateSuperuser();
+  this.developmentChat = await this.apiClient.createDevelopmentChat(
+    this.userToken,
+    `Rename target ${Date.now()}`,
+  );
+  await this.apiClient.createDevelopmentChat(
+    this.userToken,
+    `Newer comparison ${Date.now()}`,
+  );
+  const beforeRename = await this.apiClient.listDevelopmentChats(this.userToken);
+  this.chatOrderBeforeRename = beforeRename.data.map((chat) => chat.id);
+  await this.developPage.open(this.userToken);
+  await this.developPage.selectChat(this.developmentChat.title);
+});
+
+When('the user renames the Development Chat with a nonempty title', async function () {
+  this.renamedTitle = `Renamed chat ${Date.now()}`;
+  await this.developPage.renameSelectedChat(this.renamedTitle);
+});
+
+Then('the new title is stored without changing the chat activity order', async function () {
+  const afterRename = await this.apiClient.listDevelopmentChats(this.userToken);
+  const renamedChat = afterRename.data.find(
+    (chat) => chat.id === this.developmentChat.id,
+  );
+  assert.equal(renamedChat.title, this.renamedTitle);
+  assert.equal(renamedChat.updated_at, this.developmentChat.updated_at);
+  assert.deepEqual(
+    afterRename.data.map((chat) => chat.id),
+    this.chatOrderBeforeRename,
+  );
+});
