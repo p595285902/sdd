@@ -31,7 +31,7 @@
 
 ## 5. Completion
 
-- [ ] 5.1 Run backend tests and static checks; fix only Develop chat regressions
-- [ ] 5.2 Run the frontend build, formatting checks, and focused frontend tests
-- [ ] 5.3 Run `npm --prefix acceptance-tests run lint:specs`
+- [x] 5.1 Run backend tests and static checks; fix only Develop chat regressions
+- [x] 5.2 Run the frontend build, formatting checks, and focused frontend tests
+- [x] 5.3 Run `npm --prefix acceptance-tests run lint:specs`
 - [ ] 5.4 Run `npm --prefix acceptance-tests test`; every scenario passes with zero pending or undefined steps and the HTML report is generated

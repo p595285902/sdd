@@ -112,13 +112,17 @@ test.describe("Develop chat shell", () => {
     await page.goto("/develop")
   })
 
-  test("shows chats in activity order and selects the latest", async ({ page }) => {
+  test("shows chats in activity order and selects the latest", async ({
+    page,
+  }) => {
     const chatButtons = page
       .getByRole("navigation", { name: "Development Chats" })
       .getByRole("button")
 
     await expect(chatButtons).toHaveText(["Most recent chat", "Earlier chat"])
-    await expect(page.getByRole("heading", { name: "Most recent chat" })).toBeVisible()
+    await expect(
+      page.getByRole("heading", { name: "Most recent chat" }),
+    ).toBeVisible()
   })
 
   test("creates a chat from the first message", async ({ page }) => {
@@ -138,7 +142,9 @@ test.describe("Develop chat shell", () => {
     await page.getByLabel("Development Chat title").fill("Renamed foundation")
     await page.getByRole("button", { name: "Save" }).click()
 
-    await expect(page.getByRole("heading", { name: "Renamed foundation" })).toBeVisible()
+    await expect(
+      page.getByRole("heading", { name: "Renamed foundation" }),
+    ).toBeVisible()
     await expect(
       page
         .getByRole("navigation", { name: "Development Chats" })

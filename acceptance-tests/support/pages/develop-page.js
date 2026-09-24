@@ -49,11 +49,14 @@ class DevelopPage {
     await expect(this.page.getByRole('heading', { name: content })).toBeVisible();
   }
 
-  async visibleChatTitles() {
-    return this.page
+  async visibleChatTitles(expectedCount) {
+    const chatButtons = this.page
       .getByRole('navigation', { name: 'Development Chats' })
-      .getByRole('button')
-      .allTextContents();
+      .getByRole('button');
+    if (expectedCount !== undefined) {
+      await expect(chatButtons).toHaveCount(expectedCount);
+    }
+    return chatButtons.allTextContents();
   }
 
   async selectChat(title) {

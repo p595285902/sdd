@@ -8,7 +8,7 @@ import { createFileRoute } from "@tanstack/react-router"
 import { Loader2, MessageSquarePlus, Pencil, Send } from "lucide-react"
 import { type FormEvent, useState } from "react"
 
-import { DevelopService, type DevelopmentChatPublic } from "@/client"
+import { type DevelopmentChatPublic, DevelopService } from "@/client"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import useCustomToast from "@/hooks/useCustomToast"
@@ -79,7 +79,13 @@ function Develop() {
   })
 
   const renameChat = useMutation({
-    mutationFn: async ({ chat, title }: { chat: DevelopmentChatPublic; title: string }) =>
+    mutationFn: async ({
+      chat,
+      title,
+    }: {
+      chat: DevelopmentChatPublic
+      title: string
+    }) =>
       (
         await DevelopService.renameDevelopmentChat({
           body: { title },
@@ -132,7 +138,10 @@ function Develop() {
               <MessageSquarePlus />
             </Button>
           </div>
-          <nav aria-label="Development Chats" className="min-h-0 overflow-y-auto p-2">
+          <nav
+            aria-label="Development Chats"
+            className="min-h-0 overflow-y-auto p-2"
+          >
             {chatsQuery.isPending ? (
               <div className="flex justify-center py-8 text-muted-foreground">
                 <Loader2 className="animate-spin" aria-label="Loading chats" />
@@ -165,7 +174,10 @@ function Develop() {
           </nav>
         </aside>
 
-        <section className="flex min-h-[30rem] min-w-0 flex-col" aria-label="Conversation">
+        <section
+          className="flex min-h-[30rem] min-w-0 flex-col"
+          aria-label="Conversation"
+        >
           {selectedChat ? (
             <>
               <div className="flex min-h-14 items-center justify-between border-b px-4 py-2">
@@ -178,16 +190,25 @@ function Develop() {
                       onChange={(event) => setRenameTitle(event.target.value)}
                       value={renameTitle}
                     />
-                    <Button disabled={!renameTitle.trim() || renameChat.isPending} type="submit">
+                    <Button
+                      disabled={!renameTitle.trim() || renameChat.isPending}
+                      type="submit"
+                    >
                       Save
                     </Button>
-                    <Button onClick={() => setIsRenaming(false)} type="button" variant="ghost">
+                    <Button
+                      onClick={() => setIsRenaming(false)}
+                      type="button"
+                      variant="ghost"
+                    >
                       Cancel
                     </Button>
                   </form>
                 ) : (
                   <>
-                    <h2 className="truncate text-base font-semibold">{selectedChat.title}</h2>
+                    <h2 className="truncate text-base font-semibold">
+                      {selectedChat.title}
+                    </h2>
                     <Button
                       aria-label="Rename Development Chat"
                       onClick={startRename}
@@ -204,7 +225,10 @@ function Develop() {
               <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
                 {messagesQuery.isPending ? (
                   <div className="flex flex-1 items-center justify-center text-muted-foreground">
-                    <Loader2 className="animate-spin" aria-label="Loading messages" />
+                    <Loader2
+                      className="animate-spin"
+                      aria-label="Loading messages"
+                    />
                   </div>
                 ) : (
                   <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
@@ -216,7 +240,9 @@ function Develop() {
                         size="sm"
                         variant="outline"
                       >
-                        {messagesQuery.isFetchingNextPage ? "Loading..." : "Load older messages"}
+                        {messagesQuery.isFetchingNextPage
+                          ? "Loading..."
+                          : "Load older messages"}
                       </Button>
                     )}
                     {messages.map((message) => (
@@ -238,9 +264,14 @@ function Develop() {
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center p-6">
-              <form className="w-full max-w-xl space-y-3" onSubmit={handleCreate}>
+              <form
+                className="w-full max-w-xl space-y-3"
+                onSubmit={handleCreate}
+              >
                 <div>
-                  <h2 className="text-lg font-semibold">Start a Development Chat</h2>
+                  <h2 className="text-lg font-semibold">
+                    Start a Development Chat
+                  </h2>
                   <p className="text-sm text-muted-foreground">
                     Your first message creates the chat.
                   </p>
@@ -261,7 +292,11 @@ function Develop() {
                     title="Send first message"
                     type="submit"
                   >
-                    {createChat.isPending ? <Loader2 className="animate-spin" /> : <Send />}
+                    {createChat.isPending ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Send />
+                    )}
                   </Button>
                 </div>
               </form>

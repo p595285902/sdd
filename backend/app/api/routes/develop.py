@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import tuple_
+from sqlalchemy import and_, or_
 from sqlmodel import col, func, select
 
 from app.api.deps import CurrentUser, SessionDep
@@ -25,7 +25,9 @@ from app.models import (
 router = APIRouter(prefix="/develop/chats", tags=["develop"])
 
 
-def _get_chat(*, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID) -> DevelopmentChat:
+def _get_chat(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> DevelopmentChat:
     chat = session.exec(
         select(DevelopmentChat).where(
             DevelopmentChat.id == chat_id,
@@ -52,7 +54,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
         message_id = uuid.UUID(message_id_value)
         if created_at.tzinfo is None:
             raise ValueError
-    except (ValueError, TypeError, json.JSONDecodeError):
+    except ValueError, TypeError, json.JSONDecodeError:
         raise HTTPException(status_code=422, detail="Invalid message cursor")
     return created_at, message_id
 
@@ -86,9 +88,7 @@ def create_development_chat(
 
 
 @router.get("", response_model=DevelopmentChatsPublic)
-def read_development_chats(
-    *, session: SessionDep, current_user: CurrentUser
-) -> Any:
+def read_development_chats(*, session: SessionDep, current_user: CurrentUser) -> Any:
     count = session.exec(
         select(func.count())
         .select_from(DevelopmentChat)
@@ -97,7 +97,9 @@ def read_development_chats(
     chats = session.exec(
         select(DevelopmentChat)
         .where(DevelopmentChat.owner_id == current_user.id)
-        .order_by(col(DevelopmentChat.updated_at).desc(), col(DevelopmentChat.id).desc())
+        .order_by(
+            col(DevelopmentChat.updated_at).desc(), col(DevelopmentChat.id).desc()
+        )
         .limit(settings.DEVELOP_HISTORY_LIMIT)
     ).all()
     return DevelopmentChatsPublic(data=list(chats), count=count)
@@ -141,20 +143,31 @@ def read_development_messages(
             status_code=422, detail="Use either before or after, not both"
         )
 
-    statement = select(DevelopmentMessage).where(
-        DevelopmentMessage.chat_id == chat_id
-    )
+    statement = select(DevelopmentMessage).where(DevelopmentMessage.chat_id == chat_id)
     ascending = after is not None
     cursor = after or before
     if cursor:
         created_at, message_id = _decode_cursor(cursor)
-        message_order = tuple_(
-            col(DevelopmentMessage.created_at), col(DevelopmentMessage.id)
-        )
-        cursor_order = tuple_(created_at, message_id)
-        statement = statement.where(
-            message_order > cursor_order if ascending else message_order < cursor_order
-        )
+        if ascending:
+            statement = statement.where(
+                or_(
+                    col(DevelopmentMessage.created_at) > created_at,
+                    and_(
+                        col(DevelopmentMessage.created_at) == created_at,
+                        col(DevelopmentMessage.id) > message_id,
+                    ),
+                )
+            )
+        else:
+            statement = statement.where(
+                or_(
+                    col(DevelopmentMessage.created_at) < created_at,
+                    and_(
+                        col(DevelopmentMessage.created_at) == created_at,
+                        col(DevelopmentMessage.id) < message_id,
+                    ),
+                )
+            )
 
     if ascending:
         statement = statement.order_by(

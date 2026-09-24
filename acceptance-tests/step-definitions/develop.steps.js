@@ -80,7 +80,9 @@ When('the user opens Develop', async function () {
 Then(
   'only the configured number of most recently active Development Chats is listed',
   async function () {
-    this.visibleChatTitles = await this.developPage.visibleChatTitles();
+    this.visibleChatTitles = await this.developPage.visibleChatTitles(
+      this.historyLimit,
+    );
     assert.equal(this.visibleChatTitles.length, this.historyLimit);
   },
 );

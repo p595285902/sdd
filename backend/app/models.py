@@ -203,9 +203,7 @@ class DevelopmentMessageBase(SQLModel):
 
 class DevelopmentMessage(DevelopmentMessageBase, table=True):
     __table_args__ = (
-        Index(
-            "ix_developmentmessage_chat_created_id", "chat_id", "created_at", "id"
-        ),
+        Index("ix_developmentmessage_chat_created_id", "chat_id", "created_at", "id"),
     )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
