@@ -20,6 +20,12 @@ class DevelopPage {
     await this.page.goto('/');
   }
 
+  async open(token) {
+    await this.authenticate(token);
+    await this.page.goto('/develop');
+    await this.expectWorkspaceVisible();
+  }
+
   async selectDevelop() {
     await this.page.getByRole('link', { name: 'Develop' }).click();
   }
@@ -29,6 +35,18 @@ class DevelopPage {
     await expect(
       this.page.getByRole('heading', { name: 'Develop', exact: true }),
     ).toBeVisible();
+  }
+
+  async startNewChat() {
+    await this.page.getByRole('button', { name: 'New Development Chat' }).click();
+  }
+
+  async submitFirstMessage(content) {
+    await this.page
+      .getByRole('textbox', { name: 'First message', exact: true })
+      .fill(content);
+    await this.page.getByRole('button', { name: 'Send first message' }).click();
+    await expect(this.page.getByRole('heading', { name: content })).toBeVisible();
   }
 }
 

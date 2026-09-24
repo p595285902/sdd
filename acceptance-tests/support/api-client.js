@@ -90,6 +90,27 @@ class ApiClient {
     if (!response.ok()) throw new Error(`Unable to list Items: ${response.status()}`);
     return (await response.json()).data;
   }
+
+  async listDevelopmentChats(token) {
+    const response = await this.request(token, 'get', '/api/v1/develop/chats');
+    if (!response.ok()) {
+      throw new Error(`Unable to list Development Chats: ${response.status()}`);
+    }
+    return response.json();
+  }
+
+  async listDevelopmentMessages(token, chatId, query = {}) {
+    const response = await this.request(
+      token,
+      'get',
+      `/api/v1/develop/chats/${chatId}/messages`,
+      { params: query },
+    );
+    if (!response.ok()) {
+      throw new Error(`Unable to list Development Messages: ${response.status()}`);
+    }
+    return response.json();
+  }
 }
 
 module.exports = { ApiClient };

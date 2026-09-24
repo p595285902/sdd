@@ -23,7 +23,7 @@
 
 - [x] 4.1 Authenticated user opens Develop — red -> green -> commit
 - [x] 4.2 Unauthenticated client cannot access Develop data — red -> green -> commit
-- [ ] 4.3 First message creates a Development Chat — red -> green -> commit
+- [x] 4.3 First message creates a Development Chat — red -> green -> commit
 - [ ] 4.4 Recent Development Chats are listed by activity — red -> green -> commit
 - [ ] 4.5 User renames a Development Chat — red -> green -> commit
 - [ ] 4.6 User cannot access another user's Development Chat — red -> green -> commit
