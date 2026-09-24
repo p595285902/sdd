@@ -54,3 +54,39 @@ Then('the first message is stored', async function () {
     [{ role: 'user', content: this.firstMessage }],
   );
 });
+
+Given(
+  'an authenticated user owns more Development Chats than the configured history limit',
+  async function () {
+    this.userToken = await this.apiClient.authenticateSuperuser();
+    this.historyLimit = 20;
+    this.developmentChats = [];
+    for (let index = 0; index <= this.historyLimit; index += 1) {
+      this.developmentChats.push(
+        await this.apiClient.createDevelopmentChat(
+          this.userToken,
+          `Activity ordered chat ${index}`,
+        ),
+      );
+    }
+  },
+);
+
+When('the user opens Develop', async function () {
+  await this.developPage.open(this.userToken);
+});
+
+Then(
+  'only the configured number of most recently active Development Chats is listed',
+  async function () {
+    this.visibleChatTitles = await this.developPage.visibleChatTitles();
+    assert.equal(this.visibleChatTitles.length, this.historyLimit);
+  },
+);
+
+Then('the most recently active Development Chat appears first', function () {
+  assert.equal(
+    this.visibleChatTitles[0],
+    this.developmentChats.at(-1).title,
+  );
+});

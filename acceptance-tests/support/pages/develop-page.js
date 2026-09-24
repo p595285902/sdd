@@ -48,6 +48,13 @@ class DevelopPage {
     await this.page.getByRole('button', { name: 'Send first message' }).click();
     await expect(this.page.getByRole('heading', { name: content })).toBeVisible();
   }
+
+  async visibleChatTitles() {
+    return this.page
+      .getByRole('navigation', { name: 'Development Chats' })
+      .getByRole('button')
+      .allTextContents();
+  }
 }
 
 module.exports = { DevelopPage };

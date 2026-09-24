@@ -99,6 +99,16 @@ class ApiClient {
     return response.json();
   }
 
+  async createDevelopmentChat(token, content) {
+    const response = await this.request(token, 'post', '/api/v1/develop/chats', {
+      data: { content },
+    });
+    if (!response.ok()) {
+      throw new Error(`Unable to create Development Chat: ${response.status()}`);
+    }
+    return response.json();
+  }
+
   async listDevelopmentMessages(token, chatId, query = {}) {
     const response = await this.request(
       token,
