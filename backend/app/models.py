@@ -1,8 +1,9 @@
 import uuid
 from datetime import UTC, datetime
+from enum import StrEnum
 
-from pydantic import EmailStr
-from sqlalchemy import DateTime
+from pydantic import EmailStr, field_validator
+from sqlalchemy import DateTime, Index
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -57,6 +58,9 @@ class User(UserBase, table=True):
         sa_type=DateTime(timezone=True),  # type: ignore
     )
     items: list[Item] = Relationship(back_populates="owner", cascade_delete=True)
+    development_chats: list[DevelopmentChat] = Relationship(
+        back_populates="owner", cascade_delete=True
+    )
 
 
 # Properties to return via API, id is always required
@@ -114,6 +118,117 @@ class ItemPublic(ItemBase):
 class ItemsPublic(SQLModel):
     data: list[ItemPublic]
     count: int
+
+
+class DevelopmentChatBase(SQLModel):
+    title: str = Field(min_length=1, max_length=255)
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Title must not be blank")
+        return value
+
+
+class DevelopmentChatCreate(SQLModel):
+    content: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("content")
+    @classmethod
+    def content_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Content must not be blank")
+        return value
+
+
+class DevelopmentChatUpdate(DevelopmentChatBase):
+    pass
+
+
+class DevelopmentChat(DevelopmentChatBase, table=True):
+    __table_args__ = (
+        Index("ix_developmentchat_owner_updated_id", "owner_id", "updated_at", "id"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    owner_id: uuid.UUID = Field(
+        foreign_key="user.id", nullable=False, ondelete="CASCADE"
+    )
+    created_at: datetime = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    updated_at: datetime = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    owner: User | None = Relationship(back_populates="development_chats")
+    messages: list[DevelopmentMessage] = Relationship(
+        back_populates="chat", cascade_delete=True
+    )
+
+
+class DevelopmentChatPublic(DevelopmentChatBase):
+    id: uuid.UUID
+    owner_id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class DevelopmentChatsPublic(SQLModel):
+    data: list[DevelopmentChatPublic]
+    count: int
+
+
+class DevelopmentMessageRole(StrEnum):
+    user = "user"
+    assistant = "assistant"
+
+
+class DevelopmentMessageBase(SQLModel):
+    role: DevelopmentMessageRole
+    content: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("content")
+    @classmethod
+    def content_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Content must not be blank")
+        return value
+
+
+class DevelopmentMessage(DevelopmentMessageBase, table=True):
+    __table_args__ = (
+        Index(
+            "ix_developmentmessage_chat_created_id", "chat_id", "created_at", "id"
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    chat_id: uuid.UUID = Field(
+        foreign_key="developmentchat.id", nullable=False, ondelete="CASCADE"
+    )
+    created_at: datetime = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    chat: DevelopmentChat | None = Relationship(back_populates="messages")
+
+
+class DevelopmentMessagePublic(DevelopmentMessageBase):
+    id: uuid.UUID
+    chat_id: uuid.UUID
+    created_at: datetime
+
+
+class DevelopmentMessagesPublic(SQLModel):
+    data: list[DevelopmentMessagePublic]
+    has_more: bool
+    next_cursor: str | None = None
 
 
 # Generic message

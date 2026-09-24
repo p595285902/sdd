@@ -4,6 +4,7 @@ const { setWorldConstructor, World } = require('@cucumber/cucumber');
 const { state } = require('./app-lifecycle.js');
 const { ApiClient } = require('../../support/api-client.js');
 const { AdminUsersPage } = require('../../support/pages/admin-users-page.js');
+const { DevelopPage } = require('../../support/pages/develop-page.js');
 
 class AcceptanceWorld extends World {
   constructor(options) {
@@ -12,6 +13,7 @@ class AcceptanceWorld extends World {
     this.applicationState = state;
     this.apiClient = new ApiClient(this);
     this.adminUsersPage = new AdminUsersPage(this);
+    this.developPage = new DevelopPage(this);
   }
 
   async openApiContext(headers = {}) {

@@ -35,6 +35,112 @@ export type Body_login_login_access_token = {
 };
 
 /**
+ * DevelopmentChatCreate
+ */
+export type DevelopmentChatCreate = {
+    /**
+     * Content
+     */
+    content: string;
+};
+
+/**
+ * DevelopmentChatPublic
+ */
+export type DevelopmentChatPublic = {
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * DevelopmentChatUpdate
+ */
+export type DevelopmentChatUpdate = {
+    /**
+     * Title
+     */
+    title: string;
+};
+
+/**
+ * DevelopmentChatsPublic
+ */
+export type DevelopmentChatsPublic = {
+    /**
+     * Data
+     */
+    data: Array<DevelopmentChatPublic>;
+    /**
+     * Count
+     */
+    count: number;
+};
+
+/**
+ * DevelopmentMessagePublic
+ */
+export type DevelopmentMessagePublic = {
+    role: DevelopmentMessageRole;
+    /**
+     * Content
+     */
+    content: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Chat Id
+     */
+    chat_id: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+};
+
+/**
+ * DevelopmentMessageRole
+ */
+export type DevelopmentMessageRole = 'user' | 'assistant';
+
+/**
+ * DevelopmentMessagesPublic
+ */
+export type DevelopmentMessagesPublic = {
+    /**
+     * Data
+     */
+    data: Array<DevelopmentMessagePublic>;
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Next Cursor
+     */
+    next_cursor?: string | null;
+};
+
+/**
  * HTTPValidationError
  */
 export type HTTPValidationError = {
@@ -955,6 +1061,146 @@ export type itemsUpdateItemResponses = {
 };
 
 export type itemsUpdateItemResponse = itemsUpdateItemResponses[keyof itemsUpdateItemResponses];
+
+export type developReadDevelopmentChatsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/develop/chats';
+};
+
+export type developReadDevelopmentChatsResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentChatsPublic;
+};
+
+export type developReadDevelopmentChatsResponse = developReadDevelopmentChatsResponses[keyof developReadDevelopmentChatsResponses];
+
+export type developCreateDevelopmentChatData = {
+    body: DevelopmentChatCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/develop/chats';
+};
+
+export type developCreateDevelopmentChatErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developCreateDevelopmentChatError = developCreateDevelopmentChatErrors[keyof developCreateDevelopmentChatErrors];
+
+export type developCreateDevelopmentChatResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentChatPublic;
+};
+
+export type developCreateDevelopmentChatResponse = developCreateDevelopmentChatResponses[keyof developCreateDevelopmentChatResponses];
+
+export type developReadDevelopmentChatData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}';
+};
+
+export type developReadDevelopmentChatErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developReadDevelopmentChatError = developReadDevelopmentChatErrors[keyof developReadDevelopmentChatErrors];
+
+export type developReadDevelopmentChatResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentChatPublic;
+};
+
+export type developReadDevelopmentChatResponse = developReadDevelopmentChatResponses[keyof developReadDevelopmentChatResponses];
+
+export type developRenameDevelopmentChatData = {
+    body: DevelopmentChatUpdate;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}';
+};
+
+export type developRenameDevelopmentChatErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developRenameDevelopmentChatError = developRenameDevelopmentChatErrors[keyof developRenameDevelopmentChatErrors];
+
+export type developRenameDevelopmentChatResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentChatPublic;
+};
+
+export type developRenameDevelopmentChatResponse = developRenameDevelopmentChatResponses[keyof developRenameDevelopmentChatResponses];
+
+export type developReadDevelopmentMessagesData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: {
+        /**
+         * Before
+         */
+        before?: string | null;
+        /**
+         * After
+         */
+        after?: string | null;
+    };
+    url: '/api/v1/develop/chats/{chat_id}/messages';
+};
+
+export type developReadDevelopmentMessagesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developReadDevelopmentMessagesError = developReadDevelopmentMessagesErrors[keyof developReadDevelopmentMessagesErrors];
+
+export type developReadDevelopmentMessagesResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentMessagesPublic;
+};
+
+export type developReadDevelopmentMessagesResponse = developReadDevelopmentMessagesResponses[keyof developReadDevelopmentMessagesResponses];
 
 export type privateCreateUserData = {
     body: PrivateUserCreate;

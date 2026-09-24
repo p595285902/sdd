@@ -15,3 +15,11 @@ _Avoid_: Logged-in user, self
 **Bulk delete (Users)**:
 A single atomic operation that deletes a set of selected Users, and cascades to delete their Items, in one backend request. All-or-nothing: if any target User in the set is invalid (e.g. already deleted, or is the current user), the entire operation fails and no Users are deleted.
 _Avoid_: Batch delete, mass delete
+
+**Development Chat**:
+A User-owned persistent conversation.
+_Avoid_: Develop conversation, chat session
+
+**Development Message**:
+An ordered user or assistant entry in a Development Chat.
+_Avoid_: Chat message, message entry

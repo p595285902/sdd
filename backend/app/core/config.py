@@ -3,6 +3,7 @@ from typing import Literal, Self
 
 from pydantic import (
     EmailStr,
+    Field,
     HttpUrl,
     PostgresDsn,
     computed_field,
@@ -20,6 +21,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     API_V1_STR: str = "/api/v1"
+    DEVELOP_HISTORY_LIMIT: int = Field(default=20, ge=1, le=100)
+    DEVELOP_MESSAGE_PAGE_SIZE: int = Field(default=50, ge=1, le=100)
     SECRET_KEY: str
     # 60 minutes * 24 hours * 8 days = 8 days
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
