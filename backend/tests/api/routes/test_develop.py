@@ -1,14 +1,16 @@
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import HttpUrl, SecretStr
 from sqlmodel import Session, select
 
 from app import crud
 from app.core.config import settings
 from app.models import DevelopmentChat, DevelopmentMessage, User
-from tests.utils.user import create_random_user, user_authentication_headers
+from tests.utils.user import create_random_user
 from tests.utils.utils import random_lower_string
 
 DEVELOP_CHATS_URL = f"{settings.API_V1_STR}/develop/chats"
@@ -88,6 +90,188 @@ def test_missing_and_foreign_chats_have_same_response(
     assert missing_response.status_code == 404
     assert foreign_response.status_code == 404
     assert foreign_response.json() == missing_response.json()
+
+
+def test_setup_repository_marks_owned_chat_workspace_ready(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Workspace setup", owner_id=owner.id)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    monkeypatch.setattr(
+        settings,
+        "DEVELOP_REPOSITORY_URL",
+        HttpUrl("https://example.com/owner/repository.git"),
+    )
+    monkeypatch.setattr(
+        settings, "DEVELOP_REPOSITORY_TOKEN", SecretStr("top-secret-token")
+    )
+    monkeypatch.setattr(settings, "DEVELOP_WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(settings, "DEVELOP_FAKE_SETUP_RUNNER", True)
+
+    response = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/workspace/setup",
+        headers=superuser_token_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ready": True, "setup_available": True}
+    db.refresh(chat)
+    assert chat.workspace_ready is True
+    assert (tmp_path / str(chat.id) / ".opencode-initialized").exists()
+    assert (tmp_path / str(chat.id) / ".openspec-initialized").exists()
+
+    readiness_response = client.get(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/workspace",
+        headers=superuser_token_headers,
+    )
+    assert readiness_response.status_code == 200
+    assert readiness_response.json() == {"ready": True, "setup_available": True}
+
+
+def test_setup_repository_returns_safe_error_when_configuration_is_incomplete(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Missing setup configuration", owner_id=owner.id)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    token = "top-secret-token"
+    monkeypatch.setattr(settings, "DEVELOP_REPOSITORY_URL", None)
+    monkeypatch.setattr(settings, "DEVELOP_REPOSITORY_TOKEN", SecretStr(token))
+
+    response = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/workspace/setup",
+        headers=superuser_token_headers,
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Development repository setup is not configured"
+    }
+    assert token not in response.text
+
+
+def test_foreign_chat_workspace_status_is_not_disclosed(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+) -> None:
+    other_user = create_random_user(db)
+    foreign_chat = DevelopmentChat(title="Private workspace", owner_id=other_user.id)
+    db.add(foreign_chat)
+    db.commit()
+    db.refresh(foreign_chat)
+
+    response = client.get(
+        f"{DEVELOP_CHATS_URL}/{foreign_chat.id}/workspace",
+        headers=superuser_token_headers,
+    )
+
+    assert response.status_code == 404
+
+
+def test_development_chat_deletion_requires_confirmation(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Keep this chat", owner_id=owner.id)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+
+    response = client.delete(
+        f"{DEVELOP_CHATS_URL}/{chat.id}", headers=superuser_token_headers
+    )
+
+    assert response.status_code == 400
+    assert db.get(DevelopmentChat, chat.id) is not None
+
+
+def test_confirmed_deletion_removes_workspace_chat_and_messages(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(
+        title="Delete this chat", owner_id=owner.id, workspace_ready=True
+    )
+    message = DevelopmentMessage(role="user", content="Delete me", chat_id=chat.id)
+    db.add(chat)
+    db.add(message)
+    db.commit()
+    db.refresh(chat)
+    db.refresh(message)
+    chat_id = chat.id
+    message_id = message.id
+    workspace = tmp_path / str(chat.id)
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "DEVELOP_WORKSPACE_ROOT", tmp_path)
+
+    response = client.delete(
+        f"{DEVELOP_CHATS_URL}/{chat.id}",
+        headers=superuser_token_headers,
+        params={"confirm": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "Development Chat deleted"}
+    assert not workspace.exists()
+    db.expunge_all()
+    assert db.get(DevelopmentChat, chat_id) is None
+    assert db.get(DevelopmentMessage, message_id) is None
+
+
+def test_cleanup_failure_keeps_development_chat_and_messages(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(
+        title="Retry deletion", owner_id=owner.id, workspace_ready=True
+    )
+    message = DevelopmentMessage(role="user", content="Keep me", chat_id=chat.id)
+    db.add(chat)
+    db.add(message)
+    db.commit()
+    db.refresh(chat)
+    db.refresh(message)
+
+    def fail_cleanup(**_kwargs: object) -> None:
+        raise OSError("secret filesystem detail")
+
+    monkeypatch.setattr(
+        "app.api.routes.develop.cleanup_workspace", fail_cleanup, raising=False
+    )
+
+    response = client.delete(
+        f"{DEVELOP_CHATS_URL}/{chat.id}",
+        headers=superuser_token_headers,
+        params={"confirm": True},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Development Workspace cleanup failed"}
+    assert "secret filesystem detail" not in response.text
+    assert db.get(DevelopmentChat, chat.id) is not None
+    assert db.get(DevelopmentMessage, message.id) is not None
 
 
 def test_rename_does_not_change_activity_order(

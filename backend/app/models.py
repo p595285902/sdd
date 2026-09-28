@@ -157,6 +157,7 @@ class DevelopmentChat(DevelopmentChatBase, table=True):
     owner_id: uuid.UUID = Field(
         foreign_key="user.id", nullable=False, ondelete="CASCADE"
     )
+    workspace_ready: bool = Field(default=False, nullable=False)
     created_at: datetime = Field(
         default_factory=get_datetime_utc,
         sa_type=DateTime(timezone=True),  # type: ignore
@@ -174,8 +175,14 @@ class DevelopmentChat(DevelopmentChatBase, table=True):
 class DevelopmentChatPublic(DevelopmentChatBase):
     id: uuid.UUID
     owner_id: uuid.UUID
+    workspace_ready: bool
     created_at: datetime
     updated_at: datetime
+
+
+class DevelopmentWorkspacePublic(SQLModel):
+    ready: bool
+    setup_available: bool
 
 
 class DevelopmentChatsPublic(SQLModel):

@@ -1,5 +1,6 @@
 volumes:
   sdd-db-data:
+  sdd-develop-workspaces:
   sdd-mailpit_data:
   
 services:
@@ -66,7 +67,11 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       EMAILS_FROM_EMAIL: ${EMAILS_FROM_EMAIL}
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Variable not set}@db:5432/app
+      DEVELOP_WORKSPACE_ROOT: /develop-workspaces
       SENTRY_DSN: ${SENTRY_DSN:-}
+
+    volumes:
+      - sdd-develop-workspaces:/develop-workspaces
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8100/api/v1/utils/health-check/"]

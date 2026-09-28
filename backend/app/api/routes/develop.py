@@ -19,7 +19,17 @@ from app.models import (
     DevelopmentMessage,
     DevelopmentMessagePublic,
     DevelopmentMessagesPublic,
+    DevelopmentWorkspacePublic,
+    Message,
     get_datetime_utc,
+)
+from app.services.develop_workspace import (
+    FakeCommandRunner,
+    SubprocessCommandRunner,
+    WorkspacePathError,
+    WorkspaceSetupError,
+    cleanup_workspace,
+    setup_workspace,
 )
 
 router = APIRouter(prefix="/develop/chats", tags=["develop"])
@@ -37,6 +47,19 @@ def _get_chat(
     if not chat:
         raise HTTPException(status_code=404, detail="Development Chat not found")
     return chat
+
+
+def _repository_setup_available() -> bool:
+    return bool(
+        settings.DEVELOP_REPOSITORY_URL and settings.DEVELOP_REPOSITORY_TOKEN
+    )
+
+
+def _workspace_status(chat: DevelopmentChat) -> DevelopmentWorkspacePublic:
+    return DevelopmentWorkspacePublic(
+        ready=chat.workspace_ready,
+        setup_available=_repository_setup_available(),
+    )
 
 
 def _encode_cursor(message: DevelopmentMessage) -> str:
@@ -112,6 +135,59 @@ def read_development_chat(
     return _get_chat(session=session, current_user=current_user, chat_id=chat_id)
 
 
+@router.get("/{chat_id}/workspace", response_model=DevelopmentWorkspacePublic)
+def read_development_workspace(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    return _workspace_status(chat)
+
+
+@router.post(
+    "/{chat_id}/workspace/setup", response_model=DevelopmentWorkspacePublic
+)
+def setup_development_workspace(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    repository_url = settings.DEVELOP_REPOSITORY_URL
+    repository_token = settings.DEVELOP_REPOSITORY_TOKEN
+    if not repository_url or not repository_token:
+        raise HTTPException(
+            status_code=503,
+            detail="Development repository setup is not configured",
+        )
+
+    chat.workspace_ready = False
+    session.add(chat)
+    session.commit()
+    runner = (
+        FakeCommandRunner()
+        if settings.DEVELOP_FAKE_SETUP_RUNNER
+        else SubprocessCommandRunner()
+    )
+    try:
+        setup_workspace(
+            root=settings.DEVELOP_WORKSPACE_ROOT,
+            chat_id=chat.id,
+            repository_url=str(repository_url),
+            repository_token=repository_token.get_secret_value(),
+            timeout=settings.DEVELOP_SETUP_TIMEOUT_SECONDS,
+            runner=runner,
+        )
+    except WorkspaceSetupError:
+        raise HTTPException(
+            status_code=502,
+            detail="Development repository setup failed",
+        )
+
+    chat.workspace_ready = True
+    session.add(chat)
+    session.commit()
+    session.refresh(chat)
+    return _workspace_status(chat)
+
+
 @router.patch("/{chat_id}", response_model=DevelopmentChatPublic)
 def rename_development_chat(
     *,
@@ -126,6 +202,32 @@ def rename_development_chat(
     session.commit()
     session.refresh(chat)
     return chat
+
+
+@router.delete("/{chat_id}", response_model=Message)
+def delete_development_chat(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    chat_id: uuid.UUID,
+    confirm: bool = False,
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Development Chat deletion requires confirmation",
+        )
+    try:
+        cleanup_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+    except (OSError, WorkspacePathError):
+        raise HTTPException(
+            status_code=500,
+            detail="Development Workspace cleanup failed",
+        )
+    session.delete(chat)
+    session.commit()
+    return Message(message="Development Chat deleted")
 
 
 @router.get("/{chat_id}/messages", response_model=DevelopmentMessagesPublic)

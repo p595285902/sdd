@@ -25,6 +25,57 @@ with Session(engine) as session:
   session.commit()
 `;
 
+const assertWorkspaceScript = `
+import sys
+import uuid
+from pathlib import Path
+from app.core.config import settings
+
+workspace = Path(settings.DEVELOP_WORKSPACE_ROOT) / str(uuid.UUID(sys.argv[1]))
+expected = sys.argv[2] == "present"
+if workspace.exists() != expected:
+  raise AssertionError(f"Unexpected workspace state: {workspace}")
+if expected:
+  for marker in (".git", ".opencode-initialized", ".openspec-initialized"):
+    if not (workspace / marker).exists():
+      raise AssertionError(f"Missing workspace marker: {marker}")
+`;
+
+const assertMessagesDeletedScript = `
+import sys
+import uuid
+from sqlmodel import Session, select
+from app.core.db import engine
+from app.models import DevelopmentMessage
+
+chat_id = uuid.UUID(sys.argv[1])
+with Session(engine) as session:
+  if session.exec(select(DevelopmentMessage).where(DevelopmentMessage.chat_id == chat_id)).first():
+    raise AssertionError("Development Chat messages still exist")
+`;
+
+const markWorkspaceScript = `
+import sys
+import uuid
+from pathlib import Path
+from app.core.config import settings
+
+workspace = Path(settings.DEVELOP_WORKSPACE_ROOT) / str(uuid.UUID(sys.argv[1]))
+(workspace / sys.argv[2]).write_text("marked")
+`;
+
+const assertWorkspaceMarkerScript = `
+import sys
+import uuid
+from pathlib import Path
+from app.core.config import settings
+
+workspace = Path(settings.DEVELOP_WORKSPACE_ROOT) / str(uuid.UUID(sys.argv[1]))
+exists = (workspace / sys.argv[2]).exists()
+if exists != (sys.argv[3] == "present"):
+  raise AssertionError("Unexpected cross-workspace marker state")
+`;
+
 class ApiClient {
   constructor(world) {
     this.world = world;
@@ -149,6 +200,53 @@ class ApiClient {
 
   async seedDevelopmentMessages(chatId, count) {
     await runBackendPython(seedMessagesScript, chatId, String(count));
+  }
+
+  async developmentChat(token, chatId) {
+    return this.request(token, 'get', `/api/v1/develop/chats/${chatId}`);
+  }
+
+  async setupDevelopmentWorkspace(token, chatId) {
+    return this.request(
+      token,
+      'post',
+      `/api/v1/develop/chats/${chatId}/workspace/setup`,
+    );
+  }
+
+  async developmentWorkspace(token, chatId) {
+    return this.request(
+      token,
+      'get',
+      `/api/v1/develop/chats/${chatId}/workspace`,
+    );
+  }
+
+  async deleteDevelopmentChat(token, chatId) {
+    return this.request(token, 'delete', `/api/v1/develop/chats/${chatId}`, {
+      params: { confirm: true },
+    });
+  }
+
+  async assertWorkspace(chatId, expected) {
+    await runBackendPython(assertWorkspaceScript, chatId, expected ? 'present' : 'missing');
+  }
+
+  async assertDevelopmentMessagesDeleted(chatId) {
+    await runBackendPython(assertMessagesDeletedScript, chatId);
+  }
+
+  async markWorkspace(chatId, marker) {
+    await runBackendPython(markWorkspaceScript, chatId, marker);
+  }
+
+  async assertWorkspaceMarker(chatId, marker, expected) {
+    await runBackendPython(
+      assertWorkspaceMarkerScript,
+      chatId,
+      marker,
+      expected ? 'present' : 'missing',
+    );
   }
 }
 

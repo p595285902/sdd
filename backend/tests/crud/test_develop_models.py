@@ -2,11 +2,12 @@ from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
-from sqlmodel import Session, delete
+from sqlmodel import Session, col, delete
 
 from app.models import (
     DevelopmentChat,
     DevelopmentChatBase,
+    DevelopmentChatPublic,
     DevelopmentMessage,
     DevelopmentMessageBase,
     User,
@@ -56,6 +57,14 @@ def test_development_chat_relationships_and_timestamp_defaults(db: Session) -> N
     assert chat.updated_at >= chat.created_at
 
 
+def test_development_chat_workspace_is_not_ready_by_default() -> None:
+    chat = DevelopmentChat(title="New chat", owner_id=User().id)
+
+    assert chat.workspace_ready is False
+    public_chat = DevelopmentChatPublic.model_validate(chat)
+    assert public_chat.workspace_ready is False
+
+
 def test_deleting_user_cascades_to_development_data(db: Session) -> None:
     user = create_random_user(db)
     chat = DevelopmentChat(title="Owned chat", owner_id=user.id)
@@ -71,7 +80,7 @@ def test_deleting_user_cascades_to_development_data(db: Session) -> None:
     chat_id = chat.id
     message_id = message.id
 
-    db.exec(delete(User).where(User.id == user.id))
+    db.exec(delete(User).where(col(User.id) == user.id))
     db.commit()
     db.expire_all()
 

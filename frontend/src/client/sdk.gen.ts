@@ -2,7 +2,7 @@
 
 import { type Client, type Options as Options2, type TDataShape, urlSearchParamsBodySerializer } from './client';
 import { client } from './client.gen';
-import type { developCreateDevelopmentChatData, developCreateDevelopmentChatErrors, developCreateDevelopmentChatResponses, developReadDevelopmentChatData, developReadDevelopmentChatErrors, developReadDevelopmentChatResponses, developReadDevelopmentChatsData, developReadDevelopmentChatsResponses, developReadDevelopmentMessagesData, developReadDevelopmentMessagesErrors, developReadDevelopmentMessagesResponses, developRenameDevelopmentChatData, developRenameDevelopmentChatErrors, developRenameDevelopmentChatResponses, itemsCreateItemData, itemsCreateItemErrors, itemsCreateItemResponses, itemsDeleteItemData, itemsDeleteItemErrors, itemsDeleteItemResponses, itemsReadItemData, itemsReadItemErrors, itemsReadItemResponses, itemsReadItemsData, itemsReadItemsErrors, itemsReadItemsResponses, itemsUpdateItemData, itemsUpdateItemErrors, itemsUpdateItemResponses, loginLoginAccessTokenData, loginLoginAccessTokenErrors, loginLoginAccessTokenResponses, loginRecoverPasswordData, loginRecoverPasswordErrors, loginRecoverPasswordHtmlContentData, loginRecoverPasswordHtmlContentErrors, loginRecoverPasswordHtmlContentResponses, loginRecoverPasswordResponses, loginResetPasswordData, loginResetPasswordErrors, loginResetPasswordResponses, loginTestTokenData, loginTestTokenResponses, privateCreateUserData, privateCreateUserErrors, privateCreateUserResponses, usersBulkDeleteUsersData, usersBulkDeleteUsersErrors, usersBulkDeleteUsersResponses, usersCreateUserData, usersCreateUserErrors, usersCreateUserResponses, usersDeleteUserData, usersDeleteUserErrors, usersDeleteUserMeData, usersDeleteUserMeResponses, usersDeleteUserResponses, usersReadUserByIdData, usersReadUserByIdErrors, usersReadUserByIdResponses, usersReadUserMeData, usersReadUserMeResponses, usersReadUsersData, usersReadUsersErrors, usersReadUsersResponses, usersRegisterUserData, usersRegisterUserErrors, usersRegisterUserResponses, usersUpdatePasswordMeData, usersUpdatePasswordMeErrors, usersUpdatePasswordMeResponses, usersUpdateUserData, usersUpdateUserErrors, usersUpdateUserMeData, usersUpdateUserMeErrors, usersUpdateUserMeResponses, usersUpdateUserResponses, utilsHealthCheckData, utilsHealthCheckResponses, utilsTestEmailData, utilsTestEmailErrors, utilsTestEmailResponses } from './types.gen';
+import type { developCreateDevelopmentChatData, developCreateDevelopmentChatErrors, developCreateDevelopmentChatResponses, developDeleteDevelopmentChatData, developDeleteDevelopmentChatErrors, developDeleteDevelopmentChatResponses, developReadDevelopmentChatData, developReadDevelopmentChatErrors, developReadDevelopmentChatResponses, developReadDevelopmentChatsData, developReadDevelopmentChatsResponses, developReadDevelopmentMessagesData, developReadDevelopmentMessagesErrors, developReadDevelopmentMessagesResponses, developReadDevelopmentWorkspaceData, developReadDevelopmentWorkspaceErrors, developReadDevelopmentWorkspaceResponses, developRenameDevelopmentChatData, developRenameDevelopmentChatErrors, developRenameDevelopmentChatResponses, developSetupDevelopmentWorkspaceData, developSetupDevelopmentWorkspaceErrors, developSetupDevelopmentWorkspaceResponses, itemsCreateItemData, itemsCreateItemErrors, itemsCreateItemResponses, itemsDeleteItemData, itemsDeleteItemErrors, itemsDeleteItemResponses, itemsReadItemData, itemsReadItemErrors, itemsReadItemResponses, itemsReadItemsData, itemsReadItemsErrors, itemsReadItemsResponses, itemsUpdateItemData, itemsUpdateItemErrors, itemsUpdateItemResponses, loginLoginAccessTokenData, loginLoginAccessTokenErrors, loginLoginAccessTokenResponses, loginRecoverPasswordData, loginRecoverPasswordErrors, loginRecoverPasswordHtmlContentData, loginRecoverPasswordHtmlContentErrors, loginRecoverPasswordHtmlContentResponses, loginRecoverPasswordResponses, loginResetPasswordData, loginResetPasswordErrors, loginResetPasswordResponses, loginTestTokenData, loginTestTokenResponses, privateCreateUserData, privateCreateUserErrors, privateCreateUserResponses, usersBulkDeleteUsersData, usersBulkDeleteUsersErrors, usersBulkDeleteUsersResponses, usersCreateUserData, usersCreateUserErrors, usersCreateUserResponses, usersDeleteUserData, usersDeleteUserErrors, usersDeleteUserMeData, usersDeleteUserMeResponses, usersDeleteUserResponses, usersReadUserByIdData, usersReadUserByIdErrors, usersReadUserByIdResponses, usersReadUserMeData, usersReadUserMeResponses, usersReadUsersData, usersReadUsersErrors, usersReadUsersResponses, usersRegisterUserData, usersRegisterUserErrors, usersRegisterUserResponses, usersUpdatePasswordMeData, usersUpdatePasswordMeErrors, usersUpdatePasswordMeResponses, usersUpdateUserData, usersUpdateUserErrors, usersUpdateUserMeData, usersUpdateUserMeErrors, usersUpdateUserMeResponses, usersUpdateUserResponses, utilsHealthCheckData, utilsHealthCheckResponses, utilsTestEmailData, utilsTestEmailErrors, utilsTestEmailResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -410,6 +410,18 @@ export class DevelopService {
     }
     
     /**
+     * Delete Development Chat
+     */
+    public static deleteDevelopmentChat<ThrowOnError extends boolean = true>(options: Options<developDeleteDevelopmentChatData, ThrowOnError>) {
+        return (options.client ?? client).delete<developDeleteDevelopmentChatResponses, developDeleteDevelopmentChatErrors, ThrowOnError>({
+            responseType: 'json',
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/api/v1/develop/chats/{chat_id}',
+            ...options
+        });
+    }
+
+    /**
      * Read Development Chat
      */
     public static readDevelopmentChat<ThrowOnError extends boolean = true>(options: Options<developReadDevelopmentChatData, ThrowOnError>) {
@@ -437,6 +449,30 @@ export class DevelopService {
         });
     }
     
+    /**
+     * Read Development Workspace
+     */
+    public static readDevelopmentWorkspace<ThrowOnError extends boolean = true>(options: Options<developReadDevelopmentWorkspaceData, ThrowOnError>) {
+        return (options.client ?? client).get<developReadDevelopmentWorkspaceResponses, developReadDevelopmentWorkspaceErrors, ThrowOnError>({
+            responseType: 'json',
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/api/v1/develop/chats/{chat_id}/workspace',
+            ...options
+        });
+    }
+
+    /**
+     * Setup Development Workspace
+     */
+    public static setupDevelopmentWorkspace<ThrowOnError extends boolean = true>(options: Options<developSetupDevelopmentWorkspaceData, ThrowOnError>) {
+        return (options.client ?? client).post<developSetupDevelopmentWorkspaceResponses, developSetupDevelopmentWorkspaceErrors, ThrowOnError>({
+            responseType: 'json',
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/api/v1/develop/chats/{chat_id}/workspace/setup',
+            ...options
+        });
+    }
+
     /**
      * Read Development Messages
      */

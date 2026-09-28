@@ -73,6 +73,36 @@ class DevelopPage {
     await expect(this.page.getByRole('heading', { name: title })).toBeVisible();
   }
 
+  async setupSelectedRepository() {
+    await this.page.getByRole('button', { name: 'Set up repository' }).click();
+    await expect(
+      this.page.getByRole('button', { name: 'Repository ready' }),
+    ).toBeDisabled();
+  }
+
+  async openDeleteConfirmation() {
+    await this.page
+      .getByRole('button', { name: 'Delete Development Chat' })
+      .click();
+    await expect(
+      this.page.getByRole('dialog', { name: 'Delete Development Chat' }),
+    ).toBeVisible();
+  }
+
+  async cancelDeletion() {
+    await this.page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(
+      this.page.getByRole('dialog', { name: 'Delete Development Chat' }),
+    ).not.toBeVisible();
+  }
+
+  async confirmDeletion() {
+    await this.page.getByRole('button', { name: 'Delete permanently' }).click();
+    await expect(
+      this.page.getByRole('dialog', { name: 'Delete Development Chat' }),
+    ).not.toBeVisible();
+  }
+
   async loadOlderMessages() {
     const loadOlderButton = this.page.getByRole('button', {
       name: 'Load older messages',

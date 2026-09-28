@@ -4,6 +4,7 @@ type Chat = {
   id: string
   owner_id: string
   title: string
+  workspace_ready: boolean
   created_at: string
   updated_at: string
 }
@@ -16,6 +17,7 @@ const createChat = (id: string, title: string, updatedAt: string): Chat => ({
   id,
   owner_id: ownerId,
   title,
+  workspace_ready: false,
   created_at: updatedAt,
   updated_at: updatedAt,
 })
@@ -31,9 +33,36 @@ const mockDevelopApi = async (page: Page) => {
     const url = new URL(request.url())
     const method = request.method()
     const chatMatch = url.pathname.match(/\/develop\/chats\/([^/]+)$/)
+    const workspaceMatch = url.pathname.match(
+      /\/develop\/chats\/([^/]+)\/workspace$/,
+    )
+    const setupMatch = url.pathname.match(
+      /\/develop\/chats\/([^/]+)\/workspace\/setup$/,
+    )
     const messagesMatch = url.pathname.match(
       /\/develop\/chats\/([^/]+)\/messages$/,
     )
+
+    if (method === "POST" && setupMatch) {
+      const chat = chats.find((entry) => entry.id === setupMatch[1])
+      if (!chat) throw new Error("Unexpected chat ID")
+      chat.workspace_ready = true
+      await route.fulfill({
+        contentType: "application/json",
+        json: { ready: true, setup_available: true },
+      })
+      return
+    }
+
+    if (method === "GET" && workspaceMatch) {
+      const chat = chats.find((entry) => entry.id === workspaceMatch[1])
+      if (!chat) throw new Error("Unexpected chat ID")
+      await route.fulfill({
+        contentType: "application/json",
+        json: { ready: chat.workspace_ready, setup_available: true },
+      })
+      return
+    }
 
     if (method === "GET" && messagesMatch) {
       const before = url.searchParams.get("before")
@@ -69,6 +98,20 @@ const mockDevelopApi = async (page: Page) => {
       if (!chat) throw new Error("Unexpected chat ID")
       chat.title = body.title
       await route.fulfill({ contentType: "application/json", json: chat })
+      return
+    }
+
+    if (method === "DELETE" && chatMatch) {
+      if (url.searchParams.get("confirm") !== "true") {
+        throw new Error("Deletion was not confirmed")
+      }
+      const chatIndex = chats.findIndex((entry) => entry.id === chatMatch[1])
+      if (chatIndex === -1) throw new Error("Unexpected chat ID")
+      chats.splice(chatIndex, 1)
+      await route.fulfill({
+        contentType: "application/json",
+        json: { message: "Development Chat deleted" },
+      })
       return
     }
 
@@ -165,5 +208,40 @@ test.describe("Develop chat shell", () => {
       /Message 3$/,
       /Message 4$/,
     ])
+  })
+
+  test("sets up the selected chat repository", async ({ page }) => {
+    await page.getByRole("button", { name: "Set up repository" }).click()
+
+    await expect(
+      page.getByRole("button", { name: "Repository ready" }),
+    ).toBeDisabled()
+  })
+
+  test("cancels Development Chat deletion", async ({ page }) => {
+    await page.getByRole("button", { name: "Delete Development Chat" }).click()
+    await expect(
+      page.getByRole("dialog", { name: "Delete Development Chat" }),
+    ).toBeVisible()
+
+    await page.getByRole("button", { name: "Cancel" }).click()
+
+    await expect(
+      page.getByRole("heading", { name: "Most recent chat" }),
+    ).toBeVisible()
+  })
+
+  test("permanently deletes a Development Chat", async ({ page }) => {
+    await page.getByRole("button", { name: "Delete Development Chat" }).click()
+    await page.getByRole("button", { name: "Delete permanently" }).click()
+
+    await expect(
+      page.getByRole("heading", { name: "Earlier chat" }),
+    ).toBeVisible()
+    await expect(
+      page
+        .getByRole("navigation", { name: "Development Chats" })
+        .getByRole("button", { name: "Most recent chat" }),
+    ).not.toBeVisible()
   })
 })

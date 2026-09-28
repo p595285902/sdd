@@ -61,6 +61,10 @@ export type DevelopmentChatPublic = {
      */
     owner_id: string;
     /**
+     * Workspace Ready
+     */
+    workspace_ready: boolean;
+    /**
      * Created At
      */
     created_at: string;
@@ -138,6 +142,20 @@ export type DevelopmentMessagesPublic = {
      * Next Cursor
      */
     next_cursor?: string | null;
+};
+
+/**
+ * DevelopmentWorkspacePublic
+ */
+export type DevelopmentWorkspacePublic = {
+    /**
+     * Ready
+     */
+    ready: boolean;
+    /**
+     * Setup Available
+     */
+    setup_available: boolean;
 };
 
 /**
@@ -1103,6 +1121,41 @@ export type developCreateDevelopmentChatResponses = {
 
 export type developCreateDevelopmentChatResponse = developCreateDevelopmentChatResponses[keyof developCreateDevelopmentChatResponses];
 
+export type developDeleteDevelopmentChatData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: {
+        /**
+         * Confirm
+         */
+        confirm?: boolean;
+    };
+    url: '/api/v1/develop/chats/{chat_id}';
+};
+
+export type developDeleteDevelopmentChatErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developDeleteDevelopmentChatError = developDeleteDevelopmentChatErrors[keyof developDeleteDevelopmentChatErrors];
+
+export type developDeleteDevelopmentChatResponses = {
+    /**
+     * Successful Response
+     */
+    200: Message;
+};
+
+export type developDeleteDevelopmentChatResponse = developDeleteDevelopmentChatResponses[keyof developDeleteDevelopmentChatResponses];
+
 export type developReadDevelopmentChatData = {
     body?: never;
     path: {
@@ -1162,6 +1215,66 @@ export type developRenameDevelopmentChatResponses = {
 };
 
 export type developRenameDevelopmentChatResponse = developRenameDevelopmentChatResponses[keyof developRenameDevelopmentChatResponses];
+
+export type developReadDevelopmentWorkspaceData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/workspace';
+};
+
+export type developReadDevelopmentWorkspaceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developReadDevelopmentWorkspaceError = developReadDevelopmentWorkspaceErrors[keyof developReadDevelopmentWorkspaceErrors];
+
+export type developReadDevelopmentWorkspaceResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentWorkspacePublic;
+};
+
+export type developReadDevelopmentWorkspaceResponse = developReadDevelopmentWorkspaceResponses[keyof developReadDevelopmentWorkspaceResponses];
+
+export type developSetupDevelopmentWorkspaceData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/workspace/setup';
+};
+
+export type developSetupDevelopmentWorkspaceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developSetupDevelopmentWorkspaceError = developSetupDevelopmentWorkspaceErrors[keyof developSetupDevelopmentWorkspaceErrors];
+
+export type developSetupDevelopmentWorkspaceResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentWorkspacePublic;
+};
+
+export type developSetupDevelopmentWorkspaceResponse = developSetupDevelopmentWorkspaceResponses[keyof developSetupDevelopmentWorkspaceResponses];
 
 export type developReadDevelopmentMessagesData = {
     body?: never;

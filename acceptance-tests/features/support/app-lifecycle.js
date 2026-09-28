@@ -125,4 +125,32 @@ async function runBackendPython(code, ...args) {
   );
 }
 
-module.exports = { runBackendPython, startApplication, state, stopApplication };
+async function configureDevelopmentRepository(available) {
+  state.env.DEVELOP_REPOSITORY_URL = available
+    ? 'https://example.com/acceptance/repository.git'
+    : '';
+  state.env.DEVELOP_REPOSITORY_TOKEN = available
+    ? 'acceptance-token'
+    : 'incomplete-acceptance-token';
+  await run(
+    'docker',
+    composeArgs(
+      state.projectName,
+      'up',
+      '--detach',
+      '--force-recreate',
+      '--wait',
+      'backend',
+    ),
+    state.env,
+  );
+  await waitForApplication(state.baseUrl);
+}
+
+module.exports = {
+  configureDevelopmentRepository,
+  runBackendPython,
+  startApplication,
+  state,
+  stopApplication,
+};

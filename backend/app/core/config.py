@@ -1,4 +1,5 @@
 import warnings
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import (
@@ -6,6 +7,7 @@ from pydantic import (
     Field,
     HttpUrl,
     PostgresDsn,
+    SecretStr,
     computed_field,
     field_validator,
     model_validator,
@@ -23,6 +25,11 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     DEVELOP_HISTORY_LIMIT: int = Field(default=20, ge=1, le=100)
     DEVELOP_MESSAGE_PAGE_SIZE: int = Field(default=50, ge=1, le=100)
+    DEVELOP_REPOSITORY_URL: HttpUrl | None = None
+    DEVELOP_REPOSITORY_TOKEN: SecretStr | None = None
+    DEVELOP_WORKSPACE_ROOT: Path = Path("/tmp/sdd-develop-workspaces")
+    DEVELOP_SETUP_TIMEOUT_SECONDS: int = Field(default=300, ge=1, le=3600)
+    DEVELOP_FAKE_SETUP_RUNNER: bool = False
     SECRET_KEY: str
     # 60 minutes * 24 hours * 8 days = 8 days
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
@@ -41,6 +48,22 @@ class Settings(BaseSettings):
             if database_url.startswith(scheme):
                 return database_url.replace(scheme, "postgresql+psycopg://", 1)
         return database_url
+
+    @field_validator("DEVELOP_REPOSITORY_URL")
+    @classmethod
+    def _require_tokenless_repository_url(
+        cls, value: HttpUrl | None
+    ) -> HttpUrl | None:
+        if value is not None and (value.username or value.password):
+            raise ValueError("Repository URL must not contain credentials")
+        return value
+
+    @field_validator("DEVELOP_WORKSPACE_ROOT")
+    @classmethod
+    def _require_absolute_workspace_root(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("Development workspace root must be absolute")
+        return value
 
     SMTP_TLS: bool = True
     SMTP_SSL: bool = False

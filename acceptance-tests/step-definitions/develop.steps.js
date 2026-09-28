@@ -1,6 +1,9 @@
 const { Given, Then, When } = require('@cucumber/cucumber');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
+const {
+  configureDevelopmentRepository,
+} = require('../features/support/app-lifecycle.js');
 
 Given('an authenticated user is viewing the application', async function () {
   this.userToken = await this.apiClient.authenticateSuperuser();
@@ -206,3 +209,182 @@ Then(
     }
   },
 );
+
+Given(
+  'an authenticated user owns a Development Chat without a ready workspace',
+  async function () {
+    await configureDevelopmentRepository(true);
+    this.userToken = await this.apiClient.authenticateSuperuser();
+    this.developmentChat = await this.apiClient.createDevelopmentChat(
+      this.userToken,
+      `Workspace setup ${Date.now()}`,
+    );
+    await this.developPage.open(this.userToken);
+    await this.developPage.selectChat(this.developmentChat.title);
+  },
+);
+
+When('the user selects Set up repository', async function () {
+  await this.developPage.setupSelectedRepository();
+});
+
+Then(
+  "the configured repository is cloned into that chat's isolated Development Workspace",
+  async function () {
+    await this.apiClient.assertWorkspace(this.developmentChat.id, true);
+  },
+);
+
+Then(
+  'opencode and openspec are initialized in the Development Workspace',
+  async function () {
+    const response = await this.apiClient.developmentWorkspace(
+      this.userToken,
+      this.developmentChat.id,
+    );
+    assert.equal(response.status(), 200);
+    assert.equal((await response.json()).ready, true);
+  },
+);
+
+Given('the configured repository credentials are incomplete', async function () {
+  await configureDevelopmentRepository(false);
+  this.userToken = await this.apiClient.authenticateSuperuser();
+  this.developmentChat = await this.apiClient.createDevelopmentChat(
+    this.userToken,
+    `Unavailable setup ${Date.now()}`,
+  );
+  this.repositoryToken = 'incomplete-acceptance-token';
+});
+
+When('a user attempts to set up a repository', async function () {
+  this.response = await this.apiClient.setupDevelopmentWorkspace(
+    this.userToken,
+    this.developmentChat.id,
+  );
+});
+
+Then('repository setup fails with a safe configuration error', async function () {
+  assert.equal(this.response.status(), 503);
+  assert.deepEqual(await this.response.json(), {
+    detail: 'Development repository setup is not configured',
+  });
+});
+
+Then('no credential value is returned', async function () {
+  assert.equal((await this.response.text()).includes(this.repositoryToken), false);
+});
+
+Given('two Development Chats have ready workspaces', async function () {
+  await configureDevelopmentRepository(true);
+  this.userToken = await this.apiClient.authenticateSuperuser();
+  this.developmentChats = await Promise.all([
+    this.apiClient.createDevelopmentChat(this.userToken, `Isolated first ${Date.now()}`),
+    this.apiClient.createDevelopmentChat(this.userToken, `Isolated second ${Date.now()}`),
+  ]);
+  for (const chat of this.developmentChats) {
+    const response = await this.apiClient.setupDevelopmentWorkspace(
+      this.userToken,
+      chat.id,
+    );
+    assert.equal(response.status(), 200);
+  }
+});
+
+When('a command runs for one Development Chat', async function () {
+  this.workspaceMarker = `command-${randomUUID()}`;
+  await this.apiClient.markWorkspace(
+    this.developmentChats[0].id,
+    this.workspaceMarker,
+  );
+});
+
+Then(
+  "the command runs inside only that chat's Development Workspace",
+  async function () {
+    await this.apiClient.assertWorkspaceMarker(
+      this.developmentChats[0].id,
+      this.workspaceMarker,
+      true,
+    );
+  },
+);
+
+Then('the other Development Workspace is unchanged', async function () {
+  await this.apiClient.assertWorkspaceMarker(
+    this.developmentChats[1].id,
+    this.workspaceMarker,
+    false,
+  );
+});
+
+Given(
+  'an authenticated user has opened the delete confirmation for a Development Chat',
+  async function () {
+    await configureDevelopmentRepository(true);
+    this.userToken = await this.apiClient.authenticateSuperuser();
+    this.developmentChat = await this.apiClient.createDevelopmentChat(
+      this.userToken,
+      `Cancel deletion ${Date.now()}`,
+    );
+    await this.apiClient.setupDevelopmentWorkspace(
+      this.userToken,
+      this.developmentChat.id,
+    );
+    await this.developPage.open(this.userToken);
+    await this.developPage.selectChat(this.developmentChat.title);
+    await this.developPage.openDeleteConfirmation();
+  },
+);
+
+When('the user cancels deletion', async function () {
+  await this.developPage.cancelDeletion();
+});
+
+Then(
+  'the Development Chat and its Development Workspace remain available',
+  async function () {
+    const chatResponse = await this.apiClient.developmentChat(
+      this.userToken,
+      this.developmentChat.id,
+    );
+    assert.equal(chatResponse.status(), 200);
+    await this.apiClient.assertWorkspace(this.developmentChat.id, true);
+  },
+);
+
+Given(
+  'an authenticated user owns a Development Chat with a ready workspace',
+  async function () {
+    await configureDevelopmentRepository(true);
+    this.userToken = await this.apiClient.authenticateSuperuser();
+    this.developmentChat = await this.apiClient.createDevelopmentChat(
+      this.userToken,
+      `Confirm deletion ${Date.now()}`,
+    );
+    await this.apiClient.setupDevelopmentWorkspace(
+      this.userToken,
+      this.developmentChat.id,
+    );
+    await this.developPage.open(this.userToken);
+    await this.developPage.selectChat(this.developmentChat.title);
+    await this.developPage.openDeleteConfirmation();
+  },
+);
+
+When('the user confirms permanent deletion', async function () {
+  await this.developPage.confirmDeletion();
+});
+
+Then('the Development Chat and all of its messages are deleted', async function () {
+  const response = await this.apiClient.developmentChat(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.equal(response.status(), 404);
+  await this.apiClient.assertDevelopmentMessagesDeleted(this.developmentChat.id);
+});
+
+Then('its isolated Development Workspace is deleted', async function () {
+  await this.apiClient.assertWorkspace(this.developmentChat.id, false);
+});

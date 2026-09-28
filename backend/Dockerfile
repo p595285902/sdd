@@ -1,3 +1,6 @@
+FROM node:24.15-bookworm-slim AS node
+
+
 FROM oven/bun:1 AS frontend-build
 
 WORKDIR /app
@@ -19,6 +22,14 @@ RUN bun run build
 FROM python:3.14
 
 ENV PYTHONUNBUFFERED=1
+
+COPY --from=node /usr/local /usr/local
+
+RUN npm install -g \
+    @openai/codex \
+    bubblewrap \
+    opencode-ai \
+    @fission-ai/openspec@latest
 
 # Install uv
 # Ref: https://docs.astral.sh/uv/guides/integration/docker/#installing-uv

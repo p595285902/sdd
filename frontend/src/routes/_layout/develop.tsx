@@ -5,11 +5,27 @@ import {
   useQueryClient,
 } from "@tanstack/react-query"
 import { createFileRoute } from "@tanstack/react-router"
-import { Loader2, MessageSquarePlus, Pencil, Send } from "lucide-react"
+import {
+  GitBranch,
+  Loader2,
+  MessageSquarePlus,
+  Pencil,
+  Send,
+  Trash2,
+} from "lucide-react"
 import { type FormEvent, useState } from "react"
 
 import { type DevelopmentChatPublic, DevelopService } from "@/client"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import useCustomToast from "@/hooks/useCustomToast"
 import { handleError } from "@/utils"
@@ -34,6 +50,7 @@ function Develop() {
   const [firstMessage, setFirstMessage] = useState("")
   const [isRenaming, setIsRenaming] = useState(false)
   const [renameTitle, setRenameTitle] = useState("")
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false)
 
   const chatsQuery = useQuery({
     queryFn: async () => (await DevelopService.readDevelopmentChats()).data,
@@ -46,6 +63,17 @@ function Develop() {
     effectiveChatId === "new"
       ? undefined
       : chats.find((chat) => chat.id === effectiveChatId)
+
+  const workspaceQuery = useQuery({
+    enabled: Boolean(selectedChat),
+    queryFn: async () =>
+      (
+        await DevelopService.readDevelopmentWorkspace({
+          path: { chat_id: selectedChat?.id ?? "" },
+        })
+      ).data,
+    queryKey: ["development-workspace", selectedChat?.id],
+  })
 
   const messagesQuery = useInfiniteQuery({
     enabled: Boolean(selectedChat),
@@ -95,6 +123,37 @@ function Develop() {
     onError: handleError.bind(showErrorToast),
     onSuccess: async () => {
       setIsRenaming(false)
+      await queryClient.invalidateQueries({ queryKey: ["development-chats"] })
+    },
+  })
+
+  const setupWorkspace = useMutation({
+    mutationFn: async (chat: DevelopmentChatPublic) =>
+      (
+        await DevelopService.setupDevelopmentWorkspace({
+          path: { chat_id: chat.id },
+        })
+      ).data,
+    onError: handleError.bind(showErrorToast),
+    onSuccess: async (workspace) => {
+      queryClient.setQueryData(
+        ["development-workspace", selectedChat?.id],
+        workspace,
+      )
+      await queryClient.invalidateQueries({ queryKey: ["development-chats"] })
+    },
+  })
+
+  const deleteChat = useMutation({
+    mutationFn: async (chat: DevelopmentChatPublic) =>
+      DevelopService.deleteDevelopmentChat({
+        path: { chat_id: chat.id },
+        query: { confirm: true },
+      }),
+    onError: handleError.bind(showErrorToast),
+    onSuccess: async () => {
+      setIsDeleteOpen(false)
+      setSelectedChatId(null)
       await queryClient.invalidateQueries({ queryKey: ["development-chats"] })
     },
   })
@@ -209,15 +268,58 @@ function Develop() {
                     <h2 className="truncate text-base font-semibold">
                       {selectedChat.title}
                     </h2>
-                    <Button
-                      aria-label="Rename Development Chat"
-                      onClick={startRename}
-                      size="icon-sm"
-                      title="Rename Development Chat"
-                      variant="ghost"
-                    >
-                      <Pencil />
-                    </Button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Button
+                        aria-label={
+                          workspaceQuery.data?.ready
+                            ? "Repository ready"
+                            : "Set up repository"
+                        }
+                        disabled={
+                          workspaceQuery.isPending ||
+                          workspaceQuery.data?.ready ||
+                          !workspaceQuery.data?.setup_available ||
+                          setupWorkspace.isPending
+                        }
+                        onClick={() => setupWorkspace.mutate(selectedChat)}
+                        size="sm"
+                        title={
+                          workspaceQuery.data?.ready
+                            ? "Repository ready"
+                            : "Set up repository"
+                        }
+                        variant="outline"
+                      >
+                        {setupWorkspace.isPending ? (
+                          <Loader2 className="animate-spin" />
+                        ) : (
+                          <GitBranch />
+                        )}
+                        <span className="hidden sm:inline">
+                          {workspaceQuery.data?.ready
+                            ? "Repository ready"
+                            : "Set up repository"}
+                        </span>
+                      </Button>
+                      <Button
+                        aria-label="Rename Development Chat"
+                        onClick={startRename}
+                        size="icon-sm"
+                        title="Rename Development Chat"
+                        variant="ghost"
+                      >
+                        <Pencil />
+                      </Button>
+                      <Button
+                        aria-label="Delete Development Chat"
+                        onClick={() => setIsDeleteOpen(true)}
+                        size="icon-sm"
+                        title="Delete Development Chat"
+                        variant="ghost"
+                      >
+                        <Trash2 />
+                      </Button>
+                    </div>
                   </>
                 )}
               </div>
@@ -304,6 +406,33 @@ function Develop() {
           )}
         </section>
       </div>
+
+      <Dialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Development Chat</DialogTitle>
+            <DialogDescription>
+              This chat, its messages, and its Development Workspace will be
+              permanently deleted.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button disabled={deleteChat.isPending} variant="outline">
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button
+              disabled={deleteChat.isPending || !selectedChat}
+              onClick={() => selectedChat && deleteChat.mutate(selectedChat)}
+              variant="destructive"
+            >
+              {deleteChat.isPending && <Loader2 className="animate-spin" />}
+              Delete permanently
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
