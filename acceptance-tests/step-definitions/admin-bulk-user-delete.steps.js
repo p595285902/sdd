@@ -31,6 +31,7 @@ Given('a superuser is viewing their own row in the admin Users table', async fun
   const token = await this.apiClient.authenticateSuperuser();
   this.currentUser = await this.apiClient.currentUser();
   await this.adminUsersPage.open(token);
+  await this.adminUsersPage.showUser(this.currentUser.email);
 });
 
 Then("the selection checkbox for the current user's row is disabled", async function () {

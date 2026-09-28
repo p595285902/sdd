@@ -74,7 +74,14 @@ class DevelopPage {
   }
 
   async loadOlderMessages() {
-    await this.page.getByRole('button', { name: 'Load older messages' }).click();
+    const loadOlderButton = this.page.getByRole('button', {
+      name: 'Load older messages',
+    });
+    await expect(loadOlderButton).toBeVisible();
+    const messages = this.page.locator('article');
+    const previousCount = await messages.count();
+    await loadOlderButton.click();
+    await expect.poll(() => messages.count()).toBeGreaterThan(previousCount);
   }
 
   async visibleMessageContents() {

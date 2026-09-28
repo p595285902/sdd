@@ -53,6 +53,19 @@ class AdminUsersPage {
     await this.page.getByRole('button', { name: 'Go to next page' }).click();
   }
 
+  async showUser(email) {
+    await expect(this.selectAll()).toBeVisible();
+    const selection = this.selectionFor(email);
+    const nextPage = this.page.getByRole('button', { name: 'Go to next page' });
+    while ((await selection.count()) === 0) {
+      if ((await nextPage.count()) === 0 || (await nextPage.isDisabled())) {
+        throw new Error(`User ${email} is not available in the loaded table pages`);
+      }
+      await nextPage.click();
+    }
+    await expect(selection).toBeVisible();
+  }
+
   async visibleUserEmails() {
     return this.page
       .getByRole('checkbox', { name: /^Select / })
