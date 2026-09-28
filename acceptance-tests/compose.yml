@@ -9,8 +9,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/utils/health-check/"]
     environment:
       DEVELOP_FAKE_SETUP_RUNNER: "true"
-      DEVELOP_REPOSITORY_TOKEN: "${DEVELOP_REPOSITORY_TOKEN-acceptance-token}"
-      DEVELOP_REPOSITORY_URL: "${DEVELOP_REPOSITORY_URL-https://example.com/acceptance/repository.git}"
+      DEMO_GITHUB_REPO: "${DEMO_GITHUB_REPO-https://example.com/acceptance/demo-repository.git}"
+      DEMO_GITHUB_TOKEN: "${DEMO_GITHUB_TOKEN-acceptance-token}"
       FASTAPI_ENV: development
       FRONTEND_HOST: "http://127.0.0.1:${ACCEPTANCE_PORT:?Variable not set}"
       SMTP_PORT: "1025"

@@ -92,7 +92,7 @@ def test_missing_and_foreign_chats_have_same_response(
     assert foreign_response.json() == missing_response.json()
 
 
-def test_setup_repository_marks_owned_chat_workspace_ready(
+def test_setup_demo_repository_marks_owned_chat_workspace_ready(
     client: TestClient,
     superuser_token_headers: dict[str, str],
     db: Session,
@@ -106,11 +106,11 @@ def test_setup_repository_marks_owned_chat_workspace_ready(
     db.refresh(chat)
     monkeypatch.setattr(
         settings,
-        "DEVELOP_REPOSITORY_URL",
-        HttpUrl("https://example.com/owner/repository.git"),
+        "DEMO_GITHUB_REPO",
+        HttpUrl("https://example.com/demo/repository.git"),
     )
     monkeypatch.setattr(
-        settings, "DEVELOP_REPOSITORY_TOKEN", SecretStr("top-secret-token")
+        settings, "DEMO_GITHUB_TOKEN", SecretStr("top-secret-token")
     )
     monkeypatch.setattr(settings, "DEVELOP_WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(settings, "DEVELOP_FAKE_SETUP_RUNNER", True)
@@ -135,7 +135,7 @@ def test_setup_repository_marks_owned_chat_workspace_ready(
     assert readiness_response.json() == {"ready": True, "setup_available": True}
 
 
-def test_setup_repository_returns_safe_error_when_configuration_is_incomplete(
+def test_setup_demo_repository_returns_safe_error_when_configuration_is_incomplete(
     client: TestClient,
     superuser_token_headers: dict[str, str],
     db: Session,
@@ -147,8 +147,8 @@ def test_setup_repository_returns_safe_error_when_configuration_is_incomplete(
     db.commit()
     db.refresh(chat)
     token = "top-secret-token"
-    monkeypatch.setattr(settings, "DEVELOP_REPOSITORY_URL", None)
-    monkeypatch.setattr(settings, "DEVELOP_REPOSITORY_TOKEN", SecretStr(token))
+    monkeypatch.setattr(settings, "DEMO_GITHUB_REPO", None)
+    monkeypatch.setattr(settings, "DEMO_GITHUB_TOKEN", SecretStr(token))
 
     response = client.post(
         f"{DEVELOP_CHATS_URL}/{chat.id}/workspace/setup",
@@ -156,9 +156,7 @@ def test_setup_repository_returns_safe_error_when_configuration_is_incomplete(
     )
 
     assert response.status_code == 503
-    assert response.json() == {
-        "detail": "Development repository setup is not configured"
-    }
+    assert response.json() == {"detail": "Demo repository setup is not configured"}
     assert token not in response.text
 
 

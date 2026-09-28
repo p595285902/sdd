@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     DEVELOP_HISTORY_LIMIT: int = Field(default=20, ge=1, le=100)
     DEVELOP_MESSAGE_PAGE_SIZE: int = Field(default=50, ge=1, le=100)
-    DEVELOP_REPOSITORY_URL: HttpUrl | None = None
-    DEVELOP_REPOSITORY_TOKEN: SecretStr | None = None
+    DEMO_GITHUB_REPO: HttpUrl | None = None
+    DEMO_GITHUB_TOKEN: SecretStr | None = None
     DEVELOP_WORKSPACE_ROOT: Path = Path("/tmp/sdd-develop-workspaces")
     DEVELOP_SETUP_TIMEOUT_SECONDS: int = Field(default=300, ge=1, le=3600)
     DEVELOP_FAKE_SETUP_RUNNER: bool = False
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
                 return database_url.replace(scheme, "postgresql+psycopg://", 1)
         return database_url
 
-    @field_validator("DEVELOP_REPOSITORY_URL")
+    @field_validator("DEMO_GITHUB_REPO")
     @classmethod
     def _require_tokenless_repository_url(
         cls, value: HttpUrl | None

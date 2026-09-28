@@ -73,10 +73,12 @@ class DevelopPage {
     await expect(this.page.getByRole('heading', { name: title })).toBeVisible();
   }
 
-  async setupSelectedRepository() {
-    await this.page.getByRole('button', { name: 'Set up repository' }).click();
+  async setupSelectedDemoRepository() {
+    await this.page
+      .getByRole('button', { name: 'Set up demo repository' })
+      .click();
     await expect(
-      this.page.getByRole('button', { name: 'Repository ready' }),
+      this.page.getByRole('button', { name: 'Demo repository ready' }),
     ).toBeDisabled();
   }
 

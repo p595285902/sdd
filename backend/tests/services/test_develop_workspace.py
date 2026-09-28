@@ -125,9 +125,9 @@ def test_setup_workspace_keeps_credentials_out_of_arguments(tmp_path: Path) -> N
 
     assert [call[0][0] for call in runner.calls] == ["git", "opencode", "openspec"]
     assert all(token not in argument for call in runner.calls for argument in call[0])
-    assert runner.calls[0][2]["DEVELOP_REPOSITORY_TOKEN"] == token
-    assert "DEVELOP_REPOSITORY_TOKEN" not in runner.calls[1][2]
-    assert "DEVELOP_REPOSITORY_TOKEN" not in runner.calls[2][2]
+    assert runner.calls[0][2]["DEMO_GITHUB_TOKEN"] == token
+    assert "DEMO_GITHUB_TOKEN" not in runner.calls[1][2]
+    assert "DEMO_GITHUB_TOKEN" not in runner.calls[2][2]
     assert runner.calls[1][1] == workspace
     assert runner.calls[2][1] == workspace
     helper_argument = next(

@@ -210,11 +210,11 @@ test.describe("Develop chat shell", () => {
     ])
   })
 
-  test("sets up the selected chat repository", async ({ page }) => {
-    await page.getByRole("button", { name: "Set up repository" }).click()
+  test("sets up the selected chat demo repository", async ({ page }) => {
+    await page.getByRole("button", { name: "Set up demo repository" }).click()
 
     await expect(
-      page.getByRole("button", { name: "Repository ready" }),
+      page.getByRole("button", { name: "Demo repository ready" }),
     ).toBeDisabled()
   })
 

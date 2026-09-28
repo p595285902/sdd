@@ -2,7 +2,7 @@ const { Given, Then, When } = require('@cucumber/cucumber');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const {
-  configureDevelopmentRepository,
+  configureDemoRepository,
 } = require('../features/support/app-lifecycle.js');
 
 Given('an authenticated user is viewing the application', async function () {
@@ -213,7 +213,6 @@ Then(
 Given(
   'an authenticated user owns a Development Chat without a ready workspace',
   async function () {
-    await configureDevelopmentRepository(true);
     this.userToken = await this.apiClient.authenticateSuperuser();
     this.developmentChat = await this.apiClient.createDevelopmentChat(
       this.userToken,
@@ -224,12 +223,16 @@ Given(
   },
 );
 
-When('the user selects Set up repository', async function () {
-  await this.developPage.setupSelectedRepository();
+Given('the demo repository is configured', async function () {
+  await configureDemoRepository(true);
+});
+
+When('the user selects Set up demo repository', async function () {
+  await this.developPage.setupSelectedDemoRepository();
 });
 
 Then(
-  "the configured repository is cloned into that chat's isolated Development Workspace",
+  "the configured demo repository is cloned into that chat's isolated Development Workspace",
   async function () {
     await this.apiClient.assertWorkspace(this.developmentChat.id, true);
   },
@@ -247,36 +250,36 @@ Then(
   },
 );
 
-Given('the configured repository credentials are incomplete', async function () {
-  await configureDevelopmentRepository(false);
+Given('the demo repository credentials are incomplete', async function () {
+  await configureDemoRepository(false);
   this.userToken = await this.apiClient.authenticateSuperuser();
   this.developmentChat = await this.apiClient.createDevelopmentChat(
     this.userToken,
     `Unavailable setup ${Date.now()}`,
   );
-  this.repositoryToken = 'incomplete-acceptance-token';
+  this.repositoryToken = 'incomplete-demo-token';
 });
 
-When('a user attempts to set up a repository', async function () {
+When('a user attempts to set up the demo repository', async function () {
   this.response = await this.apiClient.setupDevelopmentWorkspace(
     this.userToken,
     this.developmentChat.id,
   );
 });
 
-Then('repository setup fails with a safe configuration error', async function () {
+Then('demo repository setup fails with a safe configuration error', async function () {
   assert.equal(this.response.status(), 503);
   assert.deepEqual(await this.response.json(), {
-    detail: 'Development repository setup is not configured',
+    detail: 'Demo repository setup is not configured',
   });
 });
 
-Then('no credential value is returned', async function () {
+Then('no demo credential value is returned', async function () {
   assert.equal((await this.response.text()).includes(this.repositoryToken), false);
 });
 
 Given('two Development Chats have ready workspaces', async function () {
-  await configureDevelopmentRepository(true);
+  await configureDemoRepository(true);
   this.userToken = await this.apiClient.authenticateSuperuser();
   this.developmentChats = await Promise.all([
     this.apiClient.createDevelopmentChat(this.userToken, `Isolated first ${Date.now()}`),
@@ -321,7 +324,7 @@ Then('the other Development Workspace is unchanged', async function () {
 Given(
   'an authenticated user has opened the delete confirmation for a Development Chat',
   async function () {
-    await configureDevelopmentRepository(true);
+    await configureDemoRepository(true);
     this.userToken = await this.apiClient.authenticateSuperuser();
     this.developmentChat = await this.apiClient.createDevelopmentChat(
       this.userToken,
@@ -356,7 +359,7 @@ Then(
 Given(
   'an authenticated user owns a Development Chat with a ready workspace',
   async function () {
-    await configureDevelopmentRepository(true);
+    await configureDemoRepository(true);
     this.userToken = await this.apiClient.authenticateSuperuser();
     this.developmentChat = await this.apiClient.createDevelopmentChat(
       this.userToken,

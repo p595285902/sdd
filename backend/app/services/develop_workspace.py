@@ -110,7 +110,7 @@ def setup_workspace(
 ) -> Path:
     target = prepare_workspace(root=root, chat_id=chat_id)
     base_env = dict(os.environ)
-    base_env.pop("DEVELOP_REPOSITORY_TOKEN", None)
+    base_env.pop("DEMO_GITHUB_TOKEN", None)
     try:
         with tempfile.TemporaryDirectory(prefix=".credential-", dir=root) as temp_dir:
             helper = Path(temp_dir) / "git-credential-develop"
@@ -118,11 +118,11 @@ def setup_workspace(
                 "#!/bin/sh\n"
                 'if [ "$1" = "get" ]; then\n'
                 "  printf '%s\\n' 'username=x-access-token' "
-                '"password=$DEVELOP_REPOSITORY_TOKEN"\n'
+                '"password=$DEMO_GITHUB_TOKEN"\n'
                 "fi\n"
             )
             helper.chmod(0o700)
-            clone_env = {**base_env, "DEVELOP_REPOSITORY_TOKEN": repository_token}
+            clone_env = {**base_env, "DEMO_GITHUB_TOKEN": repository_token}
             runner.run(
                 (
                     "git",

@@ -125,13 +125,13 @@ async function runBackendPython(code, ...args) {
   );
 }
 
-async function configureDevelopmentRepository(available) {
-  state.env.DEVELOP_REPOSITORY_URL = available
-    ? 'https://example.com/acceptance/repository.git'
+async function configureDemoRepository(available) {
+  state.env.DEMO_GITHUB_REPO = available
+    ? 'https://example.com/acceptance/demo-repository.git'
     : '';
-  state.env.DEVELOP_REPOSITORY_TOKEN = available
+  state.env.DEMO_GITHUB_TOKEN = available
     ? 'acceptance-token'
-    : 'incomplete-acceptance-token';
+    : 'incomplete-demo-token';
   await run(
     'docker',
     composeArgs(
@@ -148,7 +148,7 @@ async function configureDevelopmentRepository(available) {
 }
 
 module.exports = {
-  configureDevelopmentRepository,
+  configureDemoRepository,
   runBackendPython,
   startApplication,
   state,

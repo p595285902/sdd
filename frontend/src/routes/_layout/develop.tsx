@@ -272,8 +272,8 @@ function Develop() {
                       <Button
                         aria-label={
                           workspaceQuery.data?.ready
-                            ? "Repository ready"
-                            : "Set up repository"
+                            ? "Demo repository ready"
+                            : "Set up demo repository"
                         }
                         disabled={
                           workspaceQuery.isPending ||
@@ -285,8 +285,8 @@ function Develop() {
                         size="sm"
                         title={
                           workspaceQuery.data?.ready
-                            ? "Repository ready"
-                            : "Set up repository"
+                            ? "Demo repository ready"
+                            : "Set up demo repository"
                         }
                         variant="outline"
                       >
@@ -297,8 +297,8 @@ function Develop() {
                         )}
                         <span className="hidden sm:inline">
                           {workspaceQuery.data?.ready
-                            ? "Repository ready"
-                            : "Set up repository"}
+                            ? "Demo repository ready"
+                            : "Set up demo repository"}
                         </span>
                       </Button>
                       <Button

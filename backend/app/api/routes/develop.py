@@ -50,9 +50,7 @@ def _get_chat(
 
 
 def _repository_setup_available() -> bool:
-    return bool(
-        settings.DEVELOP_REPOSITORY_URL and settings.DEVELOP_REPOSITORY_TOKEN
-    )
+    return bool(settings.DEMO_GITHUB_REPO and settings.DEMO_GITHUB_TOKEN)
 
 
 def _workspace_status(chat: DevelopmentChat) -> DevelopmentWorkspacePublic:
@@ -150,12 +148,12 @@ def setup_development_workspace(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
 ) -> Any:
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
-    repository_url = settings.DEVELOP_REPOSITORY_URL
-    repository_token = settings.DEVELOP_REPOSITORY_TOKEN
+    repository_url = settings.DEMO_GITHUB_REPO
+    repository_token = settings.DEMO_GITHUB_TOKEN
     if not repository_url or not repository_token:
         raise HTTPException(
             status_code=503,
-            detail="Development repository setup is not configured",
+            detail="Demo repository setup is not configured",
         )
 
     chat.workspace_ready = False
@@ -178,7 +176,7 @@ def setup_development_workspace(
     except WorkspaceSetupError:
         raise HTTPException(
             status_code=502,
-            detail="Development repository setup failed",
+            detail="Demo repository setup failed",
         )
 
     chat.workspace_ready = True

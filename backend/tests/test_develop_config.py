@@ -14,11 +14,14 @@ def _settings_data(**overrides: object) -> dict[str, object]:
 
 def test_repository_configuration_may_be_missing() -> None:
     configured = Settings.model_validate(
-        _settings_data(DEVELOP_REPOSITORY_URL=None, DEVELOP_REPOSITORY_TOKEN=None)
+        _settings_data(
+            DEMO_GITHUB_REPO=None,
+            DEMO_GITHUB_TOKEN=None,
+        )
     )
 
-    assert configured.DEVELOP_REPOSITORY_URL is None
-    assert configured.DEVELOP_REPOSITORY_TOKEN is None
+    assert configured.DEMO_GITHUB_REPO is None
+    assert configured.DEMO_GITHUB_TOKEN is None
 
 
 @pytest.mark.parametrize(
@@ -32,7 +35,7 @@ def test_repository_configuration_may_be_missing() -> None:
 def test_repository_url_must_be_tokenless_http_url(repository_url: str) -> None:
     with pytest.raises(ValidationError):
         Settings.model_validate(
-            _settings_data(DEVELOP_REPOSITORY_URL=repository_url)
+            _settings_data(DEMO_GITHUB_REPO=repository_url)
         )
 
 
