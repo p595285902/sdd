@@ -7,6 +7,7 @@ This change follows `add-develop-chat-foundation`. Development Chats exist, but 
 **Goals:**
 
 - Create one isolated checkout per chat under a configured root.
+- Offer configured and demo repository sources without allowing arbitrary client-supplied repository URLs or credentials.
 - Keep repository credentials out of arguments, persisted Git configuration, logs, and API payloads.
 - Make setup retry and deletion safe and deterministic.
 
@@ -30,6 +31,12 @@ Clone a tokenless repository URL and provide credentials through the process env
 
 Alternative considered: embedding the token in the clone URL. Process listings and Git metadata could expose it.
 
+### Keep configured and demo repository sources explicit
+
+Expose separate setup actions for the configured repository and demo repository. Resolve the existing action from `DEVELOP_REPOSITORY_URL` and `DEVELOP_REPOSITORY_TOKEN`; resolve the adjacent demo action from `DEMO_GITHUB_REPO` and `DEMO_GITHUB_TOKEN`. Both actions call the same credential-safe workspace service, and neither accepts repository configuration from the client.
+
+Alternative considered: one repository selector with client-provided values. Separate server-configured actions keep credentials and repository policy outside the client contract.
+
 ### Recreate partial setup on retry
 
 A setup retry removes a validated partial chat directory and starts clean before cloning, `opencode init`, and `openspec init --tools opencode`. A deterministic setup runner replaces real commands in tests.
@@ -44,7 +51,7 @@ Alternative considered: resume partial setup. Tool-specific intermediate state m
 
 ## Migration Plan
 
-Add workspace settings and service, extend confirmed chat deletion, add setup endpoints and controls, then implement the five scenarios. Rollback disables setup and deletion routes before removing workspace configuration; existing directories remain recoverable.
+Add workspace settings and service, extend confirmed chat deletion, add configured and demo setup endpoints and controls, then implement the scenarios. Rollback disables setup and deletion routes before removing workspace configuration; existing directories remain recoverable.
 
 ## Open Questions
 

@@ -5,7 +5,7 @@ Develop workspace gives each Development Chat an isolated checkout of one config
 ## ADDED Requirements
 
 ### Requirement: Repository setup creates an isolated Development Workspace
-The system SHALL set up the configured repository in a workspace dedicated to one Development Chat, SHALL initialize `opencode` and `openspec` there, and MUST keep credentials out of client-visible responses and process arguments.
+The system SHALL let a user set up either the configured repository or the demo repository in a workspace dedicated to one Development Chat, SHALL initialize `opencode` and `openspec` there, and MUST keep credentials out of client-visible responses and process arguments. The demo repository action SHALL use only `DEMO_GITHUB_REPO` and `DEMO_GITHUB_TOKEN` and SHALL appear next to the configured repository action.
 
 #### Scenario: User sets up the configured repository
 
@@ -23,6 +23,25 @@ Given the configured repository credentials are incomplete
 When a user attempts to set up a repository
 Then repository setup fails with a safe configuration error
 And no credential value is returned
+```
+
+#### Scenario: User sets up the demo repository
+
+```gherkin
+Given an authenticated user owns a Development Chat without a ready workspace
+And the demo repository is configured
+When the user selects Set up demo repository next to Set up repository
+Then the configured demo repository is cloned into that chat's isolated Development Workspace
+And opencode and openspec are initialized in the Development Workspace
+```
+
+#### Scenario: Demo repository setup is unavailable when configuration is missing
+
+```gherkin
+Given the demo repository credentials are incomplete
+When a user attempts to set up the demo repository
+Then demo repository setup fails with a safe configuration error
+And no demo credential value is returned
 ```
 
 #### Scenario: Development Workspaces are isolated

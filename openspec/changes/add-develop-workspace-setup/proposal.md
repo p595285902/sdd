@@ -5,6 +5,7 @@ Development Chats need isolated checkouts of the configured repository before an
 ## What Changes
 
 - Set up one isolated Development Workspace per Development Chat from the configured repository.
+- Offer a separate demo-repository setup action backed by `DEMO_GITHUB_REPO` and `DEMO_GITHUB_TOKEN`.
 - Initialize `opencode` and `openspec` in each workspace through a replaceable command runner boundary.
 - Keep repository credentials out of client responses and process arguments.
 - Support safe setup retry and validated workspace deletion.
@@ -14,7 +15,7 @@ Development Chats need isolated checkouts of the configured repository before an
 
 ### New Capabilities
 
-- `develop-workspace`: Configured-repository setup, isolated per-chat workspaces, safe cleanup, and confirmed chat deletion.
+- `develop-workspace`: Configured- or demo-repository setup, isolated per-chat workspaces, safe cleanup, and confirmed chat deletion.
 
 ### Modified Capabilities
 
@@ -22,5 +23,5 @@ None.
 
 ## Impact
 
-- Develop configuration, workspace service, command-runner boundary, chat deletion API, setup/deletion controls, and tests.
+- Develop and demo-repository configuration, workspace service, command-runner boundary, chat deletion API, setup/deletion controls, and tests.
 - Requires `add-develop-chat-foundation` to be implemented first.

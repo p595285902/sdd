@@ -26,3 +26,18 @@
 - [x] 4.1 Run backend tests and static checks for workspace lifecycle
 - [x] 4.2 Run frontend checks and focused interaction tests
 - [x] 4.3 Run spec lint and the full effective acceptance suite with zero pending or undefined steps
+
+## 5. Demo repository setup
+
+- [ ] 5.1 Add validated `DEMO_GITHUB_REPO` and `DEMO_GITHUB_TOKEN` settings without exposing either value
+- [ ] 5.2 Add an ownership-scoped demo setup endpoint that reuses the credential-safe workspace service
+- [ ] 5.3 Add Set up demo repository next to Set up repository and represent its availability independently
+- [ ] 5.4 Add focused backend and frontend tests for demo setup success, missing configuration, and credential safety
+- [ ] 5.5 User sets up the demo repository — red -> green -> commit
+- [ ] 5.6 Demo repository setup is unavailable when configuration is missing — red -> green -> commit
+
+## 6. Demo repository completion
+
+- [ ] 6.1 Run backend tests and static checks for both repository setup paths
+- [ ] 6.2 Run frontend checks and focused interaction tests for both setup controls
+- [ ] 6.3 Run spec lint and the full effective acceptance suite with zero pending or undefined steps
