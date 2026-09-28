@@ -1,36 +1,18 @@
 # Develop workspace
 
-Develop workspace gives each Development Chat an isolated checkout of one configured repository.
+Develop workspace gives each Development Chat an isolated checkout of the configured demo repository.
 
 ## ADDED Requirements
 
 ### Requirement: Repository setup creates an isolated Development Workspace
-The system SHALL let a user set up either the configured repository or the demo repository in a workspace dedicated to one Development Chat, SHALL initialize `opencode` and `openspec` there, and MUST keep credentials out of client-visible responses and process arguments. The demo repository action SHALL use only `DEMO_GITHUB_REPO` and `DEMO_GITHUB_TOKEN` and SHALL appear next to the configured repository action.
-
-#### Scenario: User sets up the configured repository
-
-```gherkin
-Given an authenticated user owns a Development Chat without a ready workspace
-When the user selects Set up repository
-Then the configured repository is cloned into that chat's isolated Development Workspace
-And opencode and openspec are initialized in the Development Workspace
-```
-
-#### Scenario: Repository setup is unavailable when configuration is missing
-
-```gherkin
-Given the configured repository credentials are incomplete
-When a user attempts to set up a repository
-Then repository setup fails with a safe configuration error
-And no credential value is returned
-```
+The system SHALL let a user set up the demo repository in a workspace dedicated to one Development Chat, SHALL initialize `opencode` and `openspec` there, and MUST keep credentials out of client-visible responses and process arguments. Repository setup SHALL use only `DEMO_GITHUB_REPO` and `DEMO_GITHUB_TOKEN`; connecting a user-owned repository is not supported.
 
 #### Scenario: User sets up the demo repository
 
 ```gherkin
 Given an authenticated user owns a Development Chat without a ready workspace
 And the demo repository is configured
-When the user selects Set up demo repository next to Set up repository
+When the user selects Set up demo repository
 Then the configured demo repository is cloned into that chat's isolated Development Workspace
 And opencode and openspec are initialized in the Development Workspace
 ```

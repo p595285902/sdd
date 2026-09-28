@@ -7,7 +7,7 @@ This change follows `add-develop-chat-foundation`. Development Chats exist, but 
 **Goals:**
 
 - Create one isolated checkout per chat under a configured root.
-- Offer configured and demo repository sources without allowing arbitrary client-supplied repository URLs or credentials.
+- Set up only the server-configured demo repository without accepting client-supplied repository URLs or credentials.
 - Keep repository credentials out of arguments, persisted Git configuration, logs, and API payloads.
 - Make setup retry and deletion safe and deterministic.
 
@@ -15,7 +15,7 @@ This change follows `add-develop-chat-foundation`. Development Chats exist, but 
 
 - Running exploration or retaining agent sessions.
 - Coordinating active turns or streaming events.
-- Selecting repositories or credentials per user.
+- Connecting, selecting, or authenticating user-owned repositories. That remains a future feature.
 
 ## Decisions
 
@@ -31,11 +31,11 @@ Clone a tokenless repository URL and provide credentials through the process env
 
 Alternative considered: embedding the token in the clone URL. Process listings and Git metadata could expose it.
 
-### Keep configured and demo repository sources explicit
+### Use one server-configured demo repository source
 
-Expose separate setup actions for the configured repository and demo repository. Resolve the existing action from `DEVELOP_REPOSITORY_URL` and `DEVELOP_REPOSITORY_TOKEN`; resolve the adjacent demo action from `DEMO_GITHUB_REPO` and `DEMO_GITHUB_TOKEN`. Both actions call the same credential-safe workspace service, and neither accepts repository configuration from the client.
+Expose one setup action for the demo repository and resolve it only from `DEMO_GITHUB_REPO` and `DEMO_GITHUB_TOKEN`. The action calls the credential-safe workspace service and accepts no repository configuration from the client.
 
-Alternative considered: one repository selector with client-provided values. Separate server-configured actions keep credentials and repository policy outside the client contract.
+Alternative considered: retaining a configured user-repository action or accepting client-provided values. Deferring user-repository connection keeps authentication and repository selection outside the current contract.
 
 ### Recreate partial setup on retry
 
@@ -51,7 +51,7 @@ Alternative considered: resume partial setup. Tool-specific intermediate state m
 
 ## Migration Plan
 
-Add workspace settings and service, extend confirmed chat deletion, add configured and demo setup endpoints and controls, then implement the scenarios. Rollback disables setup and deletion routes before removing workspace configuration; existing directories remain recoverable.
+Add demo workspace settings and service, extend confirmed chat deletion, add the demo setup endpoint and control, then implement the scenarios. Remove the superseded configured-repository settings, endpoint behavior, and control. Rollback disables setup and deletion routes before removing workspace configuration; existing directories remain recoverable.
 
 ## Open Questions
 
