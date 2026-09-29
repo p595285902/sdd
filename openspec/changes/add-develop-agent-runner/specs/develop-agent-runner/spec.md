@@ -17,13 +17,32 @@ And ordered agent activity and response text are normalized
 And the completed assistant response is stored with the validated agent session
 ```
 
+#### Scenario: User updates a repository through OpenCode
+
+```gherkin
+Given an authenticated user owns a Development Chat with a ready workspace
+And OpenCode is connected to an OpenAI-compatible LLM
+When the user types "update the readme file to append `test`" in the chatbox
+Then OpenCode sends the prompt to the configured LLM
+And OpenCode appends "test" to the README file
+And the chatbox displays OpenCode's response
+```
+
 ### Requirement: Agent execution failures are bounded and safe
-The system MUST bound agent activity, terminate command process groups on cancellation or failure, and scrub configured secrets before output is logged, raised, returned, or persisted.
+The system MUST provide the configured provider credential to OpenCode as `OPENAI_API_KEY`, bound agent activity, terminate command process groups on cancellation or failure, and scrub configured secrets before output is logged, raised, returned, or persisted.
+
+#### Scenario: OpenCode receives the provider credential
+
+```gherkin
+Given the OPENAI_API_KEY environment variable is configured
+When an OpenCode exploration starts
+Then OpenCode connects to the OpenAI provider using OPENAI_API_KEY
+```
 
 #### Scenario: Agent output contains a configured secret
 
 ```gherkin
-Given agent output contains a configured repository or provider secret
+Given agent output contains the configured OPENAI_API_KEY or repository secret
 When the output is logged, stored, or returned
 Then the complete secret value is not present
 And a redacted value is used instead

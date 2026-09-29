@@ -4,7 +4,8 @@ A ready Development Workspace needs deterministic agent execution before long-li
 
 ## What Changes
 
-- Add production and deterministic fake command runners with process-group cancellation, stderr draining, timeout, failure, blocking, and scripted event support.
+- Add a production command runner with process-group cancellation, stderr draining, timeout, failure, and blocking support.
+- Exercise the production runner and real OpenCode process against a programmable local OpenAI-compatible fake LLM in acceptance tests.
 - Run exploration inside only the owning chat's Development Workspace.
 - Normalize newline-delimited `opencode` events and persist bounded activity, response text, and validated session continuity.
 - Scrub configured secrets from logs, errors, events, and persisted output.
@@ -21,6 +22,6 @@ None.
 
 ## Impact
 
-- Agent service, command runners, event fixtures, settings, persistence integration, and focused backend tests.
-- Acceptance support uses only the fake runner and never external services.
+- Agent service, production command runner, process fixtures, event fixtures, settings, persistence integration, and focused backend tests.
+- Acceptance support runs real OpenCode against a programmable local fake LLM and never calls an external provider.
 - Requires `add-develop-workspace-setup` to be implemented first.

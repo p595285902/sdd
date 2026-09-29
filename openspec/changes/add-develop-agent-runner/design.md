@@ -9,7 +9,7 @@ This change follows `add-develop-workspace-setup`. Ready workspaces exist, but n
 - Execute exploration deterministically inside the owning workspace.
 - Normalize OpenCode newline-delimited JSON and retain validated session continuity.
 - Bound persisted activity and scrub secrets at every output boundary.
-- Make production process behavior replaceable in tests.
+- Exercise the production runner and real OpenCode process in acceptance tests without external provider calls.
 
 **Non-Goals:**
 
@@ -19,11 +19,13 @@ This change follows `add-develop-workspace-setup`. Ready workspaces exist, but n
 
 ## Decisions
 
-### Put subprocess behavior behind a command-runner protocol
+### Exercise the production runner through real OpenCode
 
-Production uses process groups, concurrent stderr draining, bounded waits, and termination on cancellation or failure. Tests use a deterministic fake with scripted events, blocking, failure, and cancellation hooks. Acceptance startup rejects accidental real-runner selection.
+Production uses process groups, concurrent stderr draining, bounded waits, and termination on cancellation or failure. Acceptance tests use that same runner to launch real OpenCode against a programmable local OpenAI-compatible fake LLM. A test-only control API scripts completions, tool calls, malformed streams, delays, disconnects, and provider failures without encoding control behavior in user prompts. Acceptance startup rejects any external provider endpoint.
 
-Alternative considered: patching `subprocess` directly in each test. That produces brittle tests and cannot model blocking lifecycle behavior consistently.
+A narrow fixture executable covers OS-level states that OpenCode cannot reliably produce, such as descendants that ignore graceful termination. It tests the production runner directly without adding a second application runner implementation.
+
+Alternative considered: use an application-level fake runner. That is deterministic but bypasses OpenCode invocation, provider configuration, event emission, and the production process lifecycle in acceptance tests.
 
 ### Port event normalization rather than raw output
 
@@ -40,12 +42,13 @@ Alternative considered: log-only scrubbing. Errors and persisted tool output are
 ## Risks / Trade-offs
 
 - [OpenCode event formats drift] -> Keep parsing isolated, ignore unknown events, and cover representative fixtures.
+- [The fake LLM drifts from the OpenAI protocol] -> Cover captured protocol fixtures.
 - [A child process survives cancellation] -> Start a process group and terminate the group with a bounded escalation path.
 - [Activity grows without bound] -> Cap retained parts and content lengths through settings.
 
 ## Migration Plan
 
-Add runner interfaces and fixtures, port normalization and scrubbing, add the exploration service and session fields, then implement the two scenarios. Rollback unregisters exploration while leaving ready workspaces intact.
+Add the production runner and process fixture, port normalization and scrubbing, add the programmable fake LLM and exploration service, then implement the acceptance scenarios. Rollback unregisters exploration and removes the test endpoint while leaving ready workspaces intact.
 
 ## Open Questions
 
