@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import EmailStr, field_validator
-from sqlalchemy import DateTime, Index
+from sqlalchemy import JSON, Column, DateTime, Index
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -148,6 +148,18 @@ class DevelopmentChatUpdate(DevelopmentChatBase):
     pass
 
 
+class DevelopmentMessageCreate(SQLModel):
+    content: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("content")
+    @classmethod
+    def content_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Content must not be blank")
+        return value
+
+
 class DevelopmentChat(DevelopmentChatBase, table=True):
     __table_args__ = (
         Index("ix_developmentchat_owner_updated_id", "owner_id", "updated_at", "id"),
@@ -158,6 +170,7 @@ class DevelopmentChat(DevelopmentChatBase, table=True):
         foreign_key="user.id", nullable=False, ondelete="CASCADE"
     )
     workspace_ready: bool = Field(default=False, nullable=False)
+    agent_session_id: str | None = Field(default=None, max_length=255)
     created_at: datetime = Field(
         default_factory=get_datetime_utc,
         sa_type=DateTime(timezone=True),  # type: ignore
@@ -198,6 +211,10 @@ class DevelopmentMessageRole(StrEnum):
 class DevelopmentMessageBase(SQLModel):
     role: DevelopmentMessageRole
     content: str = Field(min_length=1, max_length=100_000)
+    activity: list[dict[str, str]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
 
     @field_validator("content")
     @classmethod

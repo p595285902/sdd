@@ -5,6 +5,22 @@ const {
   configureDemoRepository,
 } = require('../features/support/app-lifecycle.js');
 
+async function prepareReadyDevelopmentChat(world, titlePrefix) {
+  await configureDemoRepository(true);
+  world.userToken = await world.apiClient.authenticateSuperuser();
+  world.developmentChat = await world.apiClient.createDevelopmentChat(
+    world.userToken,
+    `${titlePrefix} ${Date.now()}`,
+  );
+  const response = await world.apiClient.setupDevelopmentWorkspace(
+    world.userToken,
+    world.developmentChat.id,
+  );
+  assert.equal(response.status(), 200);
+  await world.developPage.open(world.userToken);
+  await world.developPage.selectChat(world.developmentChat.title);
+}
+
 Given('an authenticated user is viewing the application', async function () {
   this.userToken = await this.apiClient.authenticateSuperuser();
   await this.developPage.openApplication(this.userToken);
@@ -359,23 +375,12 @@ Then(
 Given(
   'an authenticated user owns a Development Chat with a ready workspace',
   async function () {
-    await configureDemoRepository(true);
-    this.userToken = await this.apiClient.authenticateSuperuser();
-    this.developmentChat = await this.apiClient.createDevelopmentChat(
-      this.userToken,
-      `Confirm deletion ${Date.now()}`,
-    );
-    await this.apiClient.setupDevelopmentWorkspace(
-      this.userToken,
-      this.developmentChat.id,
-    );
-    await this.developPage.open(this.userToken);
-    await this.developPage.selectChat(this.developmentChat.title);
-    await this.developPage.openDeleteConfirmation();
+    await prepareReadyDevelopmentChat(this, 'Ready workspace');
   },
 );
 
 When('the user confirms permanent deletion', async function () {
+  await this.developPage.openDeleteConfirmation();
   await this.developPage.confirmDeletion();
 });
 
@@ -390,4 +395,165 @@ Then('the Development Chat and all of its messages are deleted', async function 
 
 Then('its isolated Development Workspace is deleted', async function () {
   await this.apiClient.assertWorkspace(this.developmentChat.id, false);
+});
+
+When('the user submits an exploration message', async function () {
+  this.explorationMessage = 'Inspect the repository structure';
+  this.agentResponse = 'Repository explored by the fake provider.';
+  await this.apiClient.configureFakeLlm([
+    { kind: 'text', text: this.agentResponse },
+  ]);
+  this.response = await this.apiClient.exploreDevelopmentChat(
+    this.userToken,
+    this.developmentChat.id,
+    this.explorationMessage,
+  );
+  assert.equal(this.response.status(), 200, await this.response.text());
+});
+
+Then('the user message is stored before agent execution starts', async function () {
+  const messages = await this.apiClient.listDevelopmentMessages(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.equal(messages.data.at(-2).content, this.explorationMessage);
+  assert.equal(messages.data.at(-2).role, 'user');
+});
+
+Then('ordered agent activity and response text are normalized', async function () {
+  const messages = await this.apiClient.listDevelopmentMessages(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  const assistant = messages.data.at(-1);
+  assert.equal(assistant.content, this.agentResponse);
+  assert.ok(assistant.activity.length > 0);
+  assert.equal(assistant.activity[0].text, 'Thinking...');
+});
+
+Then('the completed assistant response is stored with the validated agent session', async function () {
+  await this.apiClient.assertAgentSession(this.developmentChat.id);
+});
+
+Given('OpenCode is connected to an OpenAI-compatible LLM', async function () {
+  this.agentResponse = 'README updated.';
+  await this.apiClient.configureFakeLlm([
+    { kind: 'text', text: 'Update README' },
+    {
+      kind: 'tool',
+      tool_name: 'bash',
+      tool_arguments: {
+        command: "printf '\\ntest\\n' >> README.md",
+        description: 'Append test to README',
+      },
+    },
+    { kind: 'text', text: this.agentResponse },
+  ]);
+});
+
+When('the user types "update the readme file to append `test`" in the chatbox', async function () {
+  await this.developPage.submitExploration(
+    'update the readme file to append `test`',
+    this.agentResponse,
+  );
+});
+
+Then('OpenCode sends the prompt to the configured LLM', async function () {
+  const requests = await this.apiClient.fakeLlmRequests();
+  assert.ok(requests.length > 0);
+  assert.match(JSON.stringify(requests[0].body), /update the readme file/);
+});
+
+Then('OpenCode appends "test" to the README file', async function () {
+  try {
+    await this.apiClient.assertWorkspaceContent(
+      this.developmentChat.id,
+      'README.md',
+      'test',
+    );
+  } catch (error) {
+    const requests = await this.apiClient.fakeLlmRequests();
+    const providerTrace = requests.map(({ body }) => ({
+      input: body.input?.slice(-5).map((item) => ({
+        call_id: item.call_id,
+        name: item.name,
+        output: item.output,
+        role: item.role,
+        type: item.type,
+      })),
+      tools: body.tools?.map((tool) => tool.name),
+    }));
+    throw new Error(
+      `${error.message}\nProvider trace: ${JSON.stringify(providerTrace)}`,
+    );
+  }
+});
+
+Then("the chatbox displays OpenCode's response", async function () {
+  const contents = await this.developPage.visibleMessageContents();
+  assert.ok(contents.some((content) => content.includes(this.agentResponse)));
+});
+
+Given('the OPENAI_API_KEY environment variable is configured', async function () {
+  await prepareReadyDevelopmentChat(this, 'Provider credential');
+  this.agentResponse = 'Credential received.';
+  await this.apiClient.configureFakeLlm([
+    { kind: 'text', text: this.agentResponse },
+  ]);
+});
+
+When('an OpenCode exploration starts', async function () {
+  this.response = await this.apiClient.exploreDevelopmentChat(
+    this.userToken,
+    this.developmentChat.id,
+    'Check provider configuration',
+  );
+  assert.equal(this.response.status(), 200, await this.response.text());
+});
+
+Then('OpenCode connects to the OpenAI provider using OPENAI_API_KEY', async function () {
+  const requests = await this.apiClient.fakeLlmRequests();
+  assert.equal(
+    requests[0].authorization,
+    `Bearer ${this.applicationState.env.OPENAI_API_KEY ?? 'acceptance-provider-key'}`,
+  );
+});
+
+Given('agent output contains the configured OPENAI_API_KEY or repository secret', async function () {
+  await prepareReadyDevelopmentChat(this, 'Secret redaction');
+  this.providerSecret = this.applicationState.env.OPENAI_API_KEY ?? 'acceptance-provider-key';
+  this.repositorySecret = this.applicationState.env.DEMO_GITHUB_TOKEN ?? 'acceptance-token';
+  await this.apiClient.configureFakeLlm([
+    {
+      kind: 'text',
+      text: `provider=${this.providerSecret} repository=${this.repositorySecret}`,
+    },
+  ]);
+});
+
+When('the output is logged, stored, or returned', async function () {
+  this.response = await this.apiClient.exploreDevelopmentChat(
+    this.userToken,
+    this.developmentChat.id,
+    'Return configured values',
+  );
+  assert.equal(this.response.status(), 200, await this.response.text());
+  this.returnedOutput = await this.response.text();
+  const messages = await this.apiClient.listDevelopmentMessages(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  this.storedOutput = JSON.stringify(messages.data.at(-1));
+});
+
+Then('the complete secret value is not present', function () {
+  for (const secret of [this.providerSecret, this.repositorySecret]) {
+    assert.equal(this.returnedOutput.includes(secret), false);
+    assert.equal(this.storedOutput.includes(secret), false);
+  }
+});
+
+Then('a redacted value is used instead', function () {
+  assert.match(this.returnedOutput, /\[REDACTED\]/);
+  assert.match(this.storedOutput, /\[REDACTED\]/);
 });

@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     DEVELOP_WORKSPACE_ROOT: Path = Path("/tmp/sdd-develop-workspaces")
     DEVELOP_SETUP_TIMEOUT_SECONDS: int = Field(default=300, ge=1, le=3600)
     DEVELOP_FAKE_SETUP_RUNNER: bool = False
+    DEVELOP_AGENT_TIMEOUT_SECONDS: int = Field(default=600, ge=1, le=3600)
+    DEVELOP_AGENT_TERMINATION_GRACE_SECONDS: float = Field(default=1, gt=0, le=30)
+    DEVELOP_AGENT_MAX_ACTIVITY_PARTS: int = Field(default=100, ge=1, le=1000)
+    DEVELOP_AGENT_MAX_PART_CHARACTERS: int = Field(default=2000, ge=1, le=10000)
+    DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS: int = Field(
+        default=100_000, ge=1, le=100_000
+    )
+    DEVELOP_AGENT_MODEL: str = "openai/gpt-5.4-mini"
+    OPENAI_API_KEY: SecretStr | None = None
+    OPENAI_BASE_URL: HttpUrl | None = None
+    DEVELOP_ACCEPTANCE_MODE: bool = False
     SECRET_KEY: str
     # 60 minutes * 24 hours * 8 days = 8 days
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
@@ -110,6 +121,15 @@ class Settings(BaseSettings):
         self._check_default_secret(
             "FIRST_SUPERUSER_PASSWORD", self.FIRST_SUPERUSER_PASSWORD
         )
+
+        if self.DEVELOP_ACCEPTANCE_MODE:
+            if self.OPENAI_BASE_URL is None or self.OPENAI_BASE_URL.host not in {
+                "127.0.0.1",
+                "localhost",
+            }:
+                raise ValueError(
+                    "Acceptance mode requires a loopback OpenAI provider endpoint"
+                )
 
         return self
 

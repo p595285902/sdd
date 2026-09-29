@@ -61,6 +61,7 @@ class FakeCommandRunner:
             target = Path(command[-1])
             target.mkdir()
             (target / ".git").mkdir()
+            (target / "README.md").write_text("# Acceptance repository\n")
         elif command[0] == "opencode":
             (cwd / ".opencode-initialized").touch()
         elif command[0] == "openspec":

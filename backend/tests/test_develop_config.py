@@ -52,3 +52,25 @@ def test_workspace_configuration_rejects_unsafe_values(
 ) -> None:
     with pytest.raises(ValidationError):
         Settings.model_validate(_settings_data(**{field: value}))
+
+
+def test_acceptance_mode_rejects_external_provider_endpoint() -> None:
+    with pytest.raises(ValidationError, match="loopback OpenAI provider"):
+        Settings.model_validate(
+            _settings_data(
+                DEVELOP_ACCEPTANCE_MODE=True,
+                OPENAI_BASE_URL="https://api.openai.com/v1",
+            )
+        )
+
+
+def test_acceptance_mode_allows_loopback_provider_endpoint() -> None:
+    configured = Settings.model_validate(
+        _settings_data(
+            DEVELOP_ACCEPTANCE_MODE=True,
+            OPENAI_BASE_URL="http://127.0.0.1:8000/v1",
+        )
+    )
+
+    assert configured.OPENAI_BASE_URL
+    assert configured.OPENAI_BASE_URL.host == "127.0.0.1"

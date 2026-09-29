@@ -3,14 +3,20 @@ services:
     ports: []
 
   backend:
+    command: ["fastapi", "run", "--workers", "1"]
     ports:
       - "127.0.0.1:${ACCEPTANCE_PORT:?Variable not set}:8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/utils/health-check/"]
     environment:
+      DEVELOP_ACCEPTANCE_MODE: "true"
+      DEVELOP_AGENT_TIMEOUT_SECONDS: "15"
       DEVELOP_FAKE_SETUP_RUNNER: "true"
+      DEVELOP_AGENT_MODEL: "openai/gpt-4o-mini"
       DEMO_GITHUB_REPO: "${DEMO_GITHUB_REPO-https://example.com/acceptance/demo-repository.git}"
       DEMO_GITHUB_TOKEN: "${DEMO_GITHUB_TOKEN-acceptance-token}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY-acceptance-provider-key}"
+      OPENAI_BASE_URL: "http://127.0.0.1:8000/api/v1/testing/llm/v1"
       FASTAPI_ENV: development
       FRONTEND_HOST: "http://127.0.0.1:${ACCEPTANCE_PORT:?Variable not set}"
       SMTP_PORT: "1025"

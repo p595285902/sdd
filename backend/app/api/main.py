@@ -13,3 +13,8 @@ api_router.include_router(develop.router)
 
 if settings.FASTAPI_ENV == "development":
     api_router.include_router(private.router)
+
+if settings.DEVELOP_ACCEPTANCE_MODE:
+    from app.api.routes import testing_agent
+
+    api_router.include_router(testing_agent.router)

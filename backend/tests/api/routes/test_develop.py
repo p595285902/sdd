@@ -10,6 +10,11 @@ from sqlmodel import Session, select
 from app import crud
 from app.core.config import settings
 from app.models import DevelopmentChat, DevelopmentMessage, User
+from app.services.develop_agent import (
+    AgentActivityPart,
+    AgentCommandError,
+    AgentCompletion,
+)
 from tests.utils.user import create_random_user
 from tests.utils.utils import random_lower_string
 
@@ -401,3 +406,107 @@ def test_message_cursor_validation(
     )
 
     assert response.status_code == 422
+
+
+def test_explore_persists_user_before_agent_and_completion_atomically(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(
+        title="Explore",
+        owner_id=owner.id,
+        workspace_ready=True,
+        agent_session_id="ses_previous",
+    )
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    (tmp_path / str(chat.id)).mkdir()
+    monkeypatch.setattr(settings, "DEVELOP_WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+
+    def fake_execute_exploration(**kwargs: object) -> AgentCompletion:
+        db.expire_all()
+        messages = list(
+            db.exec(
+                select(DevelopmentMessage).where(
+                    DevelopmentMessage.chat_id == chat.id
+                )
+            ).all()
+        )
+        assert [(message.role, message.content) for message in messages] == [
+            ("user", "Inspect the repository")
+        ]
+        assert kwargs["session_id"] == "ses_previous"
+        return AgentCompletion(
+            response_text="Repository explored",
+            activity=(AgentActivityPart(text="Reading README.md"),),
+            session_id="ses_next",
+        )
+
+    monkeypatch.setattr(
+        "app.api.routes.develop.execute_exploration", fake_execute_exploration
+    )
+
+    response = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/explore",
+        headers=superuser_token_headers,
+        json={"content": "Inspect the repository"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["content"] == "Repository explored"
+    assert response.json()["activity"] == [{"text": "Reading README.md"}]
+    db.expire_all()
+    persisted_chat = db.get(DevelopmentChat, chat.id)
+    assert persisted_chat
+    assert persisted_chat.agent_session_id == "ses_next"
+
+
+def test_explore_failure_keeps_user_message_without_completion(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Failure", owner_id=owner.id, workspace_ready=True)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    (tmp_path / str(chat.id)).mkdir()
+    monkeypatch.setattr(settings, "DEVELOP_WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+
+    def fail_exploration(**_kwargs: object) -> AgentCompletion:
+        raise AgentCommandError("[REDACTED] provider failure")
+
+    monkeypatch.setattr(
+        "app.api.routes.develop.execute_exploration", fail_exploration
+    )
+
+    response = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/explore",
+        headers=superuser_token_headers,
+        json={"content": "Try this"},
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Agent exploration failed"}
+    db.expire_all()
+    messages = list(
+        db.exec(
+            select(DevelopmentMessage).where(DevelopmentMessage.chat_id == chat.id)
+        ).all()
+    )
+    assert [(message.role, message.content) for message in messages] == [
+        ("user", "Try this")
+    ]
+    persisted_chat = db.get(DevelopmentChat, chat.id)
+    assert persisted_chat
+    assert persisted_chat.agent_session_id is None

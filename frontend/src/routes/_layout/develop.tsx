@@ -48,6 +48,7 @@ function Develop() {
     null,
   )
   const [firstMessage, setFirstMessage] = useState("")
+  const [explorationMessage, setExplorationMessage] = useState("")
   const [isRenaming, setIsRenaming] = useState(false)
   const [renameTitle, setRenameTitle] = useState("")
   const [isDeleteOpen, setIsDeleteOpen] = useState(false)
@@ -144,6 +145,26 @@ function Develop() {
     },
   })
 
+  const exploreChat = useMutation({
+    mutationFn: async (content: string) =>
+      (
+        await DevelopService.exploreDevelopmentChat({
+          body: { content },
+          path: { chat_id: selectedChat?.id ?? "" },
+        })
+      ).data,
+    onError: handleError.bind(showErrorToast),
+    onSuccess: async () => {
+      setExplorationMessage("")
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["development-messages", selectedChat?.id],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["development-chats"] }),
+      ])
+    },
+  })
+
   const deleteChat = useMutation({
     mutationFn: async (chat: DevelopmentChatPublic) =>
       DevelopService.deleteDevelopmentChat({
@@ -168,6 +189,12 @@ function Develop() {
     event.preventDefault()
     const title = renameTitle.trim()
     if (selectedChat && title) renameChat.mutate({ chat: selectedChat, title })
+  }
+
+  const handleExplore = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const content = explorationMessage.trim()
+    if (content) exploreChat.mutate(content)
   }
 
   const startRename = () => {
@@ -357,12 +384,60 @@ function Develop() {
                         key={message.id}
                       >
                         <span className="sr-only">{message.role}: </span>
-                        {message.content}
+                        {message.activity && message.activity.length > 0 && (
+                          <details className="mb-2 text-xs text-muted-foreground">
+                            <summary>Agent activity</summary>
+                            <ol className="mt-1 list-decimal space-y-1 pl-4">
+                              {message.activity.map((part, index) => (
+                                <li key={`${message.id}-activity-${index}`}>
+                                  {part.text}
+                                </li>
+                              ))}
+                            </ol>
+                          </details>
+                        )}
+                        <div>{message.content}</div>
                       </article>
                     ))}
                   </div>
                 )}
               </div>
+              <form
+                className="border-t p-4"
+                onSubmit={handleExplore}
+              >
+                <div className="mx-auto flex w-full max-w-3xl gap-2">
+                  <Input
+                    aria-label="Exploration message"
+                    disabled={!workspaceQuery.data?.ready || exploreChat.isPending}
+                    maxLength={100000}
+                    onChange={(event) => setExplorationMessage(event.target.value)}
+                    placeholder={
+                      workspaceQuery.data?.ready
+                        ? "Explore this repository"
+                        : "Set up the demo repository to explore"
+                    }
+                    value={explorationMessage}
+                  />
+                  <Button
+                    aria-label="Send exploration"
+                    disabled={
+                      !workspaceQuery.data?.ready ||
+                      !explorationMessage.trim() ||
+                      exploreChat.isPending
+                    }
+                    size="icon"
+                    title="Send exploration"
+                    type="submit"
+                  >
+                    {exploreChat.isPending ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Send />
+                    )}
+                  </Button>
+                </div>
+              </form>
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center p-6">

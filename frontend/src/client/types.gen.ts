@@ -99,6 +99,16 @@ export type DevelopmentChatsPublic = {
 };
 
 /**
+ * DevelopmentMessageCreate
+ */
+export type DevelopmentMessageCreate = {
+    /**
+     * Content
+     */
+    content: string;
+};
+
+/**
  * DevelopmentMessagePublic
  */
 export type DevelopmentMessagePublic = {
@@ -107,6 +117,12 @@ export type DevelopmentMessagePublic = {
      * Content
      */
     content: string;
+    /**
+     * Activity
+     */
+    activity?: Array<{
+        [key: string]: string;
+    }>;
     /**
      * Id
      */
@@ -1314,6 +1330,36 @@ export type developReadDevelopmentMessagesResponses = {
 };
 
 export type developReadDevelopmentMessagesResponse = developReadDevelopmentMessagesResponses[keyof developReadDevelopmentMessagesResponses];
+
+export type developExploreDevelopmentChatData = {
+    body: DevelopmentMessageCreate;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/messages/explore';
+};
+
+export type developExploreDevelopmentChatErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developExploreDevelopmentChatError = developExploreDevelopmentChatErrors[keyof developExploreDevelopmentChatErrors];
+
+export type developExploreDevelopmentChatResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentMessagePublic;
+};
+
+export type developExploreDevelopmentChatResponse = developExploreDevelopmentChatResponses[keyof developExploreDevelopmentChatResponses];
 
 export type privateCreateUserData = {
     body: PrivateUserCreate;

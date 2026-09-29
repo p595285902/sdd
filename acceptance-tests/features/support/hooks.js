@@ -4,10 +4,16 @@ const {
   AfterAll,
   Before,
   BeforeAll,
+  Status,
   setDefaultTimeout,
 } = require('@cucumber/cucumber');
 
-const { startApplication, state, stopApplication } = require('./app-lifecycle.js');
+const {
+  showApplicationLogs,
+  startApplication,
+  state,
+  stopApplication,
+} = require('./app-lifecycle.js');
 
 let browser;
 
@@ -26,7 +32,8 @@ Before(async function () {
   this.page = await this.context.newPage();
 });
 
-After(async function () {
+After(async function ({ result }) {
+  if (result?.status === Status.FAILED) await showApplicationLogs();
   await this.dispose();
 });
 

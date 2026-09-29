@@ -1,0 +1,6 @@
+{"type":"step_start","sessionID":"ses_fixture_123","part":{}}
+{"type":"thinking","sessionID":"ses_fixture_123","part":{"type":"thinking","text":"Inspecting provider-secret"}}
+{"type":"tool_use","sessionID":"ses_fixture_123","part":{"tool":"read","state":{"status":"completed","input":{"filePath":"/workspace/README.md"}}}}
+{"type":"text","sessionID":"ses_fixture_123","part":{"text":"Repository explored."}}
+{"type":"future_event","sessionID":"ses_fixture_123","part":{"value":true}}
+not-json

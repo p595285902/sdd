@@ -69,6 +69,7 @@ services:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Variable not set}@db:5432/app
       DEMO_GITHUB_REPO: ${DEMO_GITHUB_REPO:-}
       DEMO_GITHUB_TOKEN: ${DEMO_GITHUB_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       DEVELOP_WORKSPACE_ROOT: /develop-workspaces
       SENTRY_DSN: ${SENTRY_DSN:-}
 

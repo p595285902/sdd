@@ -42,6 +42,8 @@ function reservePort() {
 function composeArgs(projectName, ...args) {
   return [
     'compose',
+    '--progress',
+    'quiet',
     '--project-name',
     projectName,
     '--file',
@@ -88,7 +90,15 @@ async function startApplication() {
   await run('docker', composeArgs(projectName, 'up', '--build', '--detach', 'db'), env);
   await run(
     'docker',
-    composeArgs(projectName, 'run', '--rm', 'backend', 'bash', 'scripts/prestart.sh'),
+    composeArgs(
+      projectName,
+      'run',
+      '--build',
+      '--rm',
+      'backend',
+      'bash',
+      'scripts/prestart.sh',
+    ),
     env,
   );
   await run(
@@ -104,6 +114,15 @@ async function stopApplication() {
   await run(
     'docker',
     composeArgs(state.projectName, 'down', '--volumes', '--remove-orphans'),
+    state.env,
+  );
+}
+
+async function showApplicationLogs() {
+  if (!state.projectName) return;
+  await run(
+    'docker',
+    composeArgs(state.projectName, 'logs', '--no-color', 'backend'),
     state.env,
   );
 }
@@ -150,6 +169,7 @@ async function configureDemoRepository(available) {
 module.exports = {
   configureDemoRepository,
   runBackendPython,
+  showApplicationLogs,
   startApplication,
   state,
   stopApplication,

@@ -123,6 +123,14 @@ class DevelopPage {
       ),
     );
   }
+
+  async submitExploration(content, expectedResponse) {
+    await this.page.getByRole('textbox', { name: 'Exploration message' }).fill(content);
+    await this.page.getByRole('button', { name: 'Send exploration' }).click();
+    await expect(this.page.getByText(expectedResponse, { exact: true })).toBeVisible({
+      timeout: 60_000,
+    });
+  }
 }
 
 module.exports = { DevelopPage };

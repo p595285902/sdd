@@ -76,6 +76,31 @@ if exists != (sys.argv[3] == "present"):
   raise AssertionError("Unexpected cross-workspace marker state")
 `;
 
+const assertWorkspaceContentScript = `
+import sys
+import uuid
+from pathlib import Path
+from app.core.config import settings
+
+workspace = Path(settings.DEVELOP_WORKSPACE_ROOT) / str(uuid.UUID(sys.argv[1]))
+content = (workspace / sys.argv[2]).read_text()
+if sys.argv[3] not in content:
+  raise AssertionError(f"Expected content not found in {sys.argv[2]}")
+`;
+
+const assertAgentSessionScript = `
+import sys
+import uuid
+from sqlmodel import Session
+from app.core.db import engine
+from app.models import DevelopmentChat
+
+with Session(engine) as session:
+  chat = session.get(DevelopmentChat, uuid.UUID(sys.argv[1]))
+  if chat is None or not chat.agent_session_id or not chat.agent_session_id.startswith("ses_"):
+    raise AssertionError("Validated agent session was not persisted")
+`;
+
 class ApiClient {
   constructor(world) {
     this.world = world;
@@ -198,6 +223,30 @@ class ApiClient {
     return response.json();
   }
 
+  async exploreDevelopmentChat(token, chatId, content) {
+    return this.request(
+      token,
+      'post',
+      `/api/v1/develop/chats/${chatId}/messages/explore`,
+      { data: { content } },
+    );
+  }
+
+  async configureFakeLlm(replies) {
+    const api = await this.world.openApiContext();
+    const response = await api.post('/api/v1/testing/llm/control', {
+      data: { replies },
+    });
+    if (!response.ok()) throw new Error(`Unable to configure fake LLM: ${response.status()}`);
+  }
+
+  async fakeLlmRequests() {
+    const api = await this.world.openApiContext();
+    const response = await api.get('/api/v1/testing/llm/requests');
+    if (!response.ok()) throw new Error(`Unable to read fake LLM requests: ${response.status()}`);
+    return (await response.json()).data;
+  }
+
   async seedDevelopmentMessages(chatId, count) {
     await runBackendPython(seedMessagesScript, chatId, String(count));
   }
@@ -247,6 +296,14 @@ class ApiClient {
       marker,
       expected ? 'present' : 'missing',
     );
+  }
+
+  async assertWorkspaceContent(chatId, fileName, expected) {
+    await runBackendPython(assertWorkspaceContentScript, chatId, fileName, expected);
+  }
+
+  async assertAgentSession(chatId) {
+    await runBackendPython(assertAgentSessionScript, chatId);
   }
 }
 

@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import uuid
 from datetime import datetime
 from typing import Any
@@ -17,12 +18,14 @@ from app.models import (
     DevelopmentChatsPublic,
     DevelopmentChatUpdate,
     DevelopmentMessage,
+    DevelopmentMessageCreate,
     DevelopmentMessagePublic,
     DevelopmentMessagesPublic,
     DevelopmentWorkspacePublic,
     Message,
     get_datetime_utc,
 )
+from app.services.develop_agent import AgentCommandError, execute_exploration
 from app.services.develop_workspace import (
     FakeCommandRunner,
     SubprocessCommandRunner,
@@ -33,6 +36,7 @@ from app.services.develop_workspace import (
 )
 
 router = APIRouter(prefix="/develop/chats", tags=["develop"])
+logger = logging.getLogger(__name__)
 
 
 def _get_chat(
@@ -294,3 +298,80 @@ def read_development_messages(
         has_more=has_more,
         next_cursor=next_cursor,
     )
+
+
+@router.post(
+    "/{chat_id}/messages/explore",
+    response_model=DevelopmentMessagePublic,
+)
+def explore_development_chat(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    chat_id: uuid.UUID,
+    message_in: DevelopmentMessageCreate,
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not chat.workspace_ready:
+        raise HTTPException(status_code=409, detail="Development Workspace is not ready")
+    provider_key = settings.OPENAI_API_KEY
+    if provider_key is None:
+        raise HTTPException(status_code=503, detail="Agent provider is not configured")
+
+    now = get_datetime_utc()
+    user_message = DevelopmentMessage(
+        role="user",
+        content=message_in.content,
+        chat_id=chat.id,
+        created_at=now,
+    )
+    chat.updated_at = now
+    session.add(user_message)
+    session.add(chat)
+    session.commit()
+
+    try:
+        completion = execute_exploration(
+            root=settings.DEVELOP_WORKSPACE_ROOT,
+            chat_id=chat.id,
+            message=message_in.content,
+            session_id=chat.agent_session_id,
+            provider_key=provider_key.get_secret_value(),
+            provider_base_url=(
+                str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None
+            ),
+            repository_secret=(
+                settings.DEMO_GITHUB_TOKEN.get_secret_value()
+                if settings.DEMO_GITHUB_TOKEN
+                else None
+            ),
+            model=settings.DEVELOP_AGENT_MODEL,
+            timeout_seconds=settings.DEVELOP_AGENT_TIMEOUT_SECONDS,
+            max_activity_parts=settings.DEVELOP_AGENT_MAX_ACTIVITY_PARTS,
+            max_part_characters=settings.DEVELOP_AGENT_MAX_PART_CHARACTERS,
+            max_response_characters=settings.DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS,
+        )
+    except AgentCommandError as error:
+        logger.error("Agent exploration failed for chat %s: %s", chat.id, error)
+        detail = (
+            f"Agent exploration failed: {error}"
+            if settings.DEVELOP_ACCEPTANCE_MODE
+            else "Agent exploration failed"
+        )
+        raise HTTPException(status_code=502, detail=detail)
+
+    completed_at = get_datetime_utc()
+    assistant_message = DevelopmentMessage(
+        role="assistant",
+        content=completion.response_text,
+        activity=[part.model_dump() for part in completion.activity],
+        chat_id=chat.id,
+        created_at=completed_at,
+    )
+    chat.agent_session_id = completion.session_id
+    chat.updated_at = completed_at
+    session.add(assistant_message)
+    session.add(chat)
+    session.commit()
+    session.refresh(assistant_message)
+    return assistant_message
