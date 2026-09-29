@@ -96,4 +96,8 @@ To run the backend and built frontend in Docker Compose:
 docker compose run --rm backend bash scripts/prestart.sh
 # start all the services and update the files directly without rebuild
 docker compose watch
+
+# rebuild to see new changes 
+docker compose build backend && docker compose run --rm backend bash scripts/prestart.sh && docker compose up -d backend
 ```
+

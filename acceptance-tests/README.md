@@ -34,3 +34,8 @@ cd acceptance-tests && npx cucumber-js --dry-run
 
 Each run uses a unique `sdd-acceptance-<pid>` Compose project and removes only
 that project's containers, network, and volumes during teardown.
+
+Run specific scenario
+```sh
+cd acceptance-tests & PWDEBUG=1 npx cucumber-js --name "^User updates a repository through OpenCode$"
+```
