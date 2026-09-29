@@ -6,8 +6,8 @@ Agent operations need an explicit lifecycle for concurrency, cancellation, disco
 
 - Add one active Agent Turn per Development Chat with explicit stop and timeout handling.
 - Add buffered event replay, subscriber tracking, and reattachment support.
-- Add `Stop when I leave` and `Continue in background` Presence Modes with grace-period behavior.
-- Enforce per-user background limits and weighted global concurrency capacity.
+- Add `Stop when I leave` and `Continue in background` Presence Modes with grace-period behavior and timeout-bounded background execution.
+- Limit concurrent active Agent Turns across a user's Development Chats, default the limit to two, allow per-user configuration, and reject excess requests with a reason.
 - Stop an active turn before deleting its chat and workspace.
 
 ## Capabilities
@@ -22,6 +22,6 @@ None.
 
 ## Impact
 
-- Turn manager, concurrency gate, timers, process cancellation, settings, persistence hooks, and focused concurrent tests.
+- Turn manager, per-user capacity accounting, timers, process cancellation, settings, persistence hooks, and focused concurrent tests.
 - Initial coordination remains confined to one backend process.
 - Requires `add-develop-agent-runner` to be implemented first.

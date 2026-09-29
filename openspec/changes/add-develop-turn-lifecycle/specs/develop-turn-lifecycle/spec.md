@@ -51,28 +51,31 @@ And the Agent Turn continues
 ```gherkin
 Given an active Agent Turn uses Continue in background
 When all clients disconnect
-Then the Agent Turn continues to completion
-And its completed response is stored
+Then the Agent Turn continues until it completes or reaches the configured turn timeout
+And any completed response is stored
 ```
 
-#### Scenario: Background turn limit is enforced per user
+#### Scenario: Background turn is bounded by the turn timeout
 
 ```gherkin
-Given a user has reached the configured active background-turn limit
-When the user starts another Continue in background Agent Turn
-Then the new Agent Turn is rejected
+Given an active Agent Turn uses Continue in background
+And no client remains attached
+When the Agent Turn reaches the configured turn timeout
+Then the agent process is terminated
+And a safe timeout error is recorded
 ```
 
 ### Requirement: Agent Turn resources are bounded
-The system MUST enforce weighted concurrency and turn timeouts.
+The system MUST limit each user to a configurable number of concurrent active Agent Turns across Development Chats, MUST default that limit to two, and MUST enforce turn timeouts.
 
-#### Scenario: Agent Turn waits for capacity
+#### Scenario: Agent Turn is rejected when the user reaches capacity
 
 ```gherkin
-Given active Agent Turns consume the configured concurrency capacity
-When another admissible Agent Turn is started
-Then the Agent Turn reports that it is waiting for capacity
-And the Agent Turn begins when sufficient capacity is available
+Given a user has two active Agent Turns across different Development Chats
+And that user's configured concurrent Agent Turn limit is two
+When the user starts an Agent Turn in another Development Chat
+Then the new Agent Turn is rejected
+And the rejection states that the user's concurrent Agent Turn limit has been reached
 ```
 
 #### Scenario: Agent Turn times out
