@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, update
 from sqlmodel import Session, col, func, select
 
 from app.api.deps import CurrentUser, SessionDep
@@ -23,9 +23,11 @@ from app.models import (
     DevelopmentChatUpdate,
     DevelopmentMessage,
     DevelopmentMessageCreate,
+    DevelopmentMessageKind,
     DevelopmentMessagePublic,
     DevelopmentMessagesPublic,
     DevelopmentPresenceUpdate,
+    DevelopmentProposalState,
     DevelopmentWorkspacePublic,
     Message,
     get_datetime_utc,
@@ -36,7 +38,9 @@ from app.services.develop_agent import (
     AgentCommandTimeout,
     AgentEvent,
     AgentEventKind,
+    execute_apply,
     execute_exploration,
+    execute_proposal,
 )
 from app.services.develop_turns import (
     ChatTurnActiveError,
@@ -82,6 +86,21 @@ def _get_chat(
     if not chat:
         raise HTTPException(status_code=404, detail="Development Chat not found")
     return chat
+
+
+def _get_proposal(
+    *, session: SessionDep, chat_id: uuid.UUID, message_id: uuid.UUID
+) -> DevelopmentMessage:
+    proposal = session.exec(
+        select(DevelopmentMessage).where(
+            DevelopmentMessage.id == message_id,
+            DevelopmentMessage.chat_id == chat_id,
+            DevelopmentMessage.kind == DevelopmentMessageKind.proposal,
+        )
+    ).first()
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    return proposal
 
 
 def _repository_setup_available() -> bool:
@@ -243,6 +262,82 @@ def _run_streamed_exploration(
         develop_turn_manager.finish_turn(turn, state, content)
 
 
+def _run_streamed_apply(*, chat_id: uuid.UUID, turn: TurnSession) -> None:
+    with Session(engine) as session:
+        chat = session.get(DevelopmentChat, chat_id)
+        if chat is None:
+            develop_turn_manager.finish_turn(
+                turn, TurnTerminalState.failed, "Development Chat not found"
+            )
+            return
+        provider_key = settings.OPENAI_API_KEY
+        if provider_key is None:
+            turn.emit("error", "Agent provider is not configured")
+            develop_turn_manager.finish_turn(turn, TurnTerminalState.failed)
+            return
+        try:
+            completion = execute_apply(
+                root=settings.DEVELOP_WORKSPACE_ROOT,
+                chat_id=chat.id,
+                session_id=chat.agent_session_id,
+                provider_key=provider_key.get_secret_value(),
+                provider_base_url=(
+                    str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None
+                ),
+                repository_secret=(
+                    settings.DEMO_GITHUB_TOKEN.get_secret_value()
+                    if settings.DEMO_GITHUB_TOKEN
+                    else None
+                ),
+                model=settings.DEVELOP_AGENT_MODEL,
+                timeout_seconds=settings.DEVELOP_TURN_TIMEOUT_SECONDS,
+                max_activity_parts=settings.DEVELOP_AGENT_MAX_ACTIVITY_PARTS,
+                max_part_characters=settings.DEVELOP_AGENT_MAX_PART_CHARACTERS,
+                max_response_characters=settings.DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS,
+                cancel_event=turn.cancel_event,
+                on_event=lambda event: _emit_agent_event(turn, event),
+            )
+        except (AgentCommandCancelled, AgentCommandTimeout) as error:
+            state = turn.stop_reason or TurnTerminalState.timed_out
+            content = (
+                "Apply Agent Turn timed out."
+                if state == TurnTerminalState.timed_out
+                else "Apply Agent Turn was interrupted."
+            )
+            logger.info("Agent apply ended for chat %s: %s", chat.id, error)
+            completion = None
+        except AgentCommandError as error:
+            logger.error("Agent apply failed for chat %s: %s", chat.id, error)
+            turn.emit("error", "Agent apply failed")
+            develop_turn_manager.finish_turn(
+                turn, TurnTerminalState.failed, "Agent apply failed"
+            )
+            return
+
+        completed_at = get_datetime_utc()
+        if completion is None:
+            activity = [{"text": content}]
+            session_id = chat.agent_session_id
+        else:
+            state = TurnTerminalState.completed
+            content = completion.response_text
+            activity = [part.model_dump() for part in completion.activity]
+            session_id = completion.session_id
+        assistant_message = DevelopmentMessage(
+            role="assistant",
+            content=content,
+            activity=activity,
+            chat_id=chat.id,
+            created_at=completed_at,
+        )
+        chat.agent_session_id = session_id
+        chat.updated_at = completed_at
+        session.add(assistant_message)
+        session.add(chat)
+        session.commit()
+        develop_turn_manager.finish_turn(turn, state, content)
+
+
 def _encode_cursor(message: DevelopmentMessage) -> str:
     payload = json.dumps([message.created_at.isoformat(), str(message.id)]).encode()
     return base64.urlsafe_b64encode(payload).decode().rstrip("=")
@@ -324,9 +419,7 @@ def read_development_workspace(
     return _workspace_status(chat)
 
 
-@router.post(
-    "/{chat_id}/workspace/setup", response_model=DevelopmentWorkspacePublic
-)
+@router.post("/{chat_id}/workspace/setup", response_model=DevelopmentWorkspacePublic)
 def setup_development_workspace(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
 ) -> Any:
@@ -431,7 +524,7 @@ def delete_development_chat(
         )
     try:
         cleanup_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
-    except (OSError, WorkspacePathError):
+    except OSError, WorkspacePathError:
         raise HTTPException(
             status_code=500,
             detail="Development Workspace cleanup failed",
@@ -507,6 +600,196 @@ def read_development_messages(
         has_more=has_more,
         next_cursor=next_cursor,
     )
+
+
+@router.post(
+    "/{chat_id}/messages/propose",
+    response_model=DevelopmentMessagePublic,
+)
+def propose_development_chat(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not chat.workspace_ready:
+        raise HTTPException(
+            status_code=409, detail="Development Workspace is not ready"
+        )
+    provider_key = settings.OPENAI_API_KEY
+    if provider_key is None:
+        raise HTTPException(status_code=503, detail="Agent provider is not configured")
+    try:
+        turn = develop_turn_manager.start_turn(
+            chat_id=chat.id,
+            user_id=current_user.id,
+            user_limit=current_user.concurrent_agent_turn_limit,
+            presence_mode=chat.presence_mode,
+            replay_limit=settings.DEVELOP_TURN_REPLAY_LIMIT,
+            timeout_seconds=settings.DEVELOP_TURN_TIMEOUT_SECONDS,
+        )
+    except ChatTurnActiveError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except UserTurnLimitError as error:
+        raise HTTPException(status_code=429, detail=str(error))
+
+    messages = list(
+        session.exec(
+            select(DevelopmentMessage)
+            .where(
+                DevelopmentMessage.chat_id == chat.id,
+                DevelopmentMessage.kind == DevelopmentMessageKind.message,
+            )
+            .order_by(col(DevelopmentMessage.created_at), col(DevelopmentMessage.id))
+        ).all()
+    )
+    try:
+        completion = execute_proposal(
+            root=settings.DEVELOP_WORKSPACE_ROOT,
+            chat_id=chat.id,
+            messages=messages,
+            max_conversation_characters=settings.DEVELOP_AGENT_MAX_CONVERSATION_CHARACTERS,
+            session_id=chat.agent_session_id,
+            provider_key=provider_key.get_secret_value(),
+            provider_base_url=(
+                str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None
+            ),
+            repository_secret=(
+                settings.DEMO_GITHUB_TOKEN.get_secret_value()
+                if settings.DEMO_GITHUB_TOKEN
+                else None
+            ),
+            model=settings.DEVELOP_AGENT_MODEL,
+            timeout_seconds=settings.DEVELOP_TURN_TIMEOUT_SECONDS,
+            max_activity_parts=settings.DEVELOP_AGENT_MAX_ACTIVITY_PARTS,
+            max_part_characters=settings.DEVELOP_AGENT_MAX_PART_CHARACTERS,
+            max_response_characters=settings.DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS,
+            cancel_event=turn.cancel_event,
+        )
+    except AgentCommandError as error:
+        develop_turn_manager.finish_turn(
+            turn, TurnTerminalState.failed, "Agent proposal failed"
+        )
+        detail = (
+            f"Agent proposal failed: {error}"
+            if settings.DEVELOP_ACCEPTANCE_MODE
+            else "Agent proposal failed"
+        )
+        raise HTTPException(status_code=502, detail=detail)
+
+    completed_at = get_datetime_utc()
+    proposal = DevelopmentMessage(
+        role="assistant",
+        content=completion.response_text,
+        activity=[part.model_dump() for part in completion.activity],
+        kind=DevelopmentMessageKind.proposal,
+        proposal_state=DevelopmentProposalState.undecided,
+        chat_id=chat.id,
+        created_at=completed_at,
+    )
+    chat.agent_session_id = completion.session_id
+    chat.updated_at = completed_at
+    session.add(proposal)
+    session.add(chat)
+    session.commit()
+    session.refresh(proposal)
+    develop_turn_manager.finish_turn(
+        turn, TurnTerminalState.completed, "Proposal created"
+    )
+    return proposal
+
+
+@router.post(
+    "/{chat_id}/messages/{message_id}/reject",
+    response_model=DevelopmentMessagePublic,
+)
+def reject_development_proposal(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    chat_id: uuid.UUID,
+    message_id: uuid.UUID,
+) -> Any:
+    _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    proposal = _get_proposal(session=session, chat_id=chat_id, message_id=message_id)
+    result = session.exec(
+        update(DevelopmentMessage)
+        .where(
+            col(DevelopmentMessage.id) == proposal.id,
+            col(DevelopmentMessage.proposal_state)
+            == DevelopmentProposalState.undecided,
+        )
+        .values(proposal_state=DevelopmentProposalState.rejected)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Proposal is already decided")
+    session.commit()
+    session.refresh(proposal)
+    return proposal
+
+
+@router.post(
+    "/{chat_id}/messages/{message_id}/approve/stream",
+    response_model=None,
+)
+def approve_development_proposal(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    chat_id: uuid.UUID,
+    message_id: uuid.UUID,
+) -> StreamingResponse:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    proposal = _get_proposal(session=session, chat_id=chat_id, message_id=message_id)
+    if proposal.proposal_state != DevelopmentProposalState.undecided:
+        raise HTTPException(status_code=409, detail="Proposal is already decided")
+    if not chat.workspace_ready:
+        raise HTTPException(
+            status_code=409, detail="Development Workspace is not ready"
+        )
+    if settings.OPENAI_API_KEY is None:
+        raise HTTPException(status_code=503, detail="Agent provider is not configured")
+    try:
+        turn = develop_turn_manager.start_turn(
+            chat_id=chat.id,
+            user_id=current_user.id,
+            user_limit=current_user.concurrent_agent_turn_limit,
+            weight=settings.DEVELOP_APPLY_TURN_WEIGHT,
+            presence_mode=chat.presence_mode,
+            replay_limit=settings.DEVELOP_TURN_REPLAY_LIMIT,
+            timeout_seconds=settings.DEVELOP_TURN_TIMEOUT_SECONDS,
+        )
+    except ChatTurnActiveError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except UserTurnLimitError as error:
+        raise HTTPException(status_code=429, detail=str(error))
+
+    result = session.exec(
+        update(DevelopmentMessage)
+        .where(
+            col(DevelopmentMessage.id) == proposal.id,
+            col(DevelopmentMessage.proposal_state)
+            == DevelopmentProposalState.undecided,
+        )
+        .values(proposal_state=DevelopmentProposalState.approved)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        develop_turn_manager.finish_turn(
+            turn, TurnTerminalState.failed, "Proposal is already decided"
+        )
+        raise HTTPException(status_code=409, detail="Proposal is already decided")
+    session.commit()
+    turn.emit("session", chat.agent_session_id or "")
+    turn.emit("status", "Apply Agent Turn started")
+    subscriber_id = uuid.uuid4().hex
+    buffered_events = turn.attach(subscriber_id)
+    worker = threading.Thread(
+        target=_run_streamed_apply,
+        kwargs={"chat_id": chat.id, "turn": turn},
+        daemon=True,
+    )
+    worker.start()
+    return _stream_response(turn, subscriber_id, buffered_events)
 
 
 @router.get("/{chat_id}/turns/current")
@@ -587,7 +870,9 @@ def stream_development_chat_exploration(
 ) -> StreamingResponse:
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
     if not chat.workspace_ready:
-        raise HTTPException(status_code=409, detail="Development Workspace is not ready")
+        raise HTTPException(
+            status_code=409, detail="Development Workspace is not ready"
+        )
     if settings.OPENAI_API_KEY is None:
         raise HTTPException(status_code=503, detail="Agent provider is not configured")
     try:
@@ -639,7 +924,9 @@ def explore_development_chat(
 ) -> Any:
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
     if not chat.workspace_ready:
-        raise HTTPException(status_code=409, detail="Development Workspace is not ready")
+        raise HTTPException(
+            status_code=409, detail="Development Workspace is not ready"
+        )
     provider_key = settings.OPENAI_API_KEY
     if provider_key is None:
         raise HTTPException(status_code=503, detail="Agent provider is not configured")

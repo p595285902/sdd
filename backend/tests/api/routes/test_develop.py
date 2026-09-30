@@ -13,7 +13,14 @@ from sqlmodel import Session, select
 from app import crud
 from app.api.routes.develop import _serialize_sse_event
 from app.core.config import settings
-from app.models import DevelopmentChat, DevelopmentMessage, PresenceMode, User
+from app.models import (
+    DevelopmentChat,
+    DevelopmentMessage,
+    DevelopmentMessageKind,
+    DevelopmentProposalState,
+    PresenceMode,
+    User,
+)
 from app.services.develop_agent import (
     AgentActivityPart,
     AgentCommandCancelled,
@@ -890,3 +897,190 @@ def test_start_stream_creates_and_completes_managed_turn(
         if event in response.text
     ] == ["event: session", "event: status", "event: text", "event: done"]
     assert develop_turn_manager.active_turn(chat.id) is None
+
+
+def test_create_proposal_uses_canonical_messages_and_persists_undecided_state(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(
+        title="Propose", owner_id=owner.id, workspace_ready=True
+    )
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    db.add_all(
+        [
+            DevelopmentMessage(role="user", content="Explore", chat_id=chat.id),
+            DevelopmentMessage(
+                role="assistant", content="Findings", chat_id=chat.id
+            ),
+        ]
+    )
+    db.commit()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+
+    def fake_execute_proposal(**kwargs: object) -> AgentCompletion:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        assert [(message.role, message.content) for message in messages] == [
+            ("user", "Explore"),
+            ("assistant", "Findings"),
+        ]
+        return AgentCompletion(
+            response_text="# Proposal",
+            activity=(AgentActivityPart(text="Writing proposal"),),
+            session_id="ses_proposal",
+        )
+
+    monkeypatch.setattr(
+        "app.api.routes.develop.execute_proposal", fake_execute_proposal
+    )
+
+    response = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/propose",
+        headers=superuser_token_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "proposal"
+    assert response.json()["proposal_state"] == "undecided"
+    db.expire_all()
+    proposal = db.get(DevelopmentMessage, uuid.UUID(response.json()["id"]))
+    assert proposal
+    assert proposal.kind == DevelopmentMessageKind.proposal
+    assert proposal.proposal_state == DevelopmentProposalState.undecided
+
+
+def test_reject_proposal_is_irreversible_and_starts_no_turn(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Reject", owner_id=owner.id, workspace_ready=True)
+    proposal = DevelopmentMessage(
+        role="assistant",
+        content="# Proposal",
+        kind=DevelopmentMessageKind.proposal,
+        proposal_state=DevelopmentProposalState.undecided,
+        chat_id=chat.id,
+    )
+    db.add(chat)
+    db.add(proposal)
+    db.commit()
+
+    rejected = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/{proposal.id}/reject",
+        headers=superuser_token_headers,
+    )
+    repeated = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/{proposal.id}/reject",
+        headers=superuser_token_headers,
+    )
+    conflicting = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/{proposal.id}/approve/stream",
+        headers=superuser_token_headers,
+    )
+
+    assert rejected.status_code == 200
+    assert rejected.json()["proposal_state"] == "rejected"
+    assert repeated.status_code == 409
+    assert conflicting.status_code == 409
+    assert develop_turn_manager.active_turn(chat.id) is None
+
+
+def test_approve_proposal_starts_exactly_one_apply_stream(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Approve", owner_id=owner.id, workspace_ready=True)
+    proposal = DevelopmentMessage(
+        role="assistant",
+        content="# Proposal",
+        kind=DevelopmentMessageKind.proposal,
+        proposal_state=DevelopmentProposalState.undecided,
+        chat_id=chat.id,
+    )
+    db.add(chat)
+    db.add(proposal)
+    db.commit()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+    starts = 0
+
+    def fake_streamed_apply(**kwargs: object) -> None:
+        nonlocal starts
+        starts += 1
+        turn = kwargs["turn"]
+        assert turn.weight == 2
+        turn.emit("text", "Applied")
+        develop_turn_manager.finish_turn(turn, TurnTerminalState.completed, "Applied")
+
+    monkeypatch.setattr(
+        "app.api.routes.develop._run_streamed_apply", fake_streamed_apply
+    )
+
+    approved = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/{proposal.id}/approve/stream",
+        headers=superuser_token_headers,
+    )
+    repeated = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/{proposal.id}/approve/stream",
+        headers=superuser_token_headers,
+    )
+
+    assert approved.status_code == 200
+    assert "event: text" in approved.text
+    assert "event: done" in approved.text
+    assert repeated.status_code == 409
+    assert starts == 1
+    db.refresh(proposal)
+    assert proposal.proposal_state == DevelopmentProposalState.approved
+
+
+def test_approve_weight_failure_keeps_proposal_undecided(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    active_chat = DevelopmentChat(title="Active", owner_id=owner.id)
+    proposal_chat = DevelopmentChat(
+        title="Apply", owner_id=owner.id, workspace_ready=True
+    )
+    proposal = DevelopmentMessage(
+        role="assistant",
+        content="# Proposal",
+        kind=DevelopmentMessageKind.proposal,
+        proposal_state=DevelopmentProposalState.undecided,
+        chat_id=proposal_chat.id,
+    )
+    db.add_all([active_chat, proposal_chat, proposal])
+    db.commit()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+    active_turn = develop_turn_manager.start_turn(
+        chat_id=active_chat.id,
+        user_id=owner.id,
+        user_limit=owner.concurrent_agent_turn_limit,
+        presence_mode=active_chat.presence_mode,
+        replay_limit=2,
+        timeout_seconds=10,
+    )
+    try:
+        response = client.post(
+            f"{DEVELOP_CHATS_URL}/{proposal_chat.id}/messages/{proposal.id}/approve/stream",
+            headers=superuser_token_headers,
+        )
+    finally:
+        develop_turn_manager.finish_turn(active_turn, TurnTerminalState.completed)
+
+    assert response.status_code == 429
+    db.refresh(proposal)
+    assert proposal.proposal_state == DevelopmentProposalState.undecided

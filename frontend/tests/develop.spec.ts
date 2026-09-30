@@ -36,6 +36,17 @@ const mockDevelopApi = async (
   const stopped = new Promise<void>((resolve) => {
     releaseStream = resolve
   })
+  let proposal:
+    | {
+        id: string
+        chat_id: string
+        role: "assistant"
+        content: string
+        kind: "proposal"
+        proposal_state: "undecided" | "approved" | "rejected"
+        created_at: string
+      }
+    | undefined
 
   await page.route("**/api/v1/develop/chats**", async (route) => {
     const request = route.request()
@@ -50,6 +61,12 @@ const mockDevelopApi = async (
     )
     const messagesMatch = url.pathname.match(
       /\/develop\/chats\/([^/]+)\/messages$/,
+    )
+    const proposeMatch = url.pathname.match(
+      /\/develop\/chats\/([^/]+)\/messages\/propose$/,
+    )
+    const decisionMatch = url.pathname.match(
+      /\/develop\/chats\/([^/]+)\/messages\/([^/]+)\/(reject|approve\/stream)$/,
     )
     const streamMatch = url.pathname.match(
       /\/develop\/chats\/([^/]+)\/messages\/explore\/stream$/,
@@ -70,6 +87,41 @@ const mockDevelopApi = async (
         body: [
           'data: {"sequence":1,"kind":"status","data":"Inspecting repository"}\n\n',
           'data: {"sequence":2,"kind":"text","data":"**Repository** <img src=x onerror=alert(1)>"}\n\n',
+          'data: {"sequence":3,"kind":"done","data":"complete"}\n\n',
+        ].join(""),
+        contentType: "text/event-stream",
+      })
+      return
+    }
+
+    if (method === "POST" && proposeMatch) {
+      proposal = {
+        id: "00000000-0000-0000-0000-000000000099",
+        chat_id: proposeMatch[1],
+        role: "assistant",
+        content: "# Implementation proposal",
+        kind: "proposal",
+        proposal_state: "undecided",
+        created_at: "2026-09-24T12:00:09Z",
+      }
+      await route.fulfill({ contentType: "application/json", json: proposal })
+      return
+    }
+
+    if (method === "POST" && decisionMatch) {
+      if (!proposal || proposal.id !== decisionMatch[2]) {
+        throw new Error("Unexpected proposal ID")
+      }
+      if (decisionMatch[3] === "reject") {
+        proposal.proposal_state = "rejected"
+        await route.fulfill({ contentType: "application/json", json: proposal })
+        return
+      }
+      proposal.proposal_state = "approved"
+      await route.fulfill({
+        body: [
+          'data: {"sequence":1,"kind":"status","data":"Apply Agent Turn started"}\n\n',
+          'data: {"sequence":2,"kind":"text","data":"Applied proposal"}\n\n',
           'data: {"sequence":3,"kind":"done","data":"complete"}\n\n',
         ].join(""),
         contentType: "text/event-stream",
@@ -138,16 +190,20 @@ const mockDevelopApi = async (
             ["3", "Message 3"],
             ["4", "Message 4"],
           ]
+      const messages = values.map(([suffix, content]) => ({
+        id: `00000000-0000-0000-0000-00000000000${suffix}`,
+        chat_id: messagesMatch[1],
+        role: "user",
+        content,
+        created_at: `2026-09-24T12:00:0${suffix}Z`,
+      }))
+      if (!before && proposal?.chat_id === messagesMatch[1]) {
+        messages.push(proposal)
+      }
       await route.fulfill({
         contentType: "application/json",
         json: {
-          data: values.map(([suffix, content]) => ({
-            id: `00000000-0000-0000-0000-00000000000${suffix}`,
-            chat_id: messagesMatch[1],
-            role: "user",
-            content,
-            created_at: `2026-09-24T12:00:0${suffix}Z`,
-          })),
+          data: messages,
           has_more: !before,
           next_cursor: before ? null : "older-page",
         },
@@ -300,6 +356,55 @@ test.describe("Develop chat shell", () => {
       /^(600|700)$/,
     )
     await expect(response.locator("img")).toHaveCount(0)
+  })
+
+  test("creates and loads an undecided proposal", async ({ page }) => {
+    await page.getByRole("button", { name: "Set up demo repository" }).click()
+    await page.getByRole("button", { name: "Make it happen" }).click()
+
+    const proposal = page.getByRole("article", { name: "Proposal" })
+    await expect(
+      proposal.getByRole("heading", { name: "Implementation proposal" }),
+    ).toBeVisible()
+    await expect(
+      proposal.getByRole("button", { name: "Approve" }),
+    ).toBeEnabled()
+    await expect(proposal.getByRole("button", { name: "Reject" })).toBeEnabled()
+  })
+
+  test("streams approval and disables persisted decisions", async ({
+    page,
+  }) => {
+    await page.getByRole("button", { name: "Set up demo repository" }).click()
+    await page.getByRole("button", { name: "Make it happen" }).click()
+    await page.getByRole("button", { name: "Approve" }).click()
+
+    await expect(page.getByText("Applied proposal")).toBeVisible()
+    const proposal = page.getByRole("article", { name: "Proposal" })
+    await expect(proposal.getByText("approved", { exact: true })).toBeVisible()
+    await expect(
+      proposal.getByRole("button", { name: "Approve" }),
+    ).toBeDisabled()
+    await expect(
+      proposal.getByRole("button", { name: "Reject" }),
+    ).toBeDisabled()
+  })
+
+  test("rejects a proposal without starting an apply stream", async ({
+    page,
+  }) => {
+    await page.getByRole("button", { name: "Set up demo repository" }).click()
+    await page.getByRole("button", { name: "Make it happen" }).click()
+    await page.getByRole("button", { name: "Reject" }).click()
+
+    const proposal = page.getByRole("article", { name: "Proposal" })
+    await expect(proposal.getByText("rejected", { exact: true })).toBeVisible()
+    await expect(
+      proposal.getByRole("button", { name: "Approve" }),
+    ).toBeDisabled()
+    await expect(
+      page.getByRole("article", { name: "Streaming assistant response" }),
+    ).toHaveCount(0)
   })
 
   test("updates Presence Mode with explicit labels", async ({ page }) => {

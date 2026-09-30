@@ -133,26 +133,91 @@ class DevelopPage {
   }
 
   async startStreamedExploration(content) {
+    await this.page.evaluate(() => {
+      window.__developObservedActivity = [];
+      window.__developObservedResponses = [];
+      window.__developObservedStrongText = [];
+      window.__developObservedUnsafeImage = false;
+      window.__developActivityObserver?.disconnect();
+      window.__developActivityObserver = new MutationObserver(() => {
+        const stream = document.querySelector(
+          'article[aria-label="Streaming assistant response"]',
+        );
+        const activity = Array.from(
+          stream?.querySelectorAll('ol li') ?? [],
+          (item) => item.textContent,
+        );
+        for (const item of activity) {
+          if (!window.__developObservedActivity.includes(item)) {
+            window.__developObservedActivity.push(item);
+          }
+        }
+        if (stream) {
+          window.__developObservedResponses.push(stream.textContent ?? '');
+          window.__developObservedStrongText.push(
+            ...Array.from(stream.querySelectorAll('strong'), (item) => item.textContent),
+          );
+          window.__developObservedUnsafeImage ||= Boolean(stream.querySelector('img'));
+        }
+      });
+      window.__developActivityObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+      });
+    });
     await this.page.getByRole('textbox', { name: 'Exploration message' }).fill(content);
     await this.page.getByRole('button', { name: 'Send exploration' }).click();
   }
 
+  proposal() {
+    return this.page.getByRole('article', { name: 'Proposal' });
+  }
+
+  async makeItHappen() {
+    await this.page.getByRole('button', { name: 'Make it happen' }).click();
+    await expect(this.proposal()).toBeVisible({ timeout: 60_000 });
+  }
+
+  async expectProposalActions() {
+    await expect(this.proposal().getByRole('button', { name: 'Approve' })).toBeEnabled();
+    await expect(this.proposal().getByRole('button', { name: 'Reject' })).toBeEnabled();
+  }
+
+  async approveProposal() {
+    await this.proposal().getByRole('button', { name: 'Approve' }).click();
+    await expect(this.proposal().getByRole('button', { name: 'Approve' })).toBeDisabled();
+  }
+
+  async rejectProposal() {
+    await this.proposal().getByRole('button', { name: 'Reject' }).click();
+    await expect(this.proposal().getByText('rejected', { exact: true })).toBeVisible();
+  }
+
   async expectOrderedActivity(expectedActivity) {
-    const stream = this.page.getByRole('article', {
-      name: 'Streaming assistant response',
-    });
-    await expect(stream).toBeVisible();
-    const activity = stream.locator('ol li');
-    await expect(activity).toHaveText(expectedActivity);
+    await expect.poll(() =>
+      this.page.evaluate(() => window.__developObservedActivity ?? []),
+    ).toEqual(expectedActivity);
   }
 
   async expectSafeMarkdownResponse(text) {
-    const stream = this.page.getByRole('article', {
-      name: 'Streaming assistant response',
-    });
-    await expect(stream.getByText(text, { exact: true })).toBeVisible();
-    await expect(stream.locator('strong')).toHaveText(text);
-    await expect(stream.locator('img')).toHaveCount(0);
+    await expect.poll(() =>
+      this.page.evaluate(
+        (expected) =>
+          (window.__developObservedResponses ?? []).some((value) =>
+            value.includes(expected),
+          ),
+        text,
+      ),
+    ).toBe(true);
+    await expect.poll(() =>
+      this.page.evaluate(
+        (expected) => (window.__developObservedStrongText ?? []).includes(expected),
+        text,
+      ),
+    ).toBe(true);
+    expect(
+      await this.page.evaluate(() => window.__developObservedUnsafeImage),
+    ).toBe(false);
   }
 }
 

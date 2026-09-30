@@ -20,6 +20,7 @@ def _start(
     chat_id: uuid.UUID | None = None,
     user_id: uuid.UUID | None = None,
     user_limit: int = 2,
+    weight: int = 1,
     presence_mode: PresenceMode = PresenceMode.stop_when_i_leave,
     timeout_seconds: float = 10,
 ) -> TurnSession:
@@ -27,6 +28,7 @@ def _start(
         chat_id=chat_id or uuid.uuid4(),
         user_id=user_id or uuid.uuid4(),
         user_limit=user_limit,
+        weight=weight,
         presence_mode=presence_mode,
         replay_limit=3,
         timeout_seconds=timeout_seconds,
@@ -146,4 +148,18 @@ def test_manager_reserves_user_slots_atomically_and_releases_once() -> None:
     assert manager.finish_turn(sessions[0], TurnTerminalState.completed)
     assert not manager.finish_turn(sessions[0], TurnTerminalState.completed)
     replacement = _start(manager, user_id=user_id, user_limit=1)
+    assert replacement is manager.active_turn(replacement.chat_id)
+
+
+def test_manager_accounts_for_weighted_turns() -> None:
+    manager = DevelopTurnManager()
+    user_id = uuid.uuid4()
+    apply_turn = _start(manager, user_id=user_id, user_limit=2, weight=2)
+
+    with pytest.raises(UserTurnLimitError, match="limit has been reached"):
+        _start(manager, user_id=user_id, user_limit=2)
+
+    assert apply_turn.weight == 2
+    assert manager.finish_turn(apply_turn, TurnTerminalState.completed)
+    replacement = _start(manager, user_id=user_id, user_limit=2, weight=2)
     assert replacement is manager.active_turn(replacement.chat_id)

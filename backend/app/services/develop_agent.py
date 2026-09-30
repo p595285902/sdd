@@ -5,6 +5,7 @@ import signal
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -242,7 +243,7 @@ def normalize_opencode_line(
 ) -> tuple[AgentEvent, ...]:
     try:
         event = json.loads(raw_line)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return ()
     if not isinstance(event, dict):
         return ()
@@ -250,7 +251,9 @@ def normalize_opencode_line(
     normalized: list[AgentEvent] = []
     session_id = validate_session_id(event.get("sessionID"))
     if session_id is not None:
-        normalized.append(AgentEvent(kind=AgentEventKind.session, session_id=session_id))
+        normalized.append(
+            AgentEvent(kind=AgentEventKind.session, session_id=session_id)
+        )
 
     event_type = event.get("type")
     part = event.get("part")
@@ -258,9 +261,7 @@ def normalize_opencode_line(
         part = {}
     part_type = part.get("type")
     if event_type == "step_start":
-        normalized.append(
-            AgentEvent(kind=AgentEventKind.activity, text="Thinking...")
-        )
+        normalized.append(AgentEvent(kind=AgentEventKind.activity, text="Thinking..."))
     elif event_type in REASONING_EVENT_TYPES or part_type in REASONING_EVENT_TYPES:
         text = str(part.get("text") or "").strip()
         if text:
@@ -322,18 +323,29 @@ class AgentCompletion:
     session_id: str | None
 
 
-def summarize_conversation(messages: Iterable[object]) -> str:
+def summarize_conversation(messages: Iterable[object], *, max_characters: int) -> str:
+    if max_characters < 1:
+        raise ValueError("Conversation summary bound must be positive")
     lines: list[str] = []
     for message in messages:
         role = str(getattr(message, "role", "user"))
         content = str(getattr(message, "content", "")).strip()
         if content:
             lines.append(f"{role}: {content}")
-    return "\n".join(lines)
+    summary = "\n".join(lines)
+    return summary[-max_characters:]
 
 
 def build_explore_prompt(message: str) -> str:
     return f"/openspec explore {message.strip()}"
+
+
+def build_propose_prompt(conversation: str) -> str:
+    return f"/openspec propose {conversation.strip()}"
+
+
+def build_apply_prompt() -> str:
+    return "/openspec apply"
 
 
 def minimal_agent_environment(
@@ -379,8 +391,128 @@ def execute_exploration(
     cancel_event: threading.Event | None = None,
     on_event: Callable[[AgentEvent], None] | None = None,
 ) -> AgentCompletion:
-    import uuid
+    return _execute_agent_prompt(
+        root=root,
+        chat_id=chat_id,
+        prompt=build_explore_prompt(message),
+        session_id=session_id,
+        provider_key=provider_key,
+        provider_base_url=provider_base_url,
+        repository_secret=repository_secret,
+        model=model,
+        timeout_seconds=timeout_seconds,
+        max_activity_parts=max_activity_parts,
+        max_part_characters=max_part_characters,
+        max_response_characters=max_response_characters,
+        runner=runner,
+        source_environment=source_environment,
+        cancel_event=cancel_event,
+        on_event=on_event,
+    )
 
+
+def execute_proposal(
+    *,
+    root: Path,
+    chat_id: object,
+    messages: Iterable[object],
+    max_conversation_characters: int,
+    session_id: str | None,
+    provider_key: str,
+    provider_base_url: str | None,
+    repository_secret: str | None,
+    model: str,
+    timeout_seconds: float,
+    max_activity_parts: int,
+    max_part_characters: int,
+    max_response_characters: int,
+    runner: AgentCommandRunner | None = None,
+    source_environment: Mapping[str, str] | None = None,
+    cancel_event: threading.Event | None = None,
+    on_event: Callable[[AgentEvent], None] | None = None,
+) -> AgentCompletion:
+    conversation = summarize_conversation(
+        messages, max_characters=max_conversation_characters
+    )
+    if not conversation.strip():
+        raise AgentCommandError("Development Chat has no conversation to propose")
+    return _execute_agent_prompt(
+        root=root,
+        chat_id=chat_id,
+        prompt=build_propose_prompt(conversation),
+        session_id=session_id,
+        provider_key=provider_key,
+        provider_base_url=provider_base_url,
+        repository_secret=repository_secret,
+        model=model,
+        timeout_seconds=timeout_seconds,
+        max_activity_parts=max_activity_parts,
+        max_part_characters=max_part_characters,
+        max_response_characters=max_response_characters,
+        runner=runner,
+        source_environment=source_environment,
+        cancel_event=cancel_event,
+        on_event=on_event,
+    )
+
+
+def execute_apply(
+    *,
+    root: Path,
+    chat_id: object,
+    session_id: str | None,
+    provider_key: str,
+    provider_base_url: str | None,
+    repository_secret: str | None,
+    model: str,
+    timeout_seconds: float,
+    max_activity_parts: int,
+    max_part_characters: int,
+    max_response_characters: int,
+    runner: AgentCommandRunner | None = None,
+    source_environment: Mapping[str, str] | None = None,
+    cancel_event: threading.Event | None = None,
+    on_event: Callable[[AgentEvent], None] | None = None,
+) -> AgentCompletion:
+    return _execute_agent_prompt(
+        root=root,
+        chat_id=chat_id,
+        prompt=build_apply_prompt(),
+        session_id=session_id,
+        provider_key=provider_key,
+        provider_base_url=provider_base_url,
+        repository_secret=repository_secret,
+        model=model,
+        timeout_seconds=timeout_seconds,
+        max_activity_parts=max_activity_parts,
+        max_part_characters=max_part_characters,
+        max_response_characters=max_response_characters,
+        runner=runner,
+        source_environment=source_environment,
+        cancel_event=cancel_event,
+        on_event=on_event,
+    )
+
+
+def _execute_agent_prompt(
+    *,
+    root: Path,
+    chat_id: object,
+    prompt: str,
+    session_id: str | None,
+    provider_key: str,
+    provider_base_url: str | None,
+    repository_secret: str | None,
+    model: str,
+    timeout_seconds: float,
+    max_activity_parts: int,
+    max_part_characters: int,
+    max_response_characters: int,
+    runner: AgentCommandRunner | None,
+    source_environment: Mapping[str, str] | None,
+    cancel_event: threading.Event | None,
+    on_event: Callable[[AgentEvent], None] | None,
+) -> AgentCompletion:
     if not isinstance(chat_id, uuid.UUID):
         raise TypeError("chat_id must be a UUID")
     workspace = workspace_path(root=root, chat_id=chat_id)
@@ -407,7 +539,7 @@ def execute_exploration(
     validated_session_id = validate_session_id(session_id)
     if validated_session_id is not None:
         command.extend(("--session", validated_session_id))
-    command.extend(("--model", model, build_explore_prompt(message)))
+    command.extend(("--model", model, prompt))
     secrets = (provider_key, provider_base_url, repository_secret)
     output = BoundedAgentOutput(
         max_activity_parts=max_activity_parts,

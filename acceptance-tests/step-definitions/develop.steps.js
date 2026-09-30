@@ -38,6 +38,133 @@ async function expectNoActiveTurn(world, chat = world.developmentChat) {
   assert.equal(response.status(), 404);
 }
 
+async function prepareUndecidedProposal(world, titlePrefix) {
+  await prepareReadyDevelopmentChat(world, titlePrefix);
+  world.proposalText = `Implementation proposal ${Date.now()}`;
+  await world.apiClient.configureFakeLlm([
+    { kind: 'text', text: world.proposalText },
+  ]);
+  world.proposal = await world.apiClient.proposeDevelopmentChat(
+    world.userToken,
+    world.developmentChat.id,
+  );
+  await world.developPage.open(world.userToken);
+  await world.developPage.selectChat(world.developmentChat.title);
+  await world.developPage.expectProposalActions();
+}
+
+Given(
+  'an authenticated user has explored a ready Development Workspace',
+  async function () {
+    await prepareReadyDevelopmentChat(this, 'Proposal request');
+    this.explorationMessage = `Canonical exploration ${Date.now()}`;
+    await this.apiClient.configureFakeLlm([
+      { kind: 'text', text: 'Canonical findings' },
+    ]);
+    const explored = await this.apiClient.exploreDevelopmentChat(
+      this.userToken,
+      this.developmentChat.id,
+      this.explorationMessage,
+    );
+    assert.equal(explored.status(), 200, await explored.text());
+    this.proposalText = `Implementation proposal ${Date.now()}`;
+    await this.apiClient.configureFakeLlm([
+      { kind: 'text', text: this.proposalText },
+    ]);
+    await this.developPage.open(this.userToken);
+    await this.developPage.selectChat(this.developmentChat.title);
+  },
+);
+
+When('the user selects Make it happen', async function () {
+  await this.developPage.makeItHappen();
+});
+
+Then('the stored conversation is supplied to the agent proposal workflow', async function () {
+  const requests = await this.apiClient.fakeLlmRequests();
+  assert.match(JSON.stringify(requests.at(-1).body), new RegExp(this.explorationMessage));
+});
+
+Then('the resulting undecided proposal is stored in the Development Chat', async function () {
+  const messages = await this.apiClient.listDevelopmentMessages(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  this.proposal = messages.data.at(-1);
+  assert.equal(this.proposal.content, this.proposalText);
+  assert.equal(this.proposal.kind, 'proposal');
+  assert.equal(this.proposal.proposal_state, 'undecided');
+});
+
+Then('Approve and Reject actions are displayed', async function () {
+  await this.developPage.expectProposalActions();
+});
+
+Given('a Development Chat contains an undecided proposal', async function () {
+  await prepareUndecidedProposal(this, 'Proposal decision');
+});
+
+When('its owner approves the proposal', async function () {
+  this.applyResponse = `Applied proposal ${Date.now()}`;
+  await this.apiClient.configureFakeLlm([
+    {
+      kind: 'tool',
+      tool_name: 'bash',
+      tool_arguments: {
+        command: "printf 'applied' > proposal-apply-marker.txt",
+        description: 'Record proposal application',
+      },
+    },
+    { kind: 'text', text: this.applyResponse },
+  ]);
+  await this.developPage.approveProposal();
+});
+
+Then('one apply Agent Turn starts and reports its activity and response', async function () {
+  const { message, messages } = await this.apiClient.waitForDevelopmentMessage(
+    this.userToken,
+    this.developmentChat.id,
+    this.applyResponse,
+  );
+  assert.ok(message.activity.length > 0);
+  assert.equal(messages.data.filter(({ content }) => content === this.applyResponse).length, 1);
+});
+
+Then("changes are confined to that chat's Development Workspace", async function () {
+  await this.apiClient.assertWorkspaceContent(
+    this.developmentChat.id,
+    'proposal-apply-marker.txt',
+    'applied',
+  );
+});
+
+Then('no repository changes are published remotely', async function () {
+  const requests = await this.apiClient.fakeLlmRequests();
+  const commands = requests.flatMap(({ body }) =>
+    (body.input ?? [])
+      .filter(({ type, name }) => type === 'function_call' && name === 'bash')
+      .map(({ arguments: value }) => JSON.parse(value).command ?? ''),
+  );
+  assert.doesNotMatch(commands.join('\n'), /git\s+push|gh\s+pr\s+create/i);
+});
+
+When('its owner rejects the proposal', async function () {
+  await this.developPage.rejectProposal();
+});
+
+Then('the proposal is marked rejected', async function () {
+  const messages = await this.apiClient.listDevelopmentMessages(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  const proposal = messages.data.find(({ id }) => id === this.proposal.id);
+  assert.equal(proposal.proposal_state, 'rejected');
+});
+
+Then('no apply Agent Turn starts', async function () {
+  await expectNoActiveTurn(this);
+});
+
 Given(
   'an authenticated user starts exploration in a ready Development Workspace',
   async function () {

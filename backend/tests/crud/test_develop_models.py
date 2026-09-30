@@ -10,6 +10,8 @@ from app.models import (
     DevelopmentChatPublic,
     DevelopmentMessage,
     DevelopmentMessageBase,
+    DevelopmentMessageKind,
+    DevelopmentProposalState,
     User,
 )
 from tests.utils.user import create_random_user
@@ -32,6 +34,31 @@ def test_development_chat_title_validation(title: str) -> None:
 def test_development_message_validation(role: str, content: str) -> None:
     with pytest.raises(ValidationError):
         DevelopmentMessageBase.model_validate({"role": role, "content": content})
+
+
+@pytest.mark.parametrize(
+    "proposal_state",
+    [
+        DevelopmentProposalState.undecided,
+        DevelopmentProposalState.approved,
+        DevelopmentProposalState.rejected,
+    ],
+)
+def test_development_message_kind_and_proposal_state(
+    proposal_state: DevelopmentProposalState,
+) -> None:
+    message = DevelopmentMessageBase(role="assistant", content="A proposal")
+    proposal = DevelopmentMessageBase(
+        role="assistant",
+        content="A proposal",
+        kind=DevelopmentMessageKind.proposal,
+        proposal_state=proposal_state,
+    )
+
+    assert message.kind == DevelopmentMessageKind.message
+    assert message.proposal_state is None
+    assert proposal.kind == DevelopmentMessageKind.proposal
+    assert proposal.proposal_state == proposal_state
 
 
 def test_development_chat_relationships_and_timestamp_defaults(db: Session) -> None:

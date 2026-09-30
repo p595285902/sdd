@@ -40,13 +40,17 @@ class TurnSession:
         *,
         chat_id: uuid.UUID,
         user_id: uuid.UUID,
+        weight: int = 1,
         presence_mode: PresenceMode,
         replay_limit: int,
     ) -> None:
         if replay_limit < 1:
             raise ValueError("Turn replay limit must be positive")
+        if weight < 1:
+            raise ValueError("Turn weight must be positive")
         self.chat_id = chat_id
         self.user_id = user_id
+        self.weight = weight
         self.presence_mode = presence_mode
         self.cancel_event = threading.Event()
         self._condition = threading.Condition(threading.RLock())
@@ -94,9 +98,7 @@ class TurnSession:
         with self._condition:
             while True:
                 events = tuple(
-                    event
-                    for event in self._events
-                    if event.sequence > after_sequence
+                    event for event in self._events if event.sequence > after_sequence
                 )
                 if events or self._terminal_state is not None:
                     return events
@@ -191,29 +193,34 @@ class DevelopTurnManager:
         chat_id: uuid.UUID,
         user_id: uuid.UUID,
         user_limit: int,
+        weight: int = 1,
         presence_mode: PresenceMode,
         replay_limit: int,
         timeout_seconds: float,
     ) -> TurnSession:
         if user_limit < 1:
             raise ValueError("User turn limit must be positive")
+        if weight < 1:
+            raise ValueError("Turn weight must be positive")
         with self._lock:
             if chat_id in self._active_by_chat:
                 raise ChatTurnActiveError(
                     "This Development Chat already has an active Agent Turn"
                 )
-            if self._active_by_user.get(user_id, 0) >= user_limit:
+            active_weight = self._active_by_user.get(user_id, 0)
+            if active_weight + weight > user_limit:
                 raise UserTurnLimitError(
                     "The user's concurrent Agent Turn limit has been reached"
                 )
             session = TurnSession(
                 chat_id=chat_id,
                 user_id=user_id,
+                weight=weight,
                 presence_mode=presence_mode,
                 replay_limit=replay_limit,
             )
             self._active_by_chat[chat_id] = session
-            self._active_by_user[user_id] = self._active_by_user.get(user_id, 0) + 1
+            self._active_by_user[user_id] = active_weight + weight
             session.start_timeout(timeout_seconds)
             return session
 
@@ -233,10 +240,10 @@ class DevelopTurnManager:
             session.complete(state, data)
             del self._active_by_chat[session.chat_id]
             active_count = self._active_by_user.get(session.user_id, 0)
-            if active_count <= 1:
+            if active_count <= session.weight:
                 self._active_by_user.pop(session.user_id, None)
             else:
-                self._active_by_user[session.user_id] = active_count - 1
+                self._active_by_user[session.user_id] = active_count - session.weight
             return True
 
     def request_stop(

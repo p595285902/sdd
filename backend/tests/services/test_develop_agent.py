@@ -17,11 +17,16 @@ from app.services.develop_agent import (
     AgentEvent,
     AgentEventKind,
     BoundedAgentOutput,
+    build_apply_prompt,
     build_explore_prompt,
+    build_propose_prompt,
+    execute_apply,
     execute_exploration,
+    execute_proposal,
     minimal_agent_environment,
     normalize_opencode_line,
     scrub_secrets,
+    summarize_conversation,
     validate_session_id,
 )
 
@@ -197,6 +202,85 @@ class RecordingAgentRunner(AgentCommandRunner):
     def run(self, command, *, cwd, env, **_kwargs):  # type: ignore[no-untyped-def]
         self.calls.append((tuple(command), cwd, dict(env)))
         return AgentCommandResult(stdout_lines=self.lines, stderr="")
+
+
+def test_proposal_uses_bounded_canonical_conversation(tmp_path: Path) -> None:
+    chat_id = __import__("uuid").uuid4()
+    workspace = tmp_path / str(chat_id)
+    workspace.mkdir()
+    runner = RecordingAgentRunner(
+        ('{"type":"text","sessionID":"ses_propose","part":{"text":"Plan"}}',)
+    )
+    messages = [
+        type("Message", (), {"role": "user", "content": "old context"})(),
+        type("Message", (), {"role": "assistant", "content": "latest context"})(),
+    ]
+
+    completion = execute_proposal(
+        root=tmp_path,
+        chat_id=chat_id,
+        messages=messages,
+        max_conversation_characters=30,
+        session_id="ses_explore",
+        provider_key="provider-key",
+        provider_base_url=None,
+        repository_secret="repository-secret",
+        model="openai/test-model",
+        timeout_seconds=2,
+        max_activity_parts=5,
+        max_part_characters=100,
+        max_response_characters=100,
+        runner=runner,
+    )
+
+    command, cwd, _environment = runner.calls[0]
+    prompt = command[-1]
+    assert cwd == workspace
+    assert prompt == build_propose_prompt(
+        summarize_conversation(messages, max_characters=30)
+    )
+    assert len(prompt.removeprefix("/openspec propose ")) <= 30
+    assert prompt.endswith("assistant: latest context")
+    assert command[command.index("--session") + 1] == "ses_explore"
+    assert completion.response_text == "Plan"
+    assert completion.session_id == "ses_propose"
+
+
+def test_apply_is_confined_and_has_no_publication_credentials(tmp_path: Path) -> None:
+    chat_id = __import__("uuid").uuid4()
+    workspace = tmp_path / str(chat_id)
+    workspace.mkdir()
+    runner = RecordingAgentRunner(
+        ('{"type":"text","part":{"text":"Applied"}}',)
+    )
+
+    completion = execute_apply(
+        root=tmp_path,
+        chat_id=chat_id,
+        session_id="ses_propose",
+        provider_key="provider-key",
+        provider_base_url=None,
+        repository_secret="repository-secret",
+        model="openai/test-model",
+        timeout_seconds=2,
+        max_activity_parts=5,
+        max_part_characters=100,
+        max_response_characters=100,
+        runner=runner,
+        source_environment={
+            "PATH": "/bin",
+            "GITHUB_TOKEN": "must-not-pass",
+            "DEMO_GITHUB_TOKEN": "must-not-pass",
+        },
+    )
+
+    command, cwd, environment = runner.calls[0]
+    assert cwd == workspace
+    assert command[command.index("--dir") + 1] == str(workspace)
+    assert command[-1] == build_apply_prompt()
+    assert command[command.index("--session") + 1] == "ses_propose"
+    assert environment == {"PATH": "/bin", "OPENAI_API_KEY": "provider-key"}
+    assert completion.response_text == "Applied"
 
 
 def test_exploration_is_confined_and_uses_minimal_environment(tmp_path: Path) -> None:

@@ -36,14 +36,16 @@ class Settings(BaseSettings):
     DEVELOP_TURN_PRESENCE_GRACE_SECONDS: float = Field(default=10, ge=0, le=300)
     DEVELOP_TURN_REPLAY_LIMIT: int = Field(default=200, ge=1, le=1000)
     DEVELOP_SSE_HEARTBEAT_SECONDS: float = Field(default=15, gt=0, le=60)
-    DEVELOP_USER_CONCURRENT_TURN_LIMIT_DEFAULT: int = Field(
-        default=2, ge=1, le=20
-    )
+    DEVELOP_USER_CONCURRENT_TURN_LIMIT_DEFAULT: int = Field(default=2, ge=1, le=20)
     DEVELOP_AGENT_MAX_ACTIVITY_PARTS: int = Field(default=100, ge=1, le=1000)
     DEVELOP_AGENT_MAX_PART_CHARACTERS: int = Field(default=2000, ge=1, le=10000)
     DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS: int = Field(
         default=100_000, ge=1, le=100_000
     )
+    DEVELOP_AGENT_MAX_CONVERSATION_CHARACTERS: int = Field(
+        default=100_000, ge=1, le=500_000
+    )
+    DEVELOP_APPLY_TURN_WEIGHT: int = Field(default=2, ge=1, le=20)
     DEVELOP_AGENT_MODEL: str = "openai/gpt-5.4-mini"
     OPENAI_API_KEY: SecretStr | None = None
     OPENAI_BASE_URL: HttpUrl | None = None
@@ -69,9 +71,7 @@ class Settings(BaseSettings):
 
     @field_validator("DEMO_GITHUB_REPO")
     @classmethod
-    def _require_tokenless_repository_url(
-        cls, value: HttpUrl | None
-    ) -> HttpUrl | None:
+    def _require_tokenless_repository_url(cls, value: HttpUrl | None) -> HttpUrl | None:
         if value is not None and (value.username or value.password):
             raise ValueError("Repository URL must not contain credentials")
         return value

@@ -2,7 +2,7 @@
 
 import { type Client, type Options as Options2, type TDataShape, urlSearchParamsBodySerializer } from './client';
 import { client } from './client.gen';
-import type { developAttachCurrentTurnData, developAttachCurrentTurnErrors, developAttachCurrentTurnResponses, developCreateDevelopmentChatData, developCreateDevelopmentChatErrors, developCreateDevelopmentChatResponses, developDeleteDevelopmentChatData, developDeleteDevelopmentChatErrors, developDeleteDevelopmentChatResponses, developDetachCurrentTurnData, developDetachCurrentTurnErrors, developDetachCurrentTurnResponses, developExploreDevelopmentChatData, developExploreDevelopmentChatErrors, developExploreDevelopmentChatResponses, developReadCurrentTurnData, developReadCurrentTurnErrors, developReadCurrentTurnResponses, developReadDevelopmentChatData, developReadDevelopmentChatErrors, developReadDevelopmentChatResponses, developReadDevelopmentChatsData, developReadDevelopmentChatsResponses, developReadDevelopmentMessagesData, developReadDevelopmentMessagesErrors, developReadDevelopmentMessagesResponses, developReadDevelopmentWorkspaceData, developReadDevelopmentWorkspaceErrors, developReadDevelopmentWorkspaceResponses, developRenameDevelopmentChatData, developRenameDevelopmentChatErrors, developRenameDevelopmentChatResponses, developSetupDevelopmentWorkspaceData, developSetupDevelopmentWorkspaceErrors, developSetupDevelopmentWorkspaceResponses, developStopCurrentTurnData, developStopCurrentTurnErrors, developStopCurrentTurnResponses, developStreamCurrentTurnData, developStreamCurrentTurnErrors, developStreamCurrentTurnResponses, developStreamDevelopmentChatExplorationData, developStreamDevelopmentChatExplorationErrors, developStreamDevelopmentChatExplorationResponses, developUpdateDevelopmentPresenceData, developUpdateDevelopmentPresenceErrors, developUpdateDevelopmentPresenceResponses, itemsCreateItemData, itemsCreateItemErrors, itemsCreateItemResponses, itemsDeleteItemData, itemsDeleteItemErrors, itemsDeleteItemResponses, itemsReadItemData, itemsReadItemErrors, itemsReadItemResponses, itemsReadItemsData, itemsReadItemsErrors, itemsReadItemsResponses, itemsUpdateItemData, itemsUpdateItemErrors, itemsUpdateItemResponses, loginLoginAccessTokenData, loginLoginAccessTokenErrors, loginLoginAccessTokenResponses, loginRecoverPasswordData, loginRecoverPasswordErrors, loginRecoverPasswordHtmlContentData, loginRecoverPasswordHtmlContentErrors, loginRecoverPasswordHtmlContentResponses, loginRecoverPasswordResponses, loginResetPasswordData, loginResetPasswordErrors, loginResetPasswordResponses, loginTestTokenData, loginTestTokenResponses, privateCreateUserData, privateCreateUserErrors, privateCreateUserResponses, usersBulkDeleteUsersData, usersBulkDeleteUsersErrors, usersBulkDeleteUsersResponses, usersCreateUserData, usersCreateUserErrors, usersCreateUserResponses, usersDeleteUserData, usersDeleteUserErrors, usersDeleteUserMeData, usersDeleteUserMeResponses, usersDeleteUserResponses, usersReadUserByIdData, usersReadUserByIdErrors, usersReadUserByIdResponses, usersReadUserMeData, usersReadUserMeResponses, usersReadUsersData, usersReadUsersErrors, usersReadUsersResponses, usersRegisterUserData, usersRegisterUserErrors, usersRegisterUserResponses, usersUpdatePasswordMeData, usersUpdatePasswordMeErrors, usersUpdatePasswordMeResponses, usersUpdateUserData, usersUpdateUserErrors, usersUpdateUserMeData, usersUpdateUserMeErrors, usersUpdateUserMeResponses, usersUpdateUserResponses, utilsHealthCheckData, utilsHealthCheckResponses, utilsTestEmailData, utilsTestEmailErrors, utilsTestEmailResponses } from './types.gen';
+import type { developApproveDevelopmentProposalData, developApproveDevelopmentProposalErrors, developApproveDevelopmentProposalResponses, developAttachCurrentTurnData, developAttachCurrentTurnErrors, developAttachCurrentTurnResponses, developCreateDevelopmentChatData, developCreateDevelopmentChatErrors, developCreateDevelopmentChatResponses, developDeleteDevelopmentChatData, developDeleteDevelopmentChatErrors, developDeleteDevelopmentChatResponses, developDetachCurrentTurnData, developDetachCurrentTurnErrors, developDetachCurrentTurnResponses, developExploreDevelopmentChatData, developExploreDevelopmentChatErrors, developExploreDevelopmentChatResponses, developProposeDevelopmentChatData, developProposeDevelopmentChatErrors, developProposeDevelopmentChatResponses, developReadCurrentTurnData, developReadCurrentTurnErrors, developReadCurrentTurnResponses, developReadDevelopmentChatData, developReadDevelopmentChatErrors, developReadDevelopmentChatResponses, developReadDevelopmentChatsData, developReadDevelopmentChatsResponses, developReadDevelopmentMessagesData, developReadDevelopmentMessagesErrors, developReadDevelopmentMessagesResponses, developReadDevelopmentWorkspaceData, developReadDevelopmentWorkspaceErrors, developReadDevelopmentWorkspaceResponses, developRejectDevelopmentProposalData, developRejectDevelopmentProposalErrors, developRejectDevelopmentProposalResponses, developRenameDevelopmentChatData, developRenameDevelopmentChatErrors, developRenameDevelopmentChatResponses, developSetupDevelopmentWorkspaceData, developSetupDevelopmentWorkspaceErrors, developSetupDevelopmentWorkspaceResponses, developStopCurrentTurnData, developStopCurrentTurnErrors, developStopCurrentTurnResponses, developStreamCurrentTurnData, developStreamCurrentTurnErrors, developStreamCurrentTurnResponses, developStreamDevelopmentChatExplorationData, developStreamDevelopmentChatExplorationErrors, developStreamDevelopmentChatExplorationResponses, developUpdateDevelopmentPresenceData, developUpdateDevelopmentPresenceErrors, developUpdateDevelopmentPresenceResponses, itemsCreateItemData, itemsCreateItemErrors, itemsCreateItemResponses, itemsDeleteItemData, itemsDeleteItemErrors, itemsDeleteItemResponses, itemsReadItemData, itemsReadItemErrors, itemsReadItemResponses, itemsReadItemsData, itemsReadItemsErrors, itemsReadItemsResponses, itemsUpdateItemData, itemsUpdateItemErrors, itemsUpdateItemResponses, loginLoginAccessTokenData, loginLoginAccessTokenErrors, loginLoginAccessTokenResponses, loginRecoverPasswordData, loginRecoverPasswordErrors, loginRecoverPasswordHtmlContentData, loginRecoverPasswordHtmlContentErrors, loginRecoverPasswordHtmlContentResponses, loginRecoverPasswordResponses, loginResetPasswordData, loginResetPasswordErrors, loginResetPasswordResponses, loginTestTokenData, loginTestTokenResponses, privateCreateUserData, privateCreateUserErrors, privateCreateUserResponses, usersBulkDeleteUsersData, usersBulkDeleteUsersErrors, usersBulkDeleteUsersResponses, usersCreateUserData, usersCreateUserErrors, usersCreateUserResponses, usersDeleteUserData, usersDeleteUserErrors, usersDeleteUserMeData, usersDeleteUserMeResponses, usersDeleteUserResponses, usersReadUserByIdData, usersReadUserByIdErrors, usersReadUserByIdResponses, usersReadUserMeData, usersReadUserMeResponses, usersReadUsersData, usersReadUsersErrors, usersReadUsersResponses, usersRegisterUserData, usersRegisterUserErrors, usersRegisterUserResponses, usersUpdatePasswordMeData, usersUpdatePasswordMeErrors, usersUpdatePasswordMeResponses, usersUpdateUserData, usersUpdateUserErrors, usersUpdateUserMeData, usersUpdateUserMeErrors, usersUpdateUserMeResponses, usersUpdateUserResponses, utilsHealthCheckData, utilsHealthCheckResponses, utilsTestEmailData, utilsTestEmailErrors, utilsTestEmailResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -497,6 +497,42 @@ export class DevelopService {
             responseType: 'json',
             security: [{ scheme: 'bearer', type: 'http' }],
             url: '/api/v1/develop/chats/{chat_id}/messages',
+            ...options
+        });
+    }
+
+    /**
+     * Propose Development Chat
+     */
+    public static proposeDevelopmentChat<ThrowOnError extends boolean = true>(options: Options<developProposeDevelopmentChatData, ThrowOnError>) {
+        return (options.client ?? client).post<developProposeDevelopmentChatResponses, developProposeDevelopmentChatErrors, ThrowOnError>({
+            responseType: 'json',
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/api/v1/develop/chats/{chat_id}/messages/propose',
+            ...options
+        });
+    }
+
+    /**
+     * Reject Development Proposal
+     */
+    public static rejectDevelopmentProposal<ThrowOnError extends boolean = true>(options: Options<developRejectDevelopmentProposalData, ThrowOnError>) {
+        return (options.client ?? client).post<developRejectDevelopmentProposalResponses, developRejectDevelopmentProposalErrors, ThrowOnError>({
+            responseType: 'json',
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/api/v1/develop/chats/{chat_id}/messages/{message_id}/reject',
+            ...options
+        });
+    }
+
+    /**
+     * Approve Development Proposal
+     */
+    public static approveDevelopmentProposal<ThrowOnError extends boolean = true>(options: Options<developApproveDevelopmentProposalData, ThrowOnError>) {
+        return (options.client ?? client).post<developApproveDevelopmentProposalResponses, developApproveDevelopmentProposalErrors, ThrowOnError>({
+            responseType: 'json',
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/api/v1/develop/chats/{chat_id}/messages/{message_id}/approve/stream',
             ...options
         });
     }

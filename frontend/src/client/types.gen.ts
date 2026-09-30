@@ -111,6 +111,11 @@ export type DevelopmentMessageCreate = {
 };
 
 /**
+ * DevelopmentMessageKind
+ */
+export type DevelopmentMessageKind = 'message' | 'proposal';
+
+/**
  * DevelopmentMessagePublic
  */
 export type DevelopmentMessagePublic = {
@@ -119,6 +124,8 @@ export type DevelopmentMessagePublic = {
      * Content
      */
     content: string;
+    kind?: DevelopmentMessageKind;
+    proposal_state?: DevelopmentProposalState | null;
     /**
      * Activity
      */
@@ -168,6 +175,11 @@ export type DevelopmentMessagesPublic = {
 export type DevelopmentPresenceUpdate = {
     presence_mode: PresenceMode;
 };
+
+/**
+ * DevelopmentProposalState
+ */
+export type DevelopmentProposalState = 'undecided' | 'approved' | 'rejected';
 
 /**
  * DevelopmentWorkspacePublic
@@ -1386,6 +1398,102 @@ export type developReadDevelopmentMessagesResponses = {
 };
 
 export type developReadDevelopmentMessagesResponse = developReadDevelopmentMessagesResponses[keyof developReadDevelopmentMessagesResponses];
+
+export type developProposeDevelopmentChatData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/messages/propose';
+};
+
+export type developProposeDevelopmentChatErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developProposeDevelopmentChatError = developProposeDevelopmentChatErrors[keyof developProposeDevelopmentChatErrors];
+
+export type developProposeDevelopmentChatResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentMessagePublic;
+};
+
+export type developProposeDevelopmentChatResponse = developProposeDevelopmentChatResponses[keyof developProposeDevelopmentChatResponses];
+
+export type developRejectDevelopmentProposalData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+        /**
+         * Message Id
+         */
+        message_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/messages/{message_id}/reject';
+};
+
+export type developRejectDevelopmentProposalErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developRejectDevelopmentProposalError = developRejectDevelopmentProposalErrors[keyof developRejectDevelopmentProposalErrors];
+
+export type developRejectDevelopmentProposalResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentMessagePublic;
+};
+
+export type developRejectDevelopmentProposalResponse = developRejectDevelopmentProposalResponses[keyof developRejectDevelopmentProposalResponses];
+
+export type developApproveDevelopmentProposalData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+        /**
+         * Message Id
+         */
+        message_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/messages/{message_id}/approve/stream';
+};
+
+export type developApproveDevelopmentProposalErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developApproveDevelopmentProposalError = developApproveDevelopmentProposalErrors[keyof developApproveDevelopmentProposalErrors];
+
+export type developApproveDevelopmentProposalResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
 
 export type developStopCurrentTurnData = {
     body?: never;

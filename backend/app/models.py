@@ -235,9 +235,28 @@ class DevelopmentMessageRole(StrEnum):
     assistant = "assistant"
 
 
+class DevelopmentMessageKind(StrEnum):
+    message = "message"
+    proposal = "proposal"
+
+
+class DevelopmentProposalState(StrEnum):
+    undecided = "undecided"
+    approved = "approved"
+    rejected = "rejected"
+
+
 class DevelopmentMessageBase(SQLModel):
     role: DevelopmentMessageRole
     content: str = Field(min_length=1, max_length=100_000)
+    kind: DevelopmentMessageKind = Field(
+        default=DevelopmentMessageKind.message,
+        sa_column=Column(String(32), nullable=False),
+    )
+    proposal_state: DevelopmentProposalState | None = Field(
+        default=None,
+        sa_column=Column(String(32), nullable=True),
+    )
     activity: list[dict[str, str]] = Field(
         default_factory=list,
         sa_column=Column(JSON, nullable=False),

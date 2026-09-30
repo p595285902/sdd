@@ -11,6 +11,7 @@ import {
   MessageSquarePlus,
   PanelRight,
   Pencil,
+  Rocket,
   Send,
   Square,
   Trash2,
@@ -165,15 +166,23 @@ export function DevelopWorkspace() {
   )
 
   const consumeStream = useCallback(
-    async (chatId: string, method: "GET" | "POST", content?: string) => {
+    async (
+      chatId: string,
+      method: "GET" | "POST",
+      content?: string,
+      suffix?: string,
+    ) => {
       streams.current.get(chatId)?.abort()
       const controller = new AbortController()
       streams.current.set(chatId, controller)
       try {
-        const suffix =
-          method === "POST" ? "messages/explore/stream" : "turns/current/stream"
+        const streamSuffix =
+          suffix ??
+          (method === "POST"
+            ? "messages/explore/stream"
+            : "turns/current/stream")
         for await (const event of streamDevelopTurn({
-          url: `/api/v1/develop/chats/${chatId}/${suffix}`,
+          url: `/api/v1/develop/chats/${chatId}/${streamSuffix}`,
           token: localStorage.getItem("access_token") ?? "",
           method,
           body: content === undefined ? undefined : { content },
@@ -277,6 +286,43 @@ export function DevelopWorkspace() {
       await finishStream(selected.id)
     },
   })
+  const propose = useMutation({
+    mutationFn: async (chatId: string) =>
+      (
+        await DevelopService.proposeDevelopmentChat({
+          path: { chat_id: chatId },
+        })
+      ).data,
+    onError: handleError.bind(showErrorToast),
+    onSuccess: async (proposal) => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["development-messages", proposal.chat_id],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["development-chats"] }),
+      ])
+    },
+  })
+  const rejectProposal = useMutation({
+    mutationFn: async ({
+      chatId,
+      messageId,
+    }: {
+      chatId: string
+      messageId: string
+    }) =>
+      (
+        await DevelopService.rejectDevelopmentProposal({
+          path: { chat_id: chatId, message_id: messageId },
+        })
+      ).data,
+    onError: handleError.bind(showErrorToast),
+    onSuccess: async (proposal) => {
+      await queryClient.invalidateQueries({
+        queryKey: ["development-messages", proposal.chat_id],
+      })
+    },
+  })
   const deleteChat = useMutation({
     mutationFn: (chat: DevelopmentChatPublic) =>
       DevelopService.deleteDevelopmentChat({
@@ -311,6 +357,25 @@ export function DevelopWorkspace() {
     setDraft("")
     pinned.current = true
     void consumeStream(selected.id, "POST", content)
+  }
+  const approveProposal = (messageId: string) => {
+    if (!selected || conversation.running) return
+    updateConversation(selected.id, (current) => ({
+      ...current,
+      activity: [],
+      response: "",
+      lastSequence: 0,
+      running: true,
+      startedAt: Date.now(),
+      error: null,
+    }))
+    pinned.current = true
+    void consumeStream(
+      selected.id,
+      "POST",
+      undefined,
+      `messages/${messageId}/approve/stream`,
+    )
   }
   const selectChat = (chatId: string) => {
     setSelectedId(chatId)
@@ -561,6 +626,9 @@ export function DevelopWorkspace() {
                   )}
                   {conversation.messages.map((message) => (
                     <article
+                      aria-label={
+                        message.kind === "proposal" ? "Proposal" : undefined
+                      }
                       className={`max-w-[88%] rounded-md px-4 py-3 text-sm ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted"}`}
                       key={message.id}
                     >
@@ -582,6 +650,44 @@ export function DevelopWorkspace() {
                       ) : (
                         <div className="whitespace-pre-wrap">
                           {message.content}
+                        </div>
+                      )}
+                      {message.kind === "proposal" && (
+                        <div className="mt-4 flex flex-wrap items-center gap-2 border-t pt-3">
+                          <span className="mr-auto text-xs font-medium capitalize text-muted-foreground">
+                            {message.proposal_state}
+                          </span>
+                          <Button
+                            disabled={
+                              message.proposal_state !== "undecided" ||
+                              conversation.running ||
+                              rejectProposal.isPending
+                            }
+                            onClick={() => approveProposal(message.id)}
+                            size="sm"
+                            type="button"
+                          >
+                            Approve
+                          </Button>
+                          <Button
+                            disabled={
+                              message.proposal_state !== "undecided" ||
+                              conversation.running ||
+                              rejectProposal.isPending
+                            }
+                            onClick={() =>
+                              selected &&
+                              rejectProposal.mutate({
+                                chatId: selected.id,
+                                messageId: message.id,
+                              })
+                            }
+                            size="sm"
+                            type="button"
+                            variant="outline"
+                          >
+                            Reject
+                          </Button>
                         </div>
                       )}
                     </article>
@@ -616,8 +722,9 @@ export function DevelopWorkspace() {
               </div>
 
               <form className="border-t p-3" onSubmit={submitExploration}>
-                <div className="mx-auto flex max-w-3xl gap-2">
+                <div className="mx-auto flex max-w-3xl flex-wrap gap-2">
                   <Input
+                    className="min-w-0 flex-1 basis-64"
                     aria-label="Exploration message"
                     disabled={
                       !workspaceQuery.data?.ready || conversation.running
@@ -631,6 +738,24 @@ export function DevelopWorkspace() {
                     }
                     value={draft}
                   />
+                  <Button
+                    disabled={
+                      !workspaceQuery.data?.ready ||
+                      conversation.running ||
+                      propose.isPending
+                    }
+                    onClick={() => propose.mutate(selected.id)}
+                    title="Create an implementation proposal"
+                    type="button"
+                    variant="outline"
+                  >
+                    {propose.isPending ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Rocket />
+                    )}
+                    Make it happen
+                  </Button>
                   {conversation.running ? (
                     <Button
                       aria-label="Stop Agent Turn"

@@ -223,12 +223,43 @@ class ApiClient {
     return response.json();
   }
 
+  async waitForDevelopmentMessage(token, chatId, content) {
+    const deadline = Date.now() + 50_000;
+    while (Date.now() < deadline) {
+      const messages = await this.listDevelopmentMessages(token, chatId);
+      const message = messages.data.find((entry) => entry.content === content);
+      if (message) return { message, messages };
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error(`Development Message was not persisted: ${content}`);
+  }
+
   async exploreDevelopmentChat(token, chatId, content) {
     return this.request(
       token,
       'post',
       `/api/v1/develop/chats/${chatId}/messages/explore`,
       { data: { content } },
+    );
+  }
+
+  async proposeDevelopmentChat(token, chatId) {
+    const response = await this.request(
+      token,
+      'post',
+      `/api/v1/develop/chats/${chatId}/messages/propose`,
+    );
+    if (!response.ok()) {
+      throw new Error(`Unable to create proposal: ${response.status()} ${await response.text()}`);
+    }
+    return response.json();
+  }
+
+  async rejectDevelopmentProposal(token, chatId, proposalId) {
+    return this.request(
+      token,
+      'post',
+      `/api/v1/develop/chats/${chatId}/messages/${proposalId}/reject`,
     );
   }
 
