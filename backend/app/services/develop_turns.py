@@ -87,6 +87,24 @@ class TurnSession:
                 event for event in self._events if event.sequence > after_sequence
             )
 
+    def wait_for_events(
+        self, *, after_sequence: int, timeout: float
+    ) -> tuple[TurnEvent, ...]:
+        deadline = monotonic() + timeout
+        with self._condition:
+            while True:
+                events = tuple(
+                    event
+                    for event in self._events
+                    if event.sequence > after_sequence
+                )
+                if events or self._terminal_state is not None:
+                    return events
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    return ()
+                self._condition.wait(remaining)
+
     def attach(self, subscriber_id: str) -> tuple[TurnEvent, ...]:
         with self._condition:
             self._subscribers.add(subscriber_id)

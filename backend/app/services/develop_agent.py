@@ -5,7 +5,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -69,6 +69,7 @@ class AgentCommandRunner:
         timeout_seconds: float,
         secrets: Iterable[str | None] = (),
         cancel_event: threading.Event | None = None,
+        on_stdout_line: Callable[[str], None] | None = None,
     ) -> AgentCommandResult:
         if timeout_seconds <= 0:
             raise ValueError("Agent command timeout must be positive")
@@ -83,7 +84,15 @@ class AgentCommandRunner:
         )
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
-        stdout_thread = self._start_drainer(process.stdout, stdout_lines)
+        stdout_thread = self._start_drainer(
+            process.stdout,
+            stdout_lines,
+            on_line=(
+                None
+                if on_stdout_line is None
+                else lambda line: on_stdout_line(scrub_secrets(line, secrets))
+            ),
+        )
         stderr_thread = self._start_drainer(process.stderr, stderr_lines)
         deadline = time.monotonic() + timeout_seconds
         failure: type[AgentCommandError] | None = None
@@ -129,11 +138,16 @@ class AgentCommandRunner:
 
     @staticmethod
     def _start_drainer(
-        stream: Iterable[str] | None, destination: list[str]
+        stream: Iterable[str] | None,
+        destination: list[str],
+        on_line: Callable[[str], None] | None = None,
     ) -> threading.Thread:
         def drain() -> None:
             if stream is not None:
-                destination.extend(stream)
+                for line in stream:
+                    destination.append(line)
+                    if on_line is not None:
+                        on_line(line.rstrip("\n"))
 
         thread = threading.Thread(target=drain, daemon=True)
         thread.start()
@@ -363,6 +377,7 @@ def execute_exploration(
     runner: AgentCommandRunner | None = None,
     source_environment: Mapping[str, str] | None = None,
     cancel_event: threading.Event | None = None,
+    on_event: Callable[[AgentEvent], None] | None = None,
 ) -> AgentCompletion:
     import uuid
 
@@ -394,6 +409,21 @@ def execute_exploration(
         command.extend(("--session", validated_session_id))
     command.extend(("--model", model, build_explore_prompt(message)))
     secrets = (provider_key, provider_base_url, repository_secret)
+    output = BoundedAgentOutput(
+        max_activity_parts=max_activity_parts,
+        max_part_characters=max_part_characters,
+        max_response_characters=max_response_characters,
+    )
+    received_live_output = False
+
+    def handle_line(line: str) -> None:
+        nonlocal received_live_output
+        received_live_output = True
+        for event in normalize_opencode_line(line, secrets=secrets):
+            output.add_event(event)
+            if on_event is not None:
+                on_event(event)
+
     result = (runner or AgentCommandRunner()).run(
         command,
         cwd=workspace,
@@ -401,15 +431,11 @@ def execute_exploration(
         timeout_seconds=timeout_seconds,
         secrets=secrets,
         cancel_event=cancel_event,
+        on_stdout_line=handle_line,
     )
-    output = BoundedAgentOutput(
-        max_activity_parts=max_activity_parts,
-        max_part_characters=max_part_characters,
-        max_response_characters=max_response_characters,
-    )
-    for line in result.stdout_lines:
-        for event in normalize_opencode_line(line, secrets=secrets):
-            output.add_event(event)
+    if not received_live_output:
+        for line in result.stdout_lines:
+            handle_line(line)
     if not output.response_text:
         raise AgentCommandError(result.stderr or "The agent did not return a response")
     return AgentCompletion(

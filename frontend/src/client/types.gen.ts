@@ -64,6 +64,7 @@ export type DevelopmentChatPublic = {
      * Workspace Ready
      */
     workspace_ready: boolean;
+    presence_mode: PresenceMode;
     /**
      * Created At
      */
@@ -81,7 +82,8 @@ export type DevelopmentChatUpdate = {
     /**
      * Title
      */
-    title: string;
+    title?: string | null;
+    presence_mode?: PresenceMode | null;
 };
 
 /**
@@ -158,6 +160,13 @@ export type DevelopmentMessagesPublic = {
      * Next Cursor
      */
     next_cursor?: string | null;
+};
+
+/**
+ * DevelopmentPresenceUpdate
+ */
+export type DevelopmentPresenceUpdate = {
+    presence_mode: PresenceMode;
 };
 
 /**
@@ -277,6 +286,11 @@ export type NewPassword = {
 };
 
 /**
+ * PresenceMode
+ */
+export type PresenceMode = 'stop_when_i_leave' | 'continue_in_background';
+
+/**
  * PrivateUserCreate
  */
 export type PrivateUserCreate = {
@@ -347,6 +361,10 @@ export type UserCreate = {
      */
     full_name?: string | null;
     /**
+     * Concurrent Agent Turn Limit
+     */
+    concurrent_agent_turn_limit?: number;
+    /**
      * Password
      */
     password: string;
@@ -372,6 +390,10 @@ export type UserPublic = {
      * Full Name
      */
     full_name?: string | null;
+    /**
+     * Concurrent Agent Turn Limit
+     */
+    concurrent_agent_turn_limit?: number;
     /**
      * Id
      */
@@ -424,6 +446,10 @@ export type UserUpdate = {
      * Password
      */
     password?: string | null;
+    /**
+     * Concurrent Agent Turn Limit
+     */
+    concurrent_agent_turn_limit?: number | null;
 };
 
 /**
@@ -1292,6 +1318,36 @@ export type developSetupDevelopmentWorkspaceResponses = {
 
 export type developSetupDevelopmentWorkspaceResponse = developSetupDevelopmentWorkspaceResponses[keyof developSetupDevelopmentWorkspaceResponses];
 
+export type developUpdateDevelopmentPresenceData = {
+    body: DevelopmentPresenceUpdate;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/presence';
+};
+
+export type developUpdateDevelopmentPresenceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developUpdateDevelopmentPresenceError = developUpdateDevelopmentPresenceErrors[keyof developUpdateDevelopmentPresenceErrors];
+
+export type developUpdateDevelopmentPresenceResponses = {
+    /**
+     * Successful Response
+     */
+    200: DevelopmentChatPublic;
+};
+
+export type developUpdateDevelopmentPresenceResponse = developUpdateDevelopmentPresenceResponses[keyof developUpdateDevelopmentPresenceResponses];
+
 export type developReadDevelopmentMessagesData = {
     body?: never;
     path: {
@@ -1330,6 +1386,190 @@ export type developReadDevelopmentMessagesResponses = {
 };
 
 export type developReadDevelopmentMessagesResponse = developReadDevelopmentMessagesResponses[keyof developReadDevelopmentMessagesResponses];
+
+export type developStopCurrentTurnData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/turns/current';
+};
+
+export type developStopCurrentTurnErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developStopCurrentTurnError = developStopCurrentTurnErrors[keyof developStopCurrentTurnErrors];
+
+export type developStopCurrentTurnResponses = {
+    /**
+     * Successful Response
+     */
+    200: Message;
+};
+
+export type developStopCurrentTurnResponse = developStopCurrentTurnResponses[keyof developStopCurrentTurnResponses];
+
+export type developReadCurrentTurnData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/turns/current';
+};
+
+export type developReadCurrentTurnErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developReadCurrentTurnError = developReadCurrentTurnErrors[keyof developReadCurrentTurnErrors];
+
+export type developReadCurrentTurnResponses = {
+    /**
+     * Response Develop-Read Current Turn
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type developReadCurrentTurnResponse = developReadCurrentTurnResponses[keyof developReadCurrentTurnResponses];
+
+export type developStreamCurrentTurnData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/turns/current/stream';
+};
+
+export type developStreamCurrentTurnErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developStreamCurrentTurnError = developStreamCurrentTurnErrors[keyof developStreamCurrentTurnErrors];
+
+export type developStreamCurrentTurnResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type developDetachCurrentTurnData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/turns/current/attach';
+};
+
+export type developDetachCurrentTurnErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developDetachCurrentTurnError = developDetachCurrentTurnErrors[keyof developDetachCurrentTurnErrors];
+
+export type developDetachCurrentTurnResponses = {
+    /**
+     * Successful Response
+     */
+    200: Message;
+};
+
+export type developDetachCurrentTurnResponse = developDetachCurrentTurnResponses[keyof developDetachCurrentTurnResponses];
+
+export type developAttachCurrentTurnData = {
+    body?: never;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/turns/current/attach';
+};
+
+export type developAttachCurrentTurnErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developAttachCurrentTurnError = developAttachCurrentTurnErrors[keyof developAttachCurrentTurnErrors];
+
+export type developAttachCurrentTurnResponses = {
+    /**
+     * Response Develop-Attach Current Turn
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type developAttachCurrentTurnResponse = developAttachCurrentTurnResponses[keyof developAttachCurrentTurnResponses];
+
+export type developStreamDevelopmentChatExplorationData = {
+    body: DevelopmentMessageCreate;
+    path: {
+        /**
+         * Chat Id
+         */
+        chat_id: string;
+    };
+    query?: never;
+    url: '/api/v1/develop/chats/{chat_id}/messages/explore/stream';
+};
+
+export type developStreamDevelopmentChatExplorationErrors = {
+    /**
+     * Validation Error
+     */
+    422: HTTPValidationError;
+};
+
+export type developStreamDevelopmentChatExplorationError = developStreamDevelopmentChatExplorationErrors[keyof developStreamDevelopmentChatExplorationErrors];
+
+export type developStreamDevelopmentChatExplorationResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
 
 export type developExploreDevelopmentChatData = {
     body: DevelopmentMessageCreate;

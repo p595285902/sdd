@@ -166,6 +166,10 @@ class DevelopmentChatUpdate(SQLModel):
         return value
 
 
+class DevelopmentPresenceUpdate(SQLModel):
+    presence_mode: PresenceMode
+
+
 class DevelopmentMessageCreate(SQLModel):
     content: str = Field(min_length=1, max_length=100_000)
 

@@ -1,4 +1,5 @@
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,7 @@ from pydantic import HttpUrl, SecretStr
 from sqlmodel import Session, select
 
 from app import crud
+from app.api.routes.develop import _serialize_sse_event
 from app.core.config import settings
 from app.models import DevelopmentChat, DevelopmentMessage, PresenceMode, User
 from app.services.develop_agent import (
@@ -19,6 +21,7 @@ from app.services.develop_agent import (
     AgentCompletion,
 )
 from app.services.develop_turns import (
+    TurnEvent,
     TurnTerminalState,
     develop_turn_manager,
 )
@@ -745,3 +748,145 @@ def test_confirmed_deletion_waits_for_active_turn_before_workspace_cleanup(
 
     assert response.status_code == 200
     assert not worker.is_alive()
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "wire_kind"),
+    [
+        ("session", "session"),
+        ("status", "status"),
+        ("text", "text"),
+        ("error", "error"),
+        ("idle", "idle"),
+        ("terminal", "done"),
+    ],
+)
+def test_turn_events_have_normalized_sse_serialization(
+    source_kind: str, wire_kind: str
+) -> None:
+    serialized = _serialize_sse_event(TurnEvent(7, source_kind, "value"))
+
+    assert serialized == (
+        f'id: 7\nevent: {wire_kind}\n'
+        f'data: {{"sequence":7,"kind":"{wire_kind}","data":"value"}}\n\n'
+    )
+
+
+def test_reattachment_stream_requires_bearer_authentication(
+    client: TestClient,
+) -> None:
+    response = client.get(f"{DEVELOP_CHATS_URL}/{uuid.uuid4()}/turns/current/stream")
+
+    assert response.status_code == 401
+
+
+def test_reattachment_stream_hides_missing_and_foreign_chats(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+) -> None:
+    other_user = create_random_user(db)
+    foreign_chat = DevelopmentChat(title="Private stream", owner_id=other_user.id)
+    db.add(foreign_chat)
+    db.commit()
+
+    missing = client.get(
+        f"{DEVELOP_CHATS_URL}/{uuid.uuid4()}/turns/current/stream",
+        headers=superuser_token_headers,
+    )
+    foreign = client.get(
+        f"{DEVELOP_CHATS_URL}/{foreign_chat.id}/turns/current/stream",
+        headers=superuser_token_headers,
+    )
+
+    assert missing.status_code == 404
+    assert foreign.status_code == 404
+    assert foreign.json() == missing.json()
+
+
+def test_reattachment_stream_replays_then_sends_live_events_and_cleans_up(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Streaming", owner_id=owner.id)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    turn = develop_turn_manager.start_turn(
+        chat_id=chat.id,
+        user_id=owner.id,
+        user_limit=owner.concurrent_agent_turn_limit,
+        presence_mode=PresenceMode.continue_in_background,
+        replay_limit=10,
+        timeout_seconds=10,
+    )
+    turn.emit("status", "buffered")
+    monkeypatch.setattr(settings, "DEVELOP_SSE_HEARTBEAT_SECONDS", 0.01)
+
+    def finish_turn() -> None:
+        time.sleep(0.03)
+        turn.emit("text", "live")
+        develop_turn_manager.finish_turn(turn, TurnTerminalState.completed, "complete")
+
+    worker = threading.Thread(target=finish_turn)
+    worker.start()
+    response = client.get(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/turns/current/stream",
+        headers=superuser_token_headers,
+    )
+    worker.join(timeout=1)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert response.text.index('"data":"buffered"') < response.text.index(
+        '"data":"live"'
+    )
+    assert ": heartbeat\n\n" in response.text
+    assert "event: done" in response.text
+    assert turn.subscriber_count == 0
+
+
+def test_start_stream_creates_and_completes_managed_turn(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Start stream", owner_id=owner.id, workspace_ready=True)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+
+    def fake_streamed_exploration(**kwargs: object) -> None:
+        turn = kwargs["turn"]
+        assert hasattr(turn, "emit")
+        turn.emit("text", "streamed")
+        develop_turn_manager.finish_turn(
+            turn, TurnTerminalState.completed, "complete"
+        )
+
+    monkeypatch.setattr(
+        "app.api.routes.develop._run_streamed_exploration",
+        fake_streamed_exploration,
+    )
+
+    response = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/explore/stream",
+        headers=superuser_token_headers,
+        json={"content": "Inspect live"},
+    )
+
+    assert response.status_code == 200
+    assert [
+        event
+        for event in ("event: session", "event: status", "event: text", "event: done")
+        if event in response.text
+    ] == ["event: session", "event: status", "event: text", "event: done"]
+    assert develop_turn_manager.active_turn(chat.id) is None

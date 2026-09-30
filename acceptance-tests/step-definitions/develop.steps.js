@@ -671,6 +671,43 @@ Then('the Agent Turn continues', async function () {
   await this.turnPromise;
 });
 
+Given(
+  "an authenticated user's Development Chat has an active Agent Turn",
+  async function () {
+    await prepareReadyDevelopmentChat(this, 'Streaming reattachment');
+    await this.apiClient.configureTurnLifecycle();
+    await startDelayedTurn(this, this.developmentChat, 1);
+  },
+);
+
+When('the user opens its reattachment stream', async function () {
+  this.streamResponse = await this.apiClient.streamAgentTurn(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.equal(this.streamResponse.status(), 200, await this.streamResponse.text());
+  this.streamEvents = (await this.streamResponse.text())
+    .split(/\r?\n\r?\n/)
+    .map((frame) => frame.split(/\r?\n/).find((line) => line.startsWith('data:')))
+    .filter(Boolean)
+    .map((line) => JSON.parse(line.replace(/^data:\s*/, '')));
+});
+
+Then('buffered events are delivered before new events', function () {
+  const statusIndex = this.streamEvents.findIndex(
+    (event) => event.kind === 'status' && event.data === 'Agent Turn started',
+  );
+  const textIndex = this.streamEvents.findIndex((event) => event.kind === 'text');
+  assert.ok(statusIndex >= 0);
+  assert.ok(textIndex > statusIndex);
+});
+
+Then('the stream remains open through completion', async function () {
+  assert.equal(this.streamEvents.at(-1).kind, 'done');
+  assert.equal((await this.turnPromise).status(), 200);
+  await expectNoActiveTurn(this);
+});
+
 Given('an active Agent Turn uses Continue in background', async function () {
   await prepareReadyDevelopmentChat(this, 'Background turn');
   await this.apiClient.configureTurnLifecycle({

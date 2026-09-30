@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     DEVELOP_TURN_TIMEOUT_SECONDS: int = Field(default=600, ge=1, le=3600)
     DEVELOP_TURN_PRESENCE_GRACE_SECONDS: float = Field(default=10, ge=0, le=300)
     DEVELOP_TURN_REPLAY_LIMIT: int = Field(default=200, ge=1, le=1000)
+    DEVELOP_SSE_HEARTBEAT_SECONDS: float = Field(default=15, gt=0, le=60)
     DEVELOP_USER_CONCURRENT_TURN_LIMIT_DEFAULT: int = Field(
         default=2, ge=1, le=20
     )

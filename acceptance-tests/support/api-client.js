@@ -266,6 +266,14 @@ class ApiClient {
     );
   }
 
+  async streamAgentTurn(token, chatId) {
+    return this.request(
+      token,
+      'get',
+      `/api/v1/develop/chats/${chatId}/turns/current/stream`,
+    );
+  }
+
   async detachAgentTurn(token, chatId) {
     return this.request(
       token,

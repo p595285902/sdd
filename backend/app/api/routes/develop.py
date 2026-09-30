@@ -1,16 +1,20 @@
 import base64
 import json
 import logging
+import threading
 import uuid
+from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, or_
-from sqlmodel import col, func, select
+from sqlmodel import Session, col, func, select
 
 from app.api.deps import CurrentUser, SessionDep
 from app.core.config import settings
+from app.core.db import engine
 from app.models import (
     DevelopmentChat,
     DevelopmentChatCreate,
@@ -21,6 +25,7 @@ from app.models import (
     DevelopmentMessageCreate,
     DevelopmentMessagePublic,
     DevelopmentMessagesPublic,
+    DevelopmentPresenceUpdate,
     DevelopmentWorkspacePublic,
     Message,
     get_datetime_utc,
@@ -29,10 +34,14 @@ from app.services.develop_agent import (
     AgentCommandCancelled,
     AgentCommandError,
     AgentCommandTimeout,
+    AgentEvent,
+    AgentEventKind,
     execute_exploration,
 )
 from app.services.develop_turns import (
     ChatTurnActiveError,
+    TurnEvent,
+    TurnSession,
     TurnTerminalState,
     UserTurnLimitError,
     develop_turn_manager,
@@ -48,6 +57,17 @@ from app.services.develop_workspace import (
 
 router = APIRouter(prefix="/develop/chats", tags=["develop"])
 logger = logging.getLogger(__name__)
+SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+SSE_KIND_ALIASES = {
+    "activity": "status",
+    "response": "text",
+    "started": "status",
+    "terminal": "done",
+}
 
 
 def _get_chat(
@@ -73,6 +93,154 @@ def _workspace_status(chat: DevelopmentChat) -> DevelopmentWorkspacePublic:
         ready=chat.workspace_ready,
         setup_available=_repository_setup_available(),
     )
+
+
+def _serialize_sse_event(event: TurnEvent) -> str:
+    kind = SSE_KIND_ALIASES.get(event.kind, event.kind)
+    payload = json.dumps(
+        {"sequence": event.sequence, "kind": kind, "data": event.data},
+        separators=(",", ":"),
+    )
+    return f"id: {event.sequence}\nevent: {kind}\ndata: {payload}\n\n"
+
+
+def _stream_turn(
+    turn: TurnSession,
+    subscriber_id: str,
+    buffered_events: tuple[TurnEvent, ...],
+) -> Iterator[str]:
+    last_sequence = 0
+    try:
+        for event in buffered_events:
+            last_sequence = event.sequence
+            yield _serialize_sse_event(event)
+        while turn.terminal_state is None:
+            events = turn.wait_for_events(
+                after_sequence=last_sequence,
+                timeout=settings.DEVELOP_SSE_HEARTBEAT_SECONDS,
+            )
+            if not events:
+                yield ": heartbeat\n\n"
+                continue
+            for event in events:
+                last_sequence = event.sequence
+                yield _serialize_sse_event(event)
+        for event in turn.replay(after_sequence=last_sequence):
+            yield _serialize_sse_event(event)
+    finally:
+        turn.detach(
+            subscriber_id,
+            grace_seconds=settings.DEVELOP_TURN_PRESENCE_GRACE_SECONDS,
+        )
+
+
+def _stream_response(
+    turn: TurnSession,
+    subscriber_id: str,
+    buffered_events: tuple[TurnEvent, ...],
+) -> StreamingResponse:
+    return StreamingResponse(
+        _stream_turn(turn, subscriber_id, buffered_events),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
+
+
+def _emit_agent_event(turn: TurnSession, event: AgentEvent) -> None:
+    if event.kind == AgentEventKind.session:
+        turn.emit("session", event.session_id or "")
+    elif event.kind == AgentEventKind.activity:
+        turn.emit("status", event.text or "")
+    elif event.kind == AgentEventKind.text:
+        turn.emit("text", event.text or "")
+    elif event.kind == AgentEventKind.error:
+        turn.emit("error", event.text or "")
+
+
+def _run_streamed_exploration(
+    *, chat_id: uuid.UUID, message: str, turn: TurnSession
+) -> None:
+    with Session(engine) as session:
+        chat = session.get(DevelopmentChat, chat_id)
+        if chat is None:
+            develop_turn_manager.finish_turn(
+                turn, TurnTerminalState.failed, "Development Chat not found"
+            )
+            return
+        provider_key = settings.OPENAI_API_KEY
+        if provider_key is None:
+            turn.emit("error", "Agent provider is not configured")
+            develop_turn_manager.finish_turn(turn, TurnTerminalState.failed)
+            return
+        try:
+            completion = execute_exploration(
+                root=settings.DEVELOP_WORKSPACE_ROOT,
+                chat_id=chat.id,
+                message=message,
+                session_id=chat.agent_session_id,
+                provider_key=provider_key.get_secret_value(),
+                provider_base_url=(
+                    str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None
+                ),
+                repository_secret=(
+                    settings.DEMO_GITHUB_TOKEN.get_secret_value()
+                    if settings.DEMO_GITHUB_TOKEN
+                    else None
+                ),
+                model=settings.DEVELOP_AGENT_MODEL,
+                timeout_seconds=settings.DEVELOP_TURN_TIMEOUT_SECONDS,
+                max_activity_parts=settings.DEVELOP_AGENT_MAX_ACTIVITY_PARTS,
+                max_part_characters=settings.DEVELOP_AGENT_MAX_PART_CHARACTERS,
+                max_response_characters=settings.DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS,
+                cancel_event=turn.cancel_event,
+                on_event=lambda event: _emit_agent_event(turn, event),
+            )
+        except (AgentCommandCancelled, AgentCommandTimeout) as error:
+            state = turn.stop_reason or TurnTerminalState.timed_out
+            safe_message = (
+                "Agent Turn timed out."
+                if state == TurnTerminalState.timed_out
+                else "Agent Turn was interrupted."
+            )
+            logger.info("Agent exploration ended for chat %s: %s", chat.id, error)
+            turn.emit("idle", safe_message)
+            completion = None
+        except AgentCommandError as error:
+            logger.error("Agent exploration failed for chat %s: %s", chat.id, error)
+            turn.emit("error", "Agent exploration failed")
+            develop_turn_manager.finish_turn(
+                turn, TurnTerminalState.failed, "Agent exploration failed"
+            )
+            return
+
+        completed_at = get_datetime_utc()
+        if completion is None:
+            state = turn.stop_reason or TurnTerminalState.timed_out
+            content = (
+                "Agent Turn timed out."
+                if state == TurnTerminalState.timed_out
+                else "Agent Turn was interrupted."
+            )
+            activity = [{"text": content}]
+            session_id = chat.agent_session_id
+        else:
+            state = TurnTerminalState.completed
+            content = completion.response_text
+            activity = [part.model_dump() for part in completion.activity]
+            session_id = completion.session_id
+        assistant_message = DevelopmentMessage(
+            role="assistant",
+            content=content,
+            activity=activity,
+            chat_id=chat.id,
+            created_at=completed_at,
+        )
+        chat.agent_session_id = session_id
+        chat.updated_at = completed_at
+        session.add(assistant_message)
+        session.add(chat)
+        session.commit()
+        develop_turn_manager.finish_turn(turn, state, content)
 
 
 def _encode_cursor(message: DevelopmentMessage) -> str:
@@ -220,6 +388,25 @@ def rename_development_chat(
     return chat
 
 
+@router.put("/{chat_id}/presence", response_model=DevelopmentChatPublic)
+def update_development_presence(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    chat_id: uuid.UUID,
+    presence_in: DevelopmentPresenceUpdate,
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    chat.presence_mode = presence_in.presence_mode
+    active_turn = develop_turn_manager.active_turn(chat.id)
+    if active_turn is not None:
+        active_turn.presence_mode = presence_in.presence_mode
+    session.add(chat)
+    session.commit()
+    session.refresh(chat)
+    return chat
+
+
 @router.delete("/{chat_id}", response_model=Message)
 def delete_development_chat(
     *,
@@ -339,6 +526,19 @@ def read_current_turn(
     }
 
 
+@router.get("/{chat_id}/turns/current/stream", response_model=None)
+def stream_current_turn(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> StreamingResponse:
+    _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    turn = develop_turn_manager.active_turn(chat_id)
+    if turn is None:
+        raise HTTPException(status_code=404, detail="No active Agent Turn")
+    subscriber_id = uuid.uuid4().hex
+    buffered_events = turn.attach(subscriber_id)
+    return _stream_response(turn, subscriber_id, buffered_events)
+
+
 @router.post("/{chat_id}/turns/current/attach")
 def attach_current_turn(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
@@ -377,6 +577,55 @@ def stop_current_turn(
     return Message(message="Agent Turn stopped")
 
 
+@router.post("/{chat_id}/messages/explore/stream", response_model=None)
+def stream_development_chat_exploration(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    chat_id: uuid.UUID,
+    message_in: DevelopmentMessageCreate,
+) -> StreamingResponse:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not chat.workspace_ready:
+        raise HTTPException(status_code=409, detail="Development Workspace is not ready")
+    if settings.OPENAI_API_KEY is None:
+        raise HTTPException(status_code=503, detail="Agent provider is not configured")
+    try:
+        turn = develop_turn_manager.start_turn(
+            chat_id=chat.id,
+            user_id=current_user.id,
+            user_limit=current_user.concurrent_agent_turn_limit,
+            presence_mode=chat.presence_mode,
+            replay_limit=settings.DEVELOP_TURN_REPLAY_LIMIT,
+            timeout_seconds=settings.DEVELOP_TURN_TIMEOUT_SECONDS,
+        )
+    except ChatTurnActiveError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except UserTurnLimitError as error:
+        raise HTTPException(status_code=429, detail=str(error))
+
+    now = get_datetime_utc()
+    session.add(
+        DevelopmentMessage(
+            role="user", content=message_in.content, chat_id=chat.id, created_at=now
+        )
+    )
+    chat.updated_at = now
+    session.add(chat)
+    session.commit()
+    turn.emit("session", chat.agent_session_id or "")
+    turn.emit("status", "Agent Turn started")
+    subscriber_id = uuid.uuid4().hex
+    buffered_events = turn.attach(subscriber_id)
+    worker = threading.Thread(
+        target=_run_streamed_exploration,
+        kwargs={"chat_id": chat.id, "message": message_in.content, "turn": turn},
+        daemon=True,
+    )
+    worker.start()
+    return _stream_response(turn, subscriber_id, buffered_events)
+
+
 @router.post(
     "/{chat_id}/messages/explore",
     response_model=DevelopmentMessagePublic,
@@ -409,7 +658,8 @@ def explore_development_chat(
     except UserTurnLimitError as error:
         raise HTTPException(status_code=429, detail=str(error))
     turn.attach(str(current_user.id))
-    turn.emit("started")
+    turn.emit("session", chat.agent_session_id or "")
+    turn.emit("status", "Agent Turn started")
 
     now = get_datetime_utc()
     user_message = DevelopmentMessage(
@@ -444,6 +694,7 @@ def explore_development_chat(
             max_part_characters=settings.DEVELOP_AGENT_MAX_PART_CHARACTERS,
             max_response_characters=settings.DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS,
             cancel_event=turn.cancel_event,
+            on_event=lambda event: _emit_agent_event(turn, event),
         )
     except (AgentCommandCancelled, AgentCommandTimeout) as error:
         state = turn.stop_reason or TurnTerminalState.timed_out
@@ -494,7 +745,6 @@ def explore_development_chat(
     session.add(chat)
     session.commit()
     session.refresh(assistant_message)
-    turn.emit("response", completion.response_text)
     develop_turn_manager.finish_turn(
         turn, TurnTerminalState.completed, "Agent Turn completed"
     )

@@ -402,16 +402,17 @@ function Develop() {
                   </div>
                 )}
               </div>
-              <form
-                className="border-t p-4"
-                onSubmit={handleExplore}
-              >
+              <form className="border-t p-4" onSubmit={handleExplore}>
                 <div className="mx-auto flex w-full max-w-3xl gap-2">
                   <Input
                     aria-label="Exploration message"
-                    disabled={!workspaceQuery.data?.ready || exploreChat.isPending}
+                    disabled={
+                      !workspaceQuery.data?.ready || exploreChat.isPending
+                    }
                     maxLength={100000}
-                    onChange={(event) => setExplorationMessage(event.target.value)}
+                    onChange={(event) =>
+                      setExplorationMessage(event.target.value)
+                    }
                     placeholder={
                       workspaceQuery.data?.ready
                         ? "Explore this repository"

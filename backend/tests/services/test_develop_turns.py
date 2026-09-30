@@ -51,6 +51,32 @@ def test_turn_session_bounds_replay_and_tracks_terminal_state() -> None:
     assert session.wait_terminal(0)
 
 
+def test_turn_session_waits_for_new_events_and_returns_terminal_event() -> None:
+    session = TurnSession(
+        chat_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        presence_mode=PresenceMode.stop_when_i_leave,
+        replay_limit=3,
+    )
+    received: list[tuple[str, ...]] = []
+
+    def wait_for_event() -> None:
+        events = session.wait_for_events(after_sequence=0, timeout=1)
+        received.append(tuple(event.kind for event in events))
+
+    waiter = threading.Thread(target=wait_for_event)
+    waiter.start()
+    session.emit("text", "hello")
+    waiter.join(timeout=1)
+
+    assert not waiter.is_alive()
+    assert received == [("text",)]
+    session.complete(TurnTerminalState.completed)
+    assert [
+        event.kind for event in session.wait_for_events(after_sequence=1, timeout=0)
+    ] == ["terminal"]
+
+
 def test_turn_session_tracks_subscribers_and_withdraws_grace_stop() -> None:
     session = TurnSession(
         chat_id=uuid.uuid4(),
