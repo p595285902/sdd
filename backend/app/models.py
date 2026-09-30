@@ -3,12 +3,17 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import EmailStr, field_validator
-from sqlalchemy import JSON, Column, DateTime, Index
+from sqlalchemy import JSON, Column, DateTime, Index, String
 from sqlmodel import Field, Relationship, SQLModel
 
 
 def get_datetime_utc() -> datetime:
     return datetime.now(UTC)
+
+
+class PresenceMode(StrEnum):
+    stop_when_i_leave = "stop_when_i_leave"
+    continue_in_background = "continue_in_background"
 
 
 # Shared properties
@@ -17,6 +22,7 @@ class UserBase(SQLModel):
     is_active: bool = True
     is_superuser: bool = False
     full_name: str | None = Field(default=None, max_length=255)
+    concurrent_agent_turn_limit: int = Field(default=2, ge=1, le=20)
 
 
 # Properties to receive via API on creation
@@ -37,6 +43,7 @@ class UserUpdate(SQLModel):
     is_superuser: bool | None = None
     full_name: str | None = Field(default=None, max_length=255)
     password: str | None = Field(default=None, min_length=8, max_length=128)
+    concurrent_agent_turn_limit: int | None = Field(default=None, ge=1, le=20)
 
 
 class UserUpdateMe(SQLModel):
@@ -144,8 +151,19 @@ class DevelopmentChatCreate(SQLModel):
         return value
 
 
-class DevelopmentChatUpdate(DevelopmentChatBase):
-    pass
+class DevelopmentChatUpdate(SQLModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    presence_mode: PresenceMode | None = None
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Title must not be blank")
+        return value
 
 
 class DevelopmentMessageCreate(SQLModel):
@@ -171,6 +189,10 @@ class DevelopmentChat(DevelopmentChatBase, table=True):
     )
     workspace_ready: bool = Field(default=False, nullable=False)
     agent_session_id: str | None = Field(default=None, max_length=255)
+    presence_mode: PresenceMode = Field(
+        default=PresenceMode.stop_when_i_leave,
+        sa_column=Column(String(32), nullable=False),
+    )
     created_at: datetime = Field(
         default_factory=get_datetime_utc,
         sa_type=DateTime(timezone=True),  # type: ignore
@@ -189,6 +211,7 @@ class DevelopmentChatPublic(DevelopmentChatBase):
     id: uuid.UUID
     owner_id: uuid.UUID
     workspace_ready: bool
+    presence_mode: PresenceMode
     created_at: datetime
     updated_at: datetime
 

@@ -232,12 +232,73 @@ class ApiClient {
     );
   }
 
+  async currentAgentTurn(token, chatId) {
+    return this.request(
+      token,
+      'get',
+      `/api/v1/develop/chats/${chatId}/turns/current`,
+    );
+  }
+
+  async waitForAgentTurn(token, chatId) {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const response = await this.currentAgentTurn(token, chatId);
+      if (response.status() === 200) return response;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error('Agent Turn did not become active');
+  }
+
+  async stopAgentTurn(token, chatId) {
+    return this.request(
+      token,
+      'delete',
+      `/api/v1/develop/chats/${chatId}/turns/current`,
+    );
+  }
+
+  async attachAgentTurn(token, chatId) {
+    return this.request(
+      token,
+      'post',
+      `/api/v1/develop/chats/${chatId}/turns/current/attach`,
+    );
+  }
+
+  async detachAgentTurn(token, chatId) {
+    return this.request(
+      token,
+      'delete',
+      `/api/v1/develop/chats/${chatId}/turns/current/attach`,
+    );
+  }
+
+  async updateDevelopmentChat(token, chatId, update) {
+    return this.request(token, 'patch', `/api/v1/develop/chats/${chatId}`, {
+      data: update,
+    });
+  }
+
   async configureFakeLlm(replies) {
     const api = await this.world.openApiContext();
     const response = await api.post('/api/v1/testing/llm/control', {
       data: { replies },
     });
     if (!response.ok()) throw new Error(`Unable to configure fake LLM: ${response.status()}`);
+  }
+
+  async configureTurnLifecycle({ timeoutSeconds = 15, graceSeconds = 0.3 } = {}) {
+    const api = await this.world.openApiContext();
+    const response = await api.post('/api/v1/testing/llm/turns/control', {
+      data: {
+        timeout_seconds: timeoutSeconds,
+        grace_seconds: graceSeconds,
+      },
+    });
+    if (!response.ok()) {
+      throw new Error(`Unable to configure turn lifecycle: ${response.status()}`);
+    }
   }
 
   async fakeLlmRequests() {

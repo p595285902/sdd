@@ -101,6 +101,8 @@ class AgentCommandRunner:
             except subprocess.TimeoutExpired:
                 pass
 
+        if failure is None and cancel_event is not None and cancel_event.is_set():
+            failure = AgentCommandCancelled
         if failure is not None:
             self._terminate_process_group(process)
         elif process.returncode != 0:
@@ -360,6 +362,7 @@ def execute_exploration(
     max_response_characters: int,
     runner: AgentCommandRunner | None = None,
     source_environment: Mapping[str, str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> AgentCompletion:
     import uuid
 
@@ -397,6 +400,7 @@ def execute_exploration(
         env=environment,
         timeout_seconds=timeout_seconds,
         secrets=secrets,
+        cancel_event=cancel_event,
     )
     output = BoundedAgentOutput(
         max_activity_parts=max_activity_parts,

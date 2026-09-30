@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     DEVELOP_FAKE_SETUP_RUNNER: bool = False
     DEVELOP_AGENT_TIMEOUT_SECONDS: int = Field(default=600, ge=1, le=3600)
     DEVELOP_AGENT_TERMINATION_GRACE_SECONDS: float = Field(default=1, gt=0, le=30)
+    DEVELOP_TURN_TIMEOUT_SECONDS: int = Field(default=600, ge=1, le=3600)
+    DEVELOP_TURN_PRESENCE_GRACE_SECONDS: float = Field(default=10, ge=0, le=300)
+    DEVELOP_TURN_REPLAY_LIMIT: int = Field(default=200, ge=1, le=1000)
+    DEVELOP_USER_CONCURRENT_TURN_LIMIT_DEFAULT: int = Field(
+        default=2, ge=1, le=20
+    )
     DEVELOP_AGENT_MAX_ACTIVITY_PARTS: int = Field(default=100, ge=1, le=1000)
     DEVELOP_AGENT_MAX_PART_CHARACTERS: int = Field(default=2000, ge=1, le=10000)
     DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS: int = Field(

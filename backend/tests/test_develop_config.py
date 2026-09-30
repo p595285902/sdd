@@ -74,3 +74,28 @@ def test_acceptance_mode_allows_loopback_provider_endpoint() -> None:
 
     assert configured.OPENAI_BASE_URL
     assert configured.OPENAI_BASE_URL.host == "127.0.0.1"
+
+
+def test_turn_lifecycle_configuration_defaults_are_bounded() -> None:
+    configured = Settings.model_validate(_settings_data())
+
+    assert configured.DEVELOP_TURN_TIMEOUT_SECONDS == 600
+    assert configured.DEVELOP_TURN_PRESENCE_GRACE_SECONDS == 10
+    assert configured.DEVELOP_TURN_REPLAY_LIMIT == 200
+    assert configured.DEVELOP_USER_CONCURRENT_TURN_LIMIT_DEFAULT == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("DEVELOP_TURN_TIMEOUT_SECONDS", 0),
+        ("DEVELOP_TURN_PRESENCE_GRACE_SECONDS", -1),
+        ("DEVELOP_TURN_REPLAY_LIMIT", 0),
+        ("DEVELOP_USER_CONCURRENT_TURN_LIMIT_DEFAULT", 0),
+    ],
+)
+def test_turn_lifecycle_configuration_rejects_unsafe_values(
+    field: str, value: object
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate(_settings_data(**{field: value}))

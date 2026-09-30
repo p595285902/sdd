@@ -3,12 +3,15 @@ import json
 import time
 import uuid
 from collections import deque
+from collections.abc import AsyncIterator, Iterator
 from threading import Lock
 from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+
+from app.core.config import settings
 
 router = APIRouter(prefix="/testing/llm", tags=["testing"])
 
@@ -24,6 +27,11 @@ class FakeLlmReply(BaseModel):
 
 class FakeLlmScript(BaseModel):
     replies: list[FakeLlmReply] = Field(min_length=1)
+
+
+class FakeTurnSettings(BaseModel):
+    timeout_seconds: int = Field(ge=1, le=30)
+    grace_seconds: float = Field(ge=0, le=5)
 
 
 class FakeLlmState:
@@ -65,6 +73,16 @@ def configure_fake_llm(script: FakeLlmScript) -> dict[str, int]:
 @router.get("/requests")
 def read_fake_llm_requests() -> dict[str, list[dict[str, Any]]]:
     return {"data": fake_llm_state.requests()}
+
+
+@router.post("/turns/control")
+def configure_fake_turn_settings(control: FakeTurnSettings) -> dict[str, float]:
+    settings.DEVELOP_TURN_TIMEOUT_SECONDS = control.timeout_seconds
+    settings.DEVELOP_TURN_PRESENCE_GRACE_SECONDS = control.grace_seconds
+    return {
+        "timeout_seconds": settings.DEVELOP_TURN_TIMEOUT_SECONDS,
+        "grace_seconds": settings.DEVELOP_TURN_PRESENCE_GRACE_SECONDS,
+    }
 
 
 def _response_object(reply: FakeLlmReply, response_id: str) -> dict[str, Any]:
@@ -130,7 +148,7 @@ def _response_object(reply: FakeLlmReply, response_id: str) -> dict[str, Any]:
     }
 
 
-def _response_events(response: dict[str, Any]):
+def _response_events(response: dict[str, Any]) -> Iterator[str]:
     sequence = 0
 
     def event(event_type: str, **values: Any) -> str:
@@ -216,7 +234,7 @@ async def fake_responses(
     if reply.kind == "malformed":
         return JSONResponse(content={"unexpected": True})
     if reply.kind == "disconnect":
-        async def disconnect():
+        async def disconnect() -> AsyncIterator[bytes]:
             yield b"data: {\"type\":\"response.created\"}\n\n"
             raise RuntimeError("Scripted provider disconnect")
 

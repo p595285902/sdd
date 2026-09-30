@@ -27,7 +27,8 @@ BeforeAll({ timeout: 300_000 }, async function () {
   });
 });
 
-Before(async function () {
+Before(async function ({ pickle }) {
+  this.scenarioName = pickle.name;
   this.context = await browser.newContext({ baseURL: state.baseUrl });
   this.page = await this.context.newPage();
 });

@@ -11,6 +11,8 @@ services:
     environment:
       DEVELOP_ACCEPTANCE_MODE: "true"
       DEVELOP_AGENT_TIMEOUT_SECONDS: "15"
+      DEVELOP_TURN_TIMEOUT_SECONDS: "15"
+      DEVELOP_TURN_PRESENCE_GRACE_SECONDS: "0.3"
       DEVELOP_FAKE_SETUP_RUNNER: "true"
       DEVELOP_AGENT_MODEL: "openai/gpt-4o-mini"
       DEMO_GITHUB_REPO: "${DEMO_GITHUB_REPO-https://example.com/acceptance/demo-repository.git}"

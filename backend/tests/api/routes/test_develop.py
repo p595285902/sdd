@@ -1,4 +1,6 @@
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -9,11 +11,16 @@ from sqlmodel import Session, select
 
 from app import crud
 from app.core.config import settings
-from app.models import DevelopmentChat, DevelopmentMessage, User
+from app.models import DevelopmentChat, DevelopmentMessage, PresenceMode, User
 from app.services.develop_agent import (
     AgentActivityPart,
+    AgentCommandCancelled,
     AgentCommandError,
     AgentCompletion,
+)
+from app.services.develop_turns import (
+    TurnTerminalState,
+    develop_turn_manager,
 )
 from tests.utils.user import create_random_user
 from tests.utils.utils import random_lower_string
@@ -300,6 +307,40 @@ def test_rename_does_not_change_activity_order(
     assert renamed["updated_at"] == original["updated_at"]
 
 
+def test_presence_mode_defaults_and_persists_for_later_turns(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+) -> None:
+    create_response = client.post(
+        DEVELOP_CHATS_URL,
+        headers=superuser_token_headers,
+        json={"content": "Presence mode"},
+    )
+    chat_id = uuid.UUID(create_response.json()["id"])
+
+    assert create_response.json()["presence_mode"] == "stop_when_i_leave"
+
+    update_response = client.patch(
+        f"{DEVELOP_CHATS_URL}/{chat_id}",
+        headers=superuser_token_headers,
+        json={"presence_mode": "continue_in_background"},
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["presence_mode"] == "continue_in_background"
+    db.expire_all()
+    chat = db.get(DevelopmentChat, chat_id)
+    assert chat
+    assert chat.presence_mode == PresenceMode.continue_in_background
+
+
+def test_user_concurrent_agent_turn_limit_defaults_to_two(db: Session) -> None:
+    user = create_random_user(db)
+
+    assert user.concurrent_agent_turn_limit == 2
+
+
 def test_recent_chats_use_stable_bounded_activity_order(
     client: TestClient,
     superuser_token_headers: dict[str, str],
@@ -498,6 +539,7 @@ def test_explore_failure_keeps_user_message_without_completion(
 
     assert response.status_code == 502
     assert response.json() == {"detail": "Agent exploration failed"}
+    assert develop_turn_manager.active_turn(chat.id) is None
     db.expire_all()
     messages = list(
         db.exec(
@@ -510,3 +552,196 @@ def test_explore_failure_keeps_user_message_without_completion(
     persisted_chat = db.get(DevelopmentChat, chat.id)
     assert persisted_chat
     assert persisted_chat.agent_session_id is None
+
+
+def test_concurrent_turn_for_one_chat_is_rejected_and_explicit_stop_completes(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Concurrent", owner_id=owner.id, workspace_ready=True)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+    started = threading.Event()
+
+    def block_until_cancelled(**kwargs: object) -> AgentCompletion:
+        cancel_event = kwargs["cancel_event"]
+        assert isinstance(cancel_event, threading.Event)
+        started.set()
+        assert cancel_event.wait(2)
+        raise AgentCommandCancelled("cancelled")
+
+    monkeypatch.setattr(
+        "app.api.routes.develop.execute_exploration", block_until_cancelled
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            client.post,
+            f"{DEVELOP_CHATS_URL}/{chat.id}/messages/explore",
+            headers=superuser_token_headers,
+            json={"content": "First"},
+        )
+        assert started.wait(1)
+        second = client.post(
+            f"{DEVELOP_CHATS_URL}/{chat.id}/messages/explore",
+            headers=superuser_token_headers,
+            json={"content": "Second"},
+        )
+        stop = client.delete(
+            f"{DEVELOP_CHATS_URL}/{chat.id}/turns/current",
+            headers=superuser_token_headers,
+        )
+        first_response = first.result(timeout=2)
+
+    assert second.status_code == 409
+    assert "already has an active" in second.json()["detail"]
+    assert stop.status_code == 200
+    assert first_response.status_code == 200
+    assert first_response.json()["content"] == "Agent Turn was interrupted."
+    assert develop_turn_manager.active_turn(chat.id) is None
+
+
+def test_agent_turn_timeout_records_safe_error(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Timeout", owner_id=owner.id, workspace_ready=True)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+    monkeypatch.setattr(settings, "DEVELOP_TURN_TIMEOUT_SECONDS", 0.01)
+
+    def wait_for_timeout(**kwargs: object) -> AgentCompletion:
+        cancel_event = kwargs["cancel_event"]
+        assert isinstance(cancel_event, threading.Event)
+        assert cancel_event.wait(1)
+        raise AgentCommandCancelled("cancelled")
+
+    monkeypatch.setattr(
+        "app.api.routes.develop.execute_exploration", wait_for_timeout
+    )
+
+    response = client.post(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages/explore",
+        headers=superuser_token_headers,
+        json={"content": "Wait forever"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["content"] == "Agent Turn timed out."
+    assert develop_turn_manager.active_turn(chat.id) is None
+
+
+def test_user_turn_capacity_is_enforced_across_chats(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chats = [
+        DevelopmentChat(
+            title=f"Capacity {index}", owner_id=owner.id, workspace_ready=True
+        )
+        for index in range(3)
+    ]
+    db.add_all(chats)
+    db.commit()
+    for chat in chats:
+        db.refresh(chat)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+    started = threading.Barrier(3)
+
+    def block_until_cancelled(**kwargs: object) -> AgentCompletion:
+        cancel_event = kwargs["cancel_event"]
+        assert isinstance(cancel_event, threading.Event)
+        started.wait()
+        assert cancel_event.wait(2)
+        raise AgentCommandCancelled("cancelled")
+
+    monkeypatch.setattr(
+        "app.api.routes.develop.execute_exploration", block_until_cancelled
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        active = [
+            executor.submit(
+                client.post,
+                f"{DEVELOP_CHATS_URL}/{chat.id}/messages/explore",
+                headers=superuser_token_headers,
+                json={"content": f"Active {index}"},
+            )
+            for index, chat in enumerate(chats[:2])
+        ]
+        started.wait()
+        rejected = client.post(
+            f"{DEVELOP_CHATS_URL}/{chats[2].id}/messages/explore",
+            headers=superuser_token_headers,
+            json={"content": "Excess"},
+        )
+        for chat in chats[:2]:
+            response = client.delete(
+                f"{DEVELOP_CHATS_URL}/{chat.id}/turns/current",
+                headers=superuser_token_headers,
+            )
+            assert response.status_code == 200
+        for future in active:
+            assert future.result(timeout=2).status_code == 200
+
+    assert rejected.status_code == 429
+    assert "limit has been reached" in rejected.json()["detail"]
+
+
+def test_confirmed_deletion_waits_for_active_turn_before_workspace_cleanup(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Delete active", owner_id=owner.id)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    turn = develop_turn_manager.start_turn(
+        chat_id=chat.id,
+        user_id=owner.id,
+        user_limit=owner.concurrent_agent_turn_limit,
+        presence_mode=chat.presence_mode,
+        replay_limit=2,
+        timeout_seconds=10,
+    )
+
+    def finish_after_stop() -> None:
+        assert turn.cancel_event.wait(1)
+        develop_turn_manager.finish_turn(turn, TurnTerminalState.stopped)
+
+    worker = threading.Thread(target=finish_after_stop)
+    worker.start()
+
+    def assert_turn_stopped_before_cleanup(**_kwargs: object) -> None:
+        assert develop_turn_manager.active_turn(chat.id) is None
+
+    monkeypatch.setattr(
+        "app.api.routes.develop.cleanup_workspace",
+        assert_turn_stopped_before_cleanup,
+    )
+
+    response = client.delete(
+        f"{DEVELOP_CHATS_URL}/{chat.id}",
+        headers=superuser_token_headers,
+        params={"confirm": True},
+    )
+    worker.join(timeout=1)
+
+    assert response.status_code == 200
+    assert not worker.is_alive()

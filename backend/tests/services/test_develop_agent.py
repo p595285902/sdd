@@ -129,6 +129,20 @@ def test_runner_cancels_process_group() -> None:
         timer.cancel()
 
 
+def test_runner_honors_cancellation_when_process_exits_concurrently() -> None:
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with pytest.raises(AgentCommandCancelled):
+        AgentCommandRunner().run(
+            (sys.executable, str(PROCESS_FIXTURE), "events"),
+            cwd=PROCESS_FIXTURE.parent,
+            env={},
+            timeout_seconds=2,
+            cancel_event=cancel_event,
+        )
+
+
 def test_runner_escalates_when_process_ignores_termination() -> None:
     started_at = time.monotonic()
 
@@ -229,6 +243,40 @@ def test_exploration_is_confined_and_uses_minimal_environment(tmp_path: Path) ->
     }
     assert completion.response_text == "Explored"
     assert completion.session_id == "ses_new"
+
+
+def test_exploration_passes_cancellation_to_runner(tmp_path: Path) -> None:
+    chat_id = __import__("uuid").uuid4()
+    (tmp_path / str(chat_id)).mkdir()
+    cancel_event = threading.Event()
+
+    class CancellingRunner(RecordingAgentRunner):
+        def run(self, command, *, cancel_event=None, **kwargs):  # type: ignore[no-untyped-def]
+            assert cancel_event is not None
+            assert cancel_event.is_set()
+            return super().run(command, **kwargs)
+
+    cancel_event.set()
+    completion = execute_exploration(
+        root=tmp_path,
+        chat_id=chat_id,
+        message="inspect",
+        session_id=None,
+        provider_key="provider-key",
+        provider_base_url=None,
+        repository_secret=None,
+        model="openai/test-model",
+        timeout_seconds=2,
+        max_activity_parts=5,
+        max_part_characters=100,
+        max_response_characters=100,
+        runner=CancellingRunner(
+            ('{"type":"text","part":{"text":"done"}}',)
+        ),
+        cancel_event=cancel_event,
+    )
+
+    assert completion.response_text == "done"
 
 
 def test_exploration_rejects_missing_or_non_owning_workspace(tmp_path: Path) -> None:

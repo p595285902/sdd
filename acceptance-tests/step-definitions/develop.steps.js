@@ -21,6 +21,23 @@ async function prepareReadyDevelopmentChat(world, titlePrefix) {
   await world.developPage.selectChat(world.developmentChat.title);
 }
 
+async function startDelayedTurn(world, chat = world.developmentChat, delaySeconds = 10) {
+  await world.apiClient.configureFakeLlm([
+    { kind: 'delay', delay_seconds: delaySeconds, text: 'Delayed completion' },
+  ]);
+  world.turnPromise = world.apiClient.exploreDevelopmentChat(
+    world.userToken,
+    chat.id,
+    `Lifecycle turn ${Date.now()}`,
+  );
+  await world.apiClient.waitForAgentTurn(world.userToken, chat.id);
+}
+
+async function expectNoActiveTurn(world, chat = world.developmentChat) {
+  const response = await world.apiClient.currentAgentTurn(world.userToken, chat.id);
+  assert.equal(response.status(), 404);
+}
+
 Given('an authenticated user is viewing the application', async function () {
   this.userToken = await this.apiClient.authenticateSuperuser();
   await this.developPage.openApplication(this.userToken);
@@ -556,4 +573,227 @@ Then('the complete secret value is not present', function () {
 Then('a redacted value is used instead', function () {
   assert.match(this.returnedOutput, /\[REDACTED\]/);
   assert.match(this.storedOutput, /\[REDACTED\]/);
+});
+
+Given('a Development Chat has an active Agent Turn', async function () {
+  await prepareReadyDevelopmentChat(this, 'Concurrent turn');
+  await this.apiClient.configureTurnLifecycle();
+  await startDelayedTurn(this);
+});
+
+When('its owner starts another Agent Turn in the same chat', async function () {
+  this.secondTurnResponse = await this.apiClient.exploreDevelopmentChat(
+    this.userToken,
+    this.developmentChat.id,
+    'Start another turn',
+  );
+});
+
+Then('the second Agent Turn is rejected', function () {
+  assert.equal(this.secondTurnResponse.status(), 409);
+});
+
+Then('the active Agent Turn continues', async function () {
+  const response = await this.apiClient.currentAgentTurn(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.equal(response.status(), 200);
+  await this.apiClient.stopAgentTurn(this.userToken, this.developmentChat.id);
+  await this.turnPromise;
+});
+
+When('its owner stops the Agent Turn', async function () {
+  this.stopResponse = await this.apiClient.stopAgentTurn(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  this.turnResponse = await this.turnPromise;
+});
+
+Then('the agent process for that Development Chat is terminated', function () {
+  assert.equal(this.stopResponse.status(), 200);
+  assert.equal(this.turnResponse.status(), 200);
+});
+
+Then('the Agent Turn is no longer running', async function () {
+  await expectNoActiveTurn(this);
+});
+
+Given('an active Agent Turn uses Stop when I leave', async function () {
+  await prepareReadyDevelopmentChat(this, 'Stop on leave');
+  await this.apiClient.configureTurnLifecycle();
+  await startDelayedTurn(this);
+});
+
+When('no client remains attached for the configured grace period', async function () {
+  const response = await this.apiClient.detachAgentTurn(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.equal(response.status(), 200);
+  this.turnResponse = await this.turnPromise;
+});
+
+Then('the agent process is terminated', async function () {
+  assert.equal(this.turnResponse.status(), 200);
+  await expectNoActiveTurn(this);
+});
+
+Then('an interruption message is stored in the Development Chat', async function () {
+  const messages = await this.apiClient.listDevelopmentMessages(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.equal(messages.data.at(-1).content, 'Agent Turn was interrupted.');
+});
+
+When('its owner reattaches before the configured grace period expires', async function () {
+  await this.apiClient.detachAgentTurn(this.userToken, this.developmentChat.id);
+  this.reattachResponse = await this.apiClient.attachAgentTurn(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 500));
+});
+
+Then('the pending cancellation is withdrawn', function () {
+  assert.equal(this.reattachResponse.status(), 200);
+});
+
+Then('the Agent Turn continues', async function () {
+  const current = await this.apiClient.currentAgentTurn(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.equal(current.status(), 200);
+  await this.apiClient.stopAgentTurn(this.userToken, this.developmentChat.id);
+  await this.turnPromise;
+});
+
+Given('an active Agent Turn uses Continue in background', async function () {
+  await prepareReadyDevelopmentChat(this, 'Background turn');
+  await this.apiClient.configureTurnLifecycle({
+    timeoutSeconds: this.scenarioName === 'Background turn is bounded by the turn timeout'
+      ? 1
+      : 15,
+  });
+  const update = await this.apiClient.updateDevelopmentChat(
+    this.userToken,
+    this.developmentChat.id,
+    { presence_mode: 'continue_in_background' },
+  );
+  assert.equal(update.status(), 200);
+  await startDelayedTurn(this, this.developmentChat, 2);
+});
+
+When('all clients disconnect', async function () {
+  const response = await this.apiClient.detachAgentTurn(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.equal(response.status(), 200);
+});
+
+Then(
+  'the Agent Turn continues until it completes or reaches the configured turn timeout',
+  async function () {
+    this.turnResponse = await this.turnPromise;
+    assert.equal(this.turnResponse.status(), 200);
+  },
+);
+
+Then('any completed response is stored', async function () {
+  const messages = await this.apiClient.listDevelopmentMessages(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.match(messages.data.at(-1).content, /Delayed completion/);
+});
+
+Given('no client remains attached', async function () {
+  await this.apiClient.detachAgentTurn(this.userToken, this.developmentChat.id);
+});
+
+When('the Agent Turn reaches the configured turn timeout', async function () {
+  this.turnResponse = await this.turnPromise;
+});
+
+Then('a safe timeout error is recorded', async function () {
+  assert.equal(this.turnResponse.status(), 200);
+  const messages = await this.apiClient.listDevelopmentMessages(
+    this.userToken,
+    this.developmentChat.id,
+  );
+  assert.equal(messages.data.at(-1).content, 'Agent Turn timed out.');
+});
+
+Given('a user has two active Agent Turns across different Development Chats', async function () {
+  await configureDemoRepository(true);
+  await this.apiClient.configureTurnLifecycle();
+  this.userToken = await this.apiClient.authenticateSuperuser();
+  this.developmentChats = await Promise.all(
+    [0, 1, 2].map((index) =>
+      this.apiClient.createDevelopmentChat(
+        this.userToken,
+        `Capacity chat ${index} ${Date.now()}`,
+      ),
+    ),
+  );
+  for (const chat of this.developmentChats) {
+    const setup = await this.apiClient.setupDevelopmentWorkspace(this.userToken, chat.id);
+    assert.equal(setup.status(), 200);
+  }
+  await this.apiClient.configureFakeLlm([
+    { kind: 'delay', delay_seconds: 10, text: 'Delayed completion' },
+  ]);
+  this.turnPromises = this.developmentChats.slice(0, 2).map((chat, index) =>
+    this.apiClient.exploreDevelopmentChat(
+      this.userToken,
+      chat.id,
+      `Capacity turn ${index}`,
+    ),
+  );
+  await Promise.all(
+    this.developmentChats.slice(0, 2).map((chat) =>
+      this.apiClient.waitForAgentTurn(this.userToken, chat.id),
+    ),
+  );
+});
+
+Given("that user's configured concurrent Agent Turn limit is two", async function () {
+  const user = await this.apiClient.currentUser(this.userToken);
+  assert.equal(user.concurrent_agent_turn_limit, 2);
+});
+
+When('the user starts an Agent Turn in another Development Chat', async function () {
+  this.capacityResponse = await this.apiClient.exploreDevelopmentChat(
+    this.userToken,
+    this.developmentChats[2].id,
+    'Excess turn',
+  );
+});
+
+Then('the new Agent Turn is rejected', function () {
+  assert.equal(this.capacityResponse.status(), 429);
+});
+
+Then("the rejection states that the user's concurrent Agent Turn limit has been reached", async function () {
+  assert.match((await this.capacityResponse.json()).detail, /limit has been reached/);
+  await Promise.all(
+    this.developmentChats.slice(0, 2).map((chat) =>
+      this.apiClient.stopAgentTurn(this.userToken, chat.id),
+    ),
+  );
+  await Promise.all(this.turnPromises);
+});
+
+Given('an Agent Turn exceeds the configured timeout without producing a response', async function () {
+  await prepareReadyDevelopmentChat(this, 'Timed out turn');
+  await this.apiClient.configureTurnLifecycle({ timeoutSeconds: 1 });
+  await startDelayedTurn(this);
+});
+
+When('the timeout expires', async function () {
+  this.turnResponse = await this.turnPromise;
 });
