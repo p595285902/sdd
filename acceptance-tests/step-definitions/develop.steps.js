@@ -38,6 +38,39 @@ async function expectNoActiveTurn(world, chat = world.developmentChat) {
   assert.equal(response.status(), 404);
 }
 
+Given(
+  'an authenticated user starts exploration in a ready Development Workspace',
+  async function () {
+    await prepareReadyDevelopmentChat(this, 'Streamed interface');
+    this.streamedResponse = 'Repository summary';
+    await this.apiClient.configureFakeLlm([
+      {
+        kind: 'text',
+        text: `**${this.streamedResponse}** <img src=x onerror=alert(1)>`,
+      },
+    ]);
+    await this.developPage.startStreamedExploration('Summarize the repository');
+  },
+);
+
+When('normalized Agent Turn events arrive', async function () {
+  await this.developPage.expectOrderedActivity([
+    'Agent Turn started',
+    'Thinking...',
+  ]);
+});
+
+Then('expandable activity is displayed in order', async function () {
+  await this.developPage.expectOrderedActivity([
+    'Agent Turn started',
+    'Thinking...',
+  ]);
+});
+
+Then('safe Markdown response text is displayed incrementally', async function () {
+  await this.developPage.expectSafeMarkdownResponse(this.streamedResponse);
+});
+
 Given('an authenticated user is viewing the application', async function () {
   this.userToken = await this.apiClient.authenticateSuperuser();
   await this.developPage.openApplication(this.userToken);

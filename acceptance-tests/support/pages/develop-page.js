@@ -131,6 +131,29 @@ class DevelopPage {
       timeout: 60_000,
     });
   }
+
+  async startStreamedExploration(content) {
+    await this.page.getByRole('textbox', { name: 'Exploration message' }).fill(content);
+    await this.page.getByRole('button', { name: 'Send exploration' }).click();
+  }
+
+  async expectOrderedActivity(expectedActivity) {
+    const stream = this.page.getByRole('article', {
+      name: 'Streaming assistant response',
+    });
+    await expect(stream).toBeVisible();
+    const activity = stream.locator('ol li');
+    await expect(activity).toHaveText(expectedActivity);
+  }
+
+  async expectSafeMarkdownResponse(text) {
+    const stream = this.page.getByRole('article', {
+      name: 'Streaming assistant response',
+    });
+    await expect(stream.getByText(text, { exact: true })).toBeVisible();
+    await expect(stream.locator('strong')).toHaveText(text);
+    await expect(stream.locator('img')).toHaveCount(0);
+  }
 }
 
 module.exports = { DevelopPage };

@@ -5,6 +5,7 @@ type Chat = {
   owner_id: string
   title: string
   workspace_ready: boolean
+  presence_mode: "stop_when_i_leave" | "continue_in_background"
   created_at: string
   updated_at: string
 }
@@ -18,15 +19,23 @@ const createChat = (id: string, title: string, updatedAt: string): Chat => ({
   owner_id: ownerId,
   title,
   workspace_ready: false,
+  presence_mode: "stop_when_i_leave",
   created_at: updatedAt,
   updated_at: updatedAt,
 })
 
-const mockDevelopApi = async (page: Page) => {
+const mockDevelopApi = async (
+  page: Page,
+  options: { waitForStop?: boolean } = {},
+) => {
   const chats = [
     createChat(chatOneId, "Most recent chat", "2026-09-24T12:00:00Z"),
     createChat(chatTwoId, "Earlier chat", "2026-09-23T12:00:00Z"),
   ]
+  let releaseStream: (() => void) | undefined
+  const stopped = new Promise<void>((resolve) => {
+    releaseStream = resolve
+  })
 
   await page.route("**/api/v1/develop/chats**", async (route) => {
     const request = route.request()
@@ -42,6 +51,60 @@ const mockDevelopApi = async (page: Page) => {
     const messagesMatch = url.pathname.match(
       /\/develop\/chats\/([^/]+)\/messages$/,
     )
+    const streamMatch = url.pathname.match(
+      /\/develop\/chats\/([^/]+)\/messages\/explore\/stream$/,
+    )
+    const currentStreamMatch = url.pathname.match(
+      /\/develop\/chats\/([^/]+)\/turns\/current\/stream$/,
+    )
+    const currentTurnMatch = url.pathname.match(
+      /\/develop\/chats\/([^/]+)\/turns\/current$/,
+    )
+    const presenceMatch = url.pathname.match(
+      /\/develop\/chats\/([^/]+)\/presence$/,
+    )
+
+    if (method === "POST" && streamMatch) {
+      if (options.waitForStop) await stopped
+      await route.fulfill({
+        body: [
+          'data: {"sequence":1,"kind":"status","data":"Inspecting repository"}\n\n',
+          'data: {"sequence":2,"kind":"text","data":"**Repository** <img src=x onerror=alert(1)>"}\n\n',
+          'data: {"sequence":3,"kind":"done","data":"complete"}\n\n',
+        ].join(""),
+        contentType: "text/event-stream",
+      })
+      return
+    }
+
+    if (method === "GET" && currentStreamMatch) {
+      await route.fulfill({
+        contentType: "application/json",
+        json: { detail: "No active Agent Turn" },
+        status: 404,
+      })
+      return
+    }
+
+    if (method === "DELETE" && currentTurnMatch) {
+      releaseStream?.()
+      await route.fulfill({
+        contentType: "application/json",
+        json: { message: "Agent Turn stopped" },
+      })
+      return
+    }
+
+    if (method === "PUT" && presenceMatch) {
+      const chat = chats.find((entry) => entry.id === presenceMatch[1])
+      const body = request.postDataJSON() as {
+        presence_mode: Chat["presence_mode"]
+      }
+      if (!chat) throw new Error("Unexpected chat ID")
+      chat.presence_mode = body.presence_mode
+      await route.fulfill({ contentType: "application/json", json: chat })
+      return
+    }
 
     if (method === "POST" && setupMatch) {
       const chat = chats.find((entry) => entry.id === setupMatch[1])
@@ -166,6 +229,9 @@ test.describe("Develop chat shell", () => {
     await expect(
       page.getByRole("heading", { name: "Most recent chat" }),
     ).toBeVisible()
+    await expect(
+      page.getByRole("complementary", { name: "Development context" }),
+    ).toBeVisible()
   })
 
   test("creates a chat from the first message", async ({ page }) => {
@@ -216,6 +282,67 @@ test.describe("Develop chat shell", () => {
     await expect(
       page.getByRole("button", { name: "Demo repository ready" }),
     ).toBeDisabled()
+  })
+
+  test("streams activity and safe Markdown incrementally", async ({ page }) => {
+    await page.getByRole("button", { name: "Set up demo repository" }).click()
+    await page
+      .getByRole("textbox", { name: "Exploration message" })
+      .fill("Inspect")
+    await page.getByRole("button", { name: "Send exploration" }).click()
+
+    const response = page.getByRole("article", {
+      name: "Streaming assistant response",
+    })
+    await expect(response.getByText("Inspecting repository")).toBeVisible()
+    await expect(response.getByText("Repository", { exact: true })).toHaveCSS(
+      "font-weight",
+      /^(600|700)$/,
+    )
+    await expect(response.locator("img")).toHaveCount(0)
+  })
+
+  test("updates Presence Mode with explicit labels", async ({ page }) => {
+    const continueButton = page.getByRole("button", {
+      name: "Continue in background",
+    })
+    await continueButton.click()
+    await expect(continueButton).toHaveAttribute("aria-pressed", "true")
+  })
+
+  test("stops a running Agent Turn", async ({ page }) => {
+    await mockDevelopApi(page, { waitForStop: true })
+    await page.reload()
+    await page.getByRole("button", { name: "Set up demo repository" }).click()
+    await page
+      .getByRole("textbox", { name: "Exploration message" })
+      .fill("Wait")
+    await page.getByRole("button", { name: "Send exploration" }).click()
+
+    await page.getByRole("button", { name: "Stop Agent Turn" }).click()
+    await expect(
+      page.getByRole("button", { name: "Send exploration" }),
+    ).toBeVisible()
+  })
+
+  test("uses explicit history and context controls on narrow screens", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.reload()
+
+    await expect(
+      page.getByRole("navigation", { name: "Development Chats" }),
+    ).not.toBeVisible()
+    await page.getByRole("button", { name: "Open chat history" }).click()
+    await expect(
+      page.getByRole("navigation", { name: "Development Chats" }),
+    ).toBeVisible()
+    await page.getByRole("button", { name: "Close panel" }).click()
+    await page.getByRole("button", { name: "Open development context" }).click()
+    await expect(
+      page.getByRole("complementary", { name: "Development context" }),
+    ).toBeVisible()
   })
 
   test("cancels Development Chat deletion", async ({ page }) => {

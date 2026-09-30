@@ -38,12 +38,12 @@ export default defineConfig({
 
     {
       name: 'unit',
-      testMatch: /.*-stream\.spec\.ts/,
+      testMatch: /.*-(stream|state)\.spec\.ts/,
     },
 
     {
       name: 'chromium',
-      testIgnore: /.*-stream\.spec\.ts/,
+      testIgnore: /.*-(stream|state)\.spec\.ts/,
       use: {
         ...devices['Desktop Chrome'],
         storageState: 'playwright/.auth/user.json',

@@ -3,3 +3,4 @@ acceptance-tests/node_modules/
 acceptance-tests/.extracted/
 acceptance-tests/reports/
 .env
+backend/app/frontend/
