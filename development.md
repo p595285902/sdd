@@ -77,6 +77,18 @@ Stop a locally running FastAPI server before starting the Compose backend becaus
 
 **Note**: The first time you start the stack, it might take a minute for all the services to be ready. To monitor it, use `docker compose logs`, or `docker compose logs backend` for the backend service.
 
+### Debug the Backend Image
+
+Build and prepare the backend image, then start the stack with the debug override:
+
+```bash
+docker compose -f compose.yml -f compose.debug.yml build backend
+docker compose -f compose.yml -f compose.debug.yml run --rm backend bash scripts/prestart.sh
+docker compose -f compose.yml -f compose.debug.yml up
+```
+
+The backend waits for a debugger on port `5678` before starting. In VS Code, run the `Python: Attach to backend image` debug configuration. Breakpoints under `backend/` map to `/app/backend` in the container. After the debugger attaches, open <http://localhost>.
+
 ## Mailpit
 
 [Mailpit](https://mailpit.axllent.org) captures emails sent during local development instead of delivering them. The local backend connects to it at `localhost:1025`, and the Compose backend connects to the `mailpit` service. Captured emails are available at <http://localhost:8025>.

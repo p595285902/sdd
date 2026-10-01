@@ -4,3 +4,5 @@ acceptance-tests/.extracted/
 acceptance-tests/reports/
 .env
 backend/app/frontend/
+!.vscode/
+!.vscode/launch.json
