@@ -34,6 +34,9 @@ You can also configure these environment variables as needed:
 * `SMTP_USER`: The SMTP server user.
 * `EMAILS_FROM_EMAIL`: The email account used to send emails.
 * `SENTRY_DSN`: The DSN for Sentry.
+* `DEMO_GITHUB_REPO`: The tokenless HTTPS URL cloned into new Development Workspaces.
+
+Develop may be disabled by leaving `DEMO_GITHUB_REPO`, `DEMO_GITHUB_TOKEN`, and `OPENAI_API_KEY` unset. A production deployment that sets any one of them must set all three or backend startup fails. The Compose deployment stores workspaces at `DEVELOP_WORKSPACE_ROOT=/develop-workspaces` on the `sdd-develop-workspaces` named volume.
 
 ### Secrets
 
@@ -47,6 +50,8 @@ export FIRST_SUPERUSER_PASSWORD="$(python -c 'import secrets; print(secrets.toke
 
 To use an authenticated email provider, also set `SMTP_PASSWORD`.
 
+To enable Develop, inject `DEMO_GITHUB_TOKEN` and `OPENAI_API_KEY` as runtime secrets. Do not add repository or provider credentials to the Dockerfile, image build arguments, or committed environment files.
+
 ## Deploy
 
 ```bash
@@ -59,6 +64,32 @@ docker compose -f compose.yml -f compose.deploy.yml up -d
 The `compose.deploy.yml` file adds HTTPS and automatic certificate handling to the shared `compose.yml` configuration. Explicitly listing both files excludes the local settings from `compose.override.yml`.
 
 The backend Docker image builds the frontend, so the server does not need Bun or prebuilt frontend files.
+
+### Develop CLI Versions
+
+The backend image pins OpenCode `1.18.23` and OpenSpec `1.13.0`. This pair is verified against the Develop workflow, including `opencode init`, `openspec init --tools opencode`, and OpenSpec action commands. Update and verify both versions together before changing either Docker build argument.
+
+### Develop Runtime Topology
+
+The initial deployment runs exactly one FastAPI worker because Agent Turn admission, replay, reattachment, and stop coordination are process-local. Multiple workers or hosts require durable distributed admission, a shared event log, and shared workspace storage before they are safe to enable.
+
+The `sdd-develop-workspaces` volume preserves repositories across backend container replacement. Back it up and monitor its growth. Do not use `docker compose down --volumes` during routine deployments because that deletes the workspace volume along with other named volumes.
+
+Develop streams Agent Turn events using server-sent events with a 15-second heartbeat. Any proxy or load balancer in front of the backend must:
+
+* disable response buffering and compression for event streams;
+* flush chunks immediately and preserve `Cache-Control: no-cache`, `Connection: keep-alive`, and `X-Accel-Buffering: no` response headers;
+* set idle and request timeouts above the configured heartbeat interval, with at least 60 seconds recommended.
+
+The included Traefik service sets its response forwarding flush interval to `-1ms` for immediate streaming. Apply equivalent settings when replacing Traefik.
+
+After building the image, run the deployment checks from `acceptance-tests/`:
+
+```bash
+npm run test:runtime
+```
+
+The check verifies normalized Compose storage and streaming configuration, exact executable versions, the single-worker image command, writable workspace storage, and persistence across container replacement.
 
 ## Deploy with GitHub Actions
 

@@ -129,7 +129,30 @@ class Settings(BaseSettings):
             "FIRST_SUPERUSER_PASSWORD", self.FIRST_SUPERUSER_PASSWORD
         )
 
+        develop_configuration = {
+            "DEMO_GITHUB_REPO": self.DEMO_GITHUB_REPO,
+            "DEMO_GITHUB_TOKEN": self.DEMO_GITHUB_TOKEN,
+            "OPENAI_API_KEY": self.OPENAI_API_KEY,
+        }
+        configured_develop_values = {
+            name for name, value in develop_configuration.items() if value is not None
+        }
+        if (
+            self.FASTAPI_ENV != "development"
+            and configured_develop_values
+            and len(configured_develop_values) != len(develop_configuration)
+        ):
+            missing_values = sorted(
+                set(develop_configuration) - configured_develop_values
+            )
+            raise ValueError(
+                "Production Develop configuration is incomplete; configure "
+                + ", ".join(missing_values)
+            )
+
         if self.DEVELOP_ACCEPTANCE_MODE:
+            if not self.DEVELOP_FAKE_SETUP_RUNNER:
+                raise ValueError("Acceptance mode requires the fake setup runner")
             if self.OPENAI_BASE_URL is None or self.OPENAI_BASE_URL.host not in {
                 "127.0.0.1",
                 "localhost",

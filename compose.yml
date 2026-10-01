@@ -91,6 +91,7 @@ services:
 
       # Define the port inside of the Docker service to use
       - traefik.http.services.backend.loadbalancer.server.port=8100
+      - traefik.http.services.backend.loadbalancer.responseforwarding.flushinterval=-1ms
 
       # Route HTTP traffic for this domain
       - traefik.http.routers.backend-http.rule=Host(`${DOMAIN:-localhost}`)

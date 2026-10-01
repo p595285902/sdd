@@ -25,11 +25,21 @@ ENV PYTHONUNBUFFERED=1
 
 COPY --from=node /usr/local /usr/local
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y git \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG OPENCODE_VERSION=1.18.23
+ARG OPENSPEC_VERSION=1.13.0
+
 RUN npm install -g \
     @openai/codex \
     bubblewrap \
-    opencode-ai \
-    @fission-ai/openspec@latest
+    opencode-ai@${OPENCODE_VERSION} \
+    @fission-ai/openspec@${OPENSPEC_VERSION} \
+    && git --version \
+    && test "$(opencode --version)" = "${OPENCODE_VERSION}" \
+    && test "$(openspec --version)" = "${OPENSPEC_VERSION}"
 
 # Install uv
 # Ref: https://docs.astral.sh/uv/guides/integration/docker/#installing-uv
@@ -73,4 +83,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 WORKDIR /app/backend/
 
-CMD ["fastapi", "run", "--workers", "4"]
+CMD ["fastapi", "run", "--workers", "1"]
