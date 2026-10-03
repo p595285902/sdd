@@ -416,6 +416,177 @@ Given(
   },
 );
 
+Given('an authenticated user has selected a Development Chat that requires repository setup', async function () {
+  await configureDemoRepository(true);
+  this.userToken = await this.apiClient.authenticateSuperuser();
+  this.developmentChat = await this.apiClient.createDevelopmentChat(
+    this.userToken,
+    `Header controls ${Date.now()}`,
+  );
+  await this.developPage.open(this.userToken);
+  await this.developPage.selectChat(this.developmentChat.title);
+});
+
+When('the user views the chat header', async function () {
+  await this.developPage.expectSelectedHeader(this.developmentChat.title);
+});
+
+Then('a red repository icon offers setup and explains the required state on hover', async function () {
+  await this.developPage.expectRepositoryStatus('Set up demo repository', 'red', 'Repository setup required');
+});
+
+Then('the rename control appears beside the chat title', async function () {
+  await this.developPage.expectRenameByTitle(this.developmentChat.title);
+});
+
+Then('the Presence Mode dropdown appears beside Delete and shows the selected mode', async function () {
+  await this.developPage.expectPresenceBesideDelete('Stop when I leave');
+});
+
+When('the user starts repository setup', async function () {
+  await this.developPage.startHeldRepositorySetup();
+});
+
+Then('the repository icon is yellow while setup is in progress', async function () {
+  await this.developPage.expectRepositoryStatus('Repository setup in progress', 'yellow', 'Setting up demo repository');
+});
+
+When('the repository becomes ready', async function () {
+  await this.developPage.finishHeldRepositorySetup();
+});
+
+Then('the repository icon is green and explains the ready state on hover', async function () {
+  await this.developPage.expectRepositoryStatus('Demo repository ready', 'green', 'Demo repository ready');
+});
+
+Given('an authenticated user has selected a Development Chat', async function () {
+  this.userToken = await this.apiClient.authenticateSuperuser();
+  this.developmentChat = await this.apiClient.createDevelopmentChat(
+    this.userToken,
+    `Presence selection ${Date.now()}`,
+  );
+  await this.developPage.open(this.userToken);
+  await this.developPage.selectChat(this.developmentChat.title);
+});
+
+When('the user chooses Continue in background from the header dropdown', async function () {
+  await this.developPage.choosePresenceMode('Continue in background');
+});
+
+Then('the selected Presence Mode is persisted for that chat', async function () {
+  await this.developPage.expectPresenceMode('Continue in background');
+  const chats = await this.apiClient.listDevelopmentChats(this.userToken);
+  const selected = chats.data.find(({ id }) => id === this.developmentChat.id);
+  assert.equal(selected?.presence_mode, 'continue_in_background');
+});
+
+Then('the dropdown shows Continue in background', async function () {
+  await this.developPage.expectPresenceMode('Continue in background');
+});
+
+Given('an authenticated user has selected a Development Chat on a small screen', async function () {
+  await this.developPage.useSmallScreen();
+  this.userToken = await this.apiClient.authenticateSuperuser();
+  this.developmentChat = await this.apiClient.createDevelopmentChat(
+    this.userToken,
+    `Small-screen Context ${Date.now()}`,
+  );
+  await this.developPage.open(this.userToken);
+});
+
+Then('the title and controls wrap without hiding any chat action', async function () {
+  await this.developPage.expectWrappedHeader(this.developmentChat.title);
+});
+
+Then('the user can open the Context panel from its mobile control', async function () {
+  await this.developPage.openMobileContext();
+});
+
+Then('the Context panel displays No additional context', async function () {
+  await this.developPage.expectEmptyMobileContext();
+});
+
+Given('an authenticated user has a running Agent Turn', async function () {
+  await prepareReadyDevelopmentChat(this, 'Timed activity');
+  this.timedResponse = 'Delayed completion';
+  await this.apiClient.configureFakeLlm([
+    { kind: 'delay', delay_seconds: 4, text: this.timedResponse },
+  ]);
+  await this.developPage.startStreamedExploration('Time this turn');
+});
+
+When('the assistant response is displayed', async function () {
+  await this.developPage.expectRunningActivityDuration();
+});
+
+Then('the elapsed timer appears beside Agent activity', async function () {
+  await this.developPage.expectRunningActivityDuration();
+});
+
+When('the Agent Turn completes and the user reloads the chat', async function () {
+  const { message } = await this.apiClient.waitForDevelopmentMessage(
+    this.userToken, this.developmentChat.id, this.timedResponse,
+  );
+  this.completedDuration = message.duration_seconds;
+  assert.ok(this.completedDuration >= 0);
+  await this.developPage.open(this.userToken);
+  await this.developPage.selectChat(this.developmentChat.title);
+});
+
+Then('the final duration appears beside Agent activity on the completed assistant message', async function () {
+  await this.developPage.expectPersistedActivityDuration(this.timedResponse, this.completedDuration);
+});
+
+Given('an authenticated user owns a Development Chat with an active Agent Turn', async function () {
+  await prepareReadyDevelopmentChat(this, 'Durable duration');
+  await startDelayedTurn(this, this.developmentChat, 3);
+});
+
+When('the Agent Turn finishes and stores an assistant message', async function () {
+  const response = await this.turnPromise;
+  assert.equal(response.status(), 200, await response.text());
+  this.completedMessage = (await this.apiClient.waitForDevelopmentMessage(
+    this.userToken, this.developmentChat.id, 'Delayed completion',
+  )).message;
+});
+
+Then('that message contains the completed turn duration', function () {
+  assert.equal(typeof this.completedMessage.duration_seconds, 'number');
+  assert.ok(this.completedMessage.duration_seconds >= 0);
+});
+
+When("the user requests that chat's messages again", async function () {
+  this.reloadedMessages = await this.apiClient.listDevelopmentMessages(
+    this.userToken, this.developmentChat.id,
+  );
+});
+
+Then('the same duration is returned with the assistant message', function () {
+  const message = this.reloadedMessages.data.find(({ id }) => id === this.completedMessage.id);
+  assert.ok(message);
+  assert.equal(message.duration_seconds, this.completedMessage.duration_seconds);
+});
+
+Given('a Development Chat contains assistant messages from before turn duration was recorded', async function () {
+  this.userToken = await this.apiClient.authenticateSuperuser();
+  this.developmentChat = await this.apiClient.createDevelopmentChat(
+    this.userToken, `Legacy duration ${Date.now()}`,
+  );
+  await this.apiClient.seedDevelopmentMessages(this.developmentChat.id, 1);
+});
+
+When('its owner requests those messages', async function () {
+  this.legacyMessages = await this.apiClient.listDevelopmentMessages(
+    this.userToken, this.developmentChat.id,
+  );
+});
+
+Then('the messages are returned without a duration', function () {
+  const assistantMessages = this.legacyMessages.data.filter(({ role }) => role === 'assistant');
+  assert.equal(assistantMessages.length, 1);
+  assert.equal(assistantMessages[0].duration_seconds, null);
+});
+
 Given('the demo repository is configured', async function () {
   await configureDemoRepository(true);
 });

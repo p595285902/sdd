@@ -251,6 +251,7 @@ def _run_streamed_exploration(
             role="assistant",
             content=content,
             activity=activity,
+            duration_seconds=turn.elapsed_seconds(),
             chat_id=chat.id,
             created_at=completed_at,
         )
@@ -327,6 +328,7 @@ def _run_streamed_apply(*, chat_id: uuid.UUID, turn: TurnSession) -> None:
             role="assistant",
             content=content,
             activity=activity,
+            duration_seconds=turn.elapsed_seconds(),
             chat_id=chat.id,
             created_at=completed_at,
         )
@@ -680,6 +682,7 @@ def propose_development_chat(
         role="assistant",
         content=completion.response_text,
         activity=[part.model_dump() for part in completion.activity],
+        duration_seconds=turn.elapsed_seconds(),
         kind=DevelopmentMessageKind.proposal,
         proposal_state=DevelopmentProposalState.undecided,
         chat_id=chat.id,
@@ -996,6 +999,7 @@ def explore_development_chat(
             role="assistant",
             content=safe_message,
             activity=[{"text": safe_message}],
+            duration_seconds=turn.elapsed_seconds(),
             chat_id=chat.id,
             created_at=completed_at,
         )
@@ -1023,6 +1027,7 @@ def explore_development_chat(
         role="assistant",
         content=completion.response_text,
         activity=[part.model_dump() for part in completion.activity],
+        duration_seconds=turn.elapsed_seconds(),
         chat_id=chat.id,
         created_at=completed_at,
     )

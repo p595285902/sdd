@@ -133,6 +133,10 @@ export type DevelopmentMessagePublic = {
         [key: string]: string;
     }>;
     /**
+     * Duration Seconds
+     */
+    duration_seconds?: number | null;
+    /**
      * Id
      */
     id: string;

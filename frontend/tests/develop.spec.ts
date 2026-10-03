@@ -26,7 +26,7 @@ const createChat = (id: string, title: string, updatedAt: string): Chat => ({
 
 const mockDevelopApi = async (
   page: Page,
-  options: { waitForStop?: boolean } = {},
+  options: { waitForStop?: boolean; historicalDuration?: number | null } = {},
 ) => {
   const chats = [
     createChat(chatOneId, "Most recent chat", "2026-09-24T12:00:00Z"),
@@ -203,7 +203,21 @@ const mockDevelopApi = async (
       await route.fulfill({
         contentType: "application/json",
         json: {
-          data: messages,
+          data:
+            !before && options.historicalDuration !== undefined
+              ? [
+                  ...messages,
+                  {
+                    id: "00000000-0000-0000-0000-000000000088",
+                    chat_id: messagesMatch[1],
+                    role: "assistant",
+                    content: "Completed exploration",
+                    activity: [{ text: "Read files" }],
+                    duration_seconds: options.historicalDuration,
+                    created_at: "2026-09-24T12:00:08Z",
+                  },
+                ]
+              : messages,
           has_more: !before,
           next_cursor: before ? null : "older-page",
         },
@@ -358,6 +372,53 @@ test.describe("Develop chat shell", () => {
     await expect(response.locator("img")).toHaveCount(0)
   })
 
+  test("shows running activity time beside its label", async ({ page }) => {
+    await mockDevelopApi(page, { waitForStop: true })
+    await page.reload()
+    await page.getByRole("button", { name: "Set up demo repository" }).click()
+    await page
+      .getByRole("textbox", { name: "Exploration message" })
+      .fill("Inspect")
+    await page.getByRole("button", { name: "Send exploration" }).click()
+
+    const response = page.getByRole("article", {
+      name: "Streaming assistant response",
+    })
+    await expect(response.locator("summary")).toContainText(
+      /Agent activity · \d+:\d{2}/,
+    )
+    await page.getByRole("button", { name: "Stop Agent Turn" }).click()
+  })
+
+  test("shows the persisted duration after reload", async ({ page }) => {
+    await mockDevelopApi(page, { historicalDuration: 83.5 })
+    await page.reload()
+
+    const response = page.locator("article", {
+      hasText: "Completed exploration",
+    })
+    await expect(response.locator("summary")).toHaveText(
+      "Agent activity · 1:23",
+    )
+    await page.reload()
+    await expect(
+      page
+        .locator("article", { hasText: "Completed exploration" })
+        .locator("summary"),
+    ).toHaveText("Agent activity · 1:23")
+  })
+
+  test("does not invent duration for a legacy message", async ({ page }) => {
+    await mockDevelopApi(page, { historicalDuration: null })
+    await page.reload()
+
+    await expect(
+      page
+        .locator("article", { hasText: "Completed exploration" })
+        .locator("summary"),
+    ).toHaveText("Agent activity")
+  })
+
   test("creates and loads an undecided proposal", async ({ page }) => {
     await page.getByRole("button", { name: "Set up demo repository" }).click()
     await page.getByRole("button", { name: "Make it happen" }).click()
@@ -408,11 +469,11 @@ test.describe("Develop chat shell", () => {
   })
 
   test("updates Presence Mode with explicit labels", async ({ page }) => {
-    const continueButton = page.getByRole("button", {
-      name: "Continue in background",
-    })
-    await continueButton.click()
-    await expect(continueButton).toHaveAttribute("aria-pressed", "true")
+    const mode = page.getByRole("combobox", { name: "Presence Mode" })
+    await expect(mode).toHaveText("Stop when I leave")
+    await mode.click()
+    await page.getByRole("option", { name: "Continue in background" }).click()
+    await expect(mode).toHaveText("Continue in background")
   })
 
   test("stops a running Agent Turn", async ({ page }) => {
@@ -436,6 +497,14 @@ test.describe("Develop chat shell", () => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.reload()
 
+    for (const control of [
+      page.getByRole("button", { name: "Rename Development Chat" }),
+      page.getByRole("button", { name: "Set up demo repository" }),
+      page.getByRole("combobox", { name: "Presence Mode" }),
+      page.getByRole("button", { name: "Delete Development Chat" }),
+    ]) {
+      await expect(control).toBeInViewport()
+    }
     await expect(
       page.getByRole("navigation", { name: "Development Chats" }),
     ).not.toBeVisible()
@@ -447,6 +516,12 @@ test.describe("Develop chat shell", () => {
     await page.getByRole("button", { name: "Open development context" }).click()
     await expect(
       page.getByRole("complementary", { name: "Development context" }),
+    ).toBeVisible()
+    await expect(
+      page
+        .getByRole("complementary", { name: "Development context" })
+        .getByText("No additional context")
+        .last(),
     ).toBeVisible()
   })
 

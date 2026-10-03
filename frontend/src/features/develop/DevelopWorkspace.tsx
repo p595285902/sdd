@@ -35,6 +35,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import useCustomToast from "@/hooks/useCustomToast"
 import { handleError } from "@/utils"
 
@@ -50,11 +62,13 @@ import {
 } from "./state"
 import { streamDevelopTurn } from "./stream"
 
-const elapsed = (startedAt: number | null, now: number) => {
-  if (!startedAt) return "0:00"
-  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000))
-  return `${Math.floor(seconds / 60)}:${(seconds % 60).toString().padStart(2, "0")}`
+const formatDuration = (seconds: number) => {
+  const wholeSeconds = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(wholeSeconds / 60)}:${(wholeSeconds % 60).toString().padStart(2, "0")}`
 }
+
+const elapsed = (startedAt: number | null, now: number) =>
+  formatDuration(startedAt === null ? 0 : (now - startedAt) / 1000)
 
 export function DevelopWorkspace() {
   const queryClient = useQueryClient()
@@ -454,45 +468,7 @@ export function DevelopWorkspace() {
           </Button>
         )}
       </div>
-      <div className="space-y-6 p-4 text-sm">
-        <section>
-          <h3 className="font-medium">Repository</h3>
-          <p className="mt-1 text-muted-foreground">
-            {workspaceQuery.data?.ready
-              ? "Demo repository ready"
-              : "Setup required"}
-          </p>
-        </section>
-        <section>
-          <h3 className="mb-2 font-medium">Presence Mode</h3>
-          <fieldset aria-label="Presence Mode" className="grid gap-2">
-            {(
-              [
-                ["stop_when_i_leave", "Stop when I leave"],
-                ["continue_in_background", "Continue in background"],
-              ] as const
-            ).map(([mode, label]) => (
-              <Button
-                aria-pressed={selected?.presence_mode === mode}
-                disabled={!selected || presence.isPending}
-                key={mode}
-                onClick={() => presence.mutate(mode)}
-                size="sm"
-                variant={
-                  selected?.presence_mode === mode ? "default" : "outline"
-                }
-              >
-                {label}
-              </Button>
-            ))}
-          </fieldset>
-        </section>
-        {conversation.running && (
-          <p aria-live="polite">
-            Agent Turn running {elapsed(conversation.startedAt, now)}
-          </p>
-        )}
-      </div>
+      <p className="p-4 text-sm text-muted-foreground">No additional context</p>
     </aside>
   )
 
@@ -531,7 +507,7 @@ export function DevelopWorkspace() {
         >
           {selected ? (
             <>
-              <div className="flex min-h-14 items-center justify-between border-b px-3">
+              <div className="flex min-h-14 flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
                 {renameTitle !== null ? (
                   <form className="flex w-full gap-2" onSubmit={submitRename}>
                     <Input
@@ -554,27 +530,10 @@ export function DevelopWorkspace() {
                   </form>
                 ) : (
                   <>
-                    <h2 className="truncate font-semibold">{selected.title}</h2>
-                    <div className="flex gap-1">
-                      <Button
-                        aria-label={
-                          workspaceQuery.data?.ready
-                            ? "Demo repository ready"
-                            : "Set up demo repository"
-                        }
-                        disabled={
-                          workspaceQuery.isPending ||
-                          workspaceQuery.data?.ready ||
-                          !workspaceQuery.data?.setup_available ||
-                          setupWorkspace.isPending
-                        }
-                        onClick={() => setupWorkspace.mutate(selected.id)}
-                        size="icon-sm"
-                        title="Set up demo repository"
-                        variant="outline"
-                      >
-                        <GitBranch />
-                      </Button>
+                    <div className="flex min-w-0 max-w-full items-center gap-1">
+                      <h2 className="min-w-0 truncate font-semibold">
+                        {selected.title}
+                      </h2>
                       <Button
                         aria-label="Rename Development Chat"
                         onClick={() => setRenameTitle(selected.title)}
@@ -584,6 +543,74 @@ export function DevelopWorkspace() {
                       >
                         <Pencil />
                       </Button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex [&>button:disabled]:pointer-events-none">
+                            <Button
+                              aria-label={
+                                setupWorkspace.isPending
+                                  ? "Repository setup in progress"
+                                  : workspaceQuery.data?.ready
+                                    ? "Demo repository ready"
+                                    : "Set up demo repository"
+                              }
+                              disabled={
+                                workspaceQuery.isPending ||
+                                workspaceQuery.data?.ready ||
+                                !workspaceQuery.data?.setup_available ||
+                                setupWorkspace.isPending
+                              }
+                              onClick={() => setupWorkspace.mutate(selected.id)}
+                              size="icon-sm"
+                              variant="outline"
+                            >
+                              <GitBranch
+                                className={
+                                  setupWorkspace.isPending
+                                    ? "text-yellow-600"
+                                    : workspaceQuery.data?.ready
+                                      ? "text-green-600"
+                                      : "text-red-600"
+                                }
+                              />
+                            </Button>
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          {setupWorkspace.isPending
+                            ? "Setting up demo repository"
+                            : workspaceQuery.data?.ready
+                              ? "Demo repository ready"
+                              : workspaceQuery.data?.setup_available
+                                ? "Repository setup required"
+                                : "Repository setup unavailable"}
+                        </TooltipContent>
+                      </Tooltip>
+                      <Select
+                        disabled={presence.isPending}
+                        onValueChange={(mode) =>
+                          presence.mutate(mode as PresenceMode)
+                        }
+                        value={selected.presence_mode}
+                      >
+                        <SelectTrigger
+                          aria-label="Presence Mode"
+                          className="w-[12rem] max-w-full"
+                          size="sm"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="stop_when_i_leave">
+                            Stop when I leave
+                          </SelectItem>
+                          <SelectItem value="continue_in_background">
+                            Continue in background
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
                       <Button
                         aria-label="Delete Development Chat"
                         onClick={() => setDeleteOpen(true)}
@@ -633,11 +660,17 @@ export function DevelopWorkspace() {
                       key={message.id}
                     >
                       <span className="sr-only">{message.role}: </span>
-                      {message.activity?.length ? (
+                      {message.activity?.length ||
+                      (message.role === "assistant" &&
+                        message.duration_seconds != null) ? (
                         <details className="mb-3 text-xs">
-                          <summary>Agent activity</summary>
+                          <summary>
+                            Agent activity
+                            {message.duration_seconds != null &&
+                              ` · ${formatDuration(message.duration_seconds)}`}
+                          </summary>
                           <ol className="mt-2 list-decimal pl-4">
-                            {message.activity.map((part, index) => (
+                            {message.activity?.map((part, index) => (
                               <li key={`${message.id}-${index}`}>
                                 {part.text}
                               </li>

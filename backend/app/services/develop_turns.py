@@ -52,6 +52,7 @@ class TurnSession:
         self.user_id = user_id
         self.weight = weight
         self.presence_mode = presence_mode
+        self._started_at = monotonic()
         self.cancel_event = threading.Event()
         self._condition = threading.Condition(threading.RLock())
         self._events: deque[TurnEvent] = deque(maxlen=replay_limit)
@@ -76,6 +77,9 @@ class TurnSession:
     def subscriber_count(self) -> int:
         with self._condition:
             return len(self._subscribers)
+
+    def elapsed_seconds(self) -> float:
+        return round(monotonic() - self._started_at, 2)
 
     def emit(self, kind: str, data: str = "") -> TurnEvent:
         with self._condition:

@@ -430,6 +430,27 @@ def test_messages_are_cursor_paginated_in_conversation_order(
     assert older_response.json()["has_more"] is False
 
 
+def test_legacy_assistant_message_has_no_duration(
+    client: TestClient,
+    superuser_token_headers: dict[str, str],
+    db: Session,
+) -> None:
+    owner = _superuser(db)
+    chat = DevelopmentChat(title="Legacy duration", owner_id=owner.id)
+    db.add(chat)
+    db.commit()
+    db.add(DevelopmentMessage(role="assistant", content="Old reply", chat_id=chat.id))
+    db.commit()
+
+    response = client.get(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages",
+        headers=superuser_token_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["duration_seconds"] is None
+
+
 @pytest.mark.parametrize(
     "params",
     [
@@ -512,10 +533,18 @@ def test_explore_persists_user_before_agent_and_completion_atomically(
     assert response.status_code == 200
     assert response.json()["content"] == "Repository explored"
     assert response.json()["activity"] == [{"text": "Reading README.md"}]
+    duration = response.json()["duration_seconds"]
+    assert duration is not None and duration >= 0
     db.expire_all()
     persisted_chat = db.get(DevelopmentChat, chat.id)
     assert persisted_chat
     assert persisted_chat.agent_session_id == "ses_next"
+    history = client.get(
+        f"{DEVELOP_CHATS_URL}/{chat.id}/messages",
+        headers=superuser_token_headers,
+    )
+    assert history.status_code == 200
+    assert history.json()["data"][-1]["duration_seconds"] == duration
 
 
 def test_explore_failure_keeps_user_message_without_completion(
@@ -613,6 +642,7 @@ def test_concurrent_turn_for_one_chat_is_rejected_and_explicit_stop_completes(
     assert stop.status_code == 200
     assert first_response.status_code == 200
     assert first_response.json()["content"] == "Agent Turn was interrupted."
+    assert first_response.json()["duration_seconds"] >= 0
     assert develop_turn_manager.active_turn(chat.id) is None
 
 
@@ -648,6 +678,7 @@ def test_agent_turn_timeout_records_safe_error(
 
     assert response.status_code == 200
     assert response.json()["content"] == "Agent Turn timed out."
+    assert response.json()["duration_seconds"] >= 0
     assert develop_turn_manager.active_turn(chat.id) is None
 
 

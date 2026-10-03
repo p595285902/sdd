@@ -261,6 +261,7 @@ class DevelopmentMessageBase(SQLModel):
         default_factory=list,
         sa_column=Column(JSON, nullable=False),
     )
+    duration_seconds: float | None = Field(default=None, ge=0)
 
     @field_validator("content")
     @classmethod
