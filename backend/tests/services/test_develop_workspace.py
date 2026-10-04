@@ -1,3 +1,4 @@
+import importlib
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -174,6 +175,85 @@ def test_preview_controller_rejects_missing_or_redirected_checkout(
 
     with pytest.raises(WorkspacePathError):
         controller.start(chat_id)
+
+
+def test_preview_controller_stop_and_restart_target_one_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller = PreviewController(root=tmp_path, url="http://preview-controller:8090")
+    chat_id = uuid.uuid4()
+    calls: list[tuple[str, str]] = []
+
+    def request(method: str, path: str) -> dict[str, str]:
+        calls.append((method, path))
+        return {"state": "running"}
+
+    monkeypatch.setattr(controller, "_request", request)
+    controller.stop(chat_id)
+    (tmp_path / str(chat_id)).mkdir()
+    controller.restart(chat_id)
+
+    assert calls == [
+        ("DELETE", f"/workloads/{chat_id}"),
+        ("PUT", f"/workloads/{chat_id}"),
+    ]
+
+
+def test_preview_worker_expires_idle_and_orphaned_chats_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PREVIEW_WORKSPACE_VOLUME", "test-workspaces")
+    monkeypatch.setenv("PREVIEW_PROJECT", "test-project")
+    monkeypatch.setenv("PREVIEW_IMAGE", "test-image")
+    worker = importlib.import_module("app.services.preview_controller")
+    monkeypatch.setattr(worker, "WORKSPACE_ROOT", str(tmp_path))
+    idle, active, orphan = (uuid.uuid4() for _ in range(3))
+    for chat_id in (idle, active):
+        (tmp_path / str(chat_id)).mkdir()
+    containers = [
+        {
+            "Labels": {
+                "sdd.preview.project": worker.PROJECT,
+                "sdd.preview.chat-id": str(chat_id),
+            },
+            "Names": [f"/{worker.container_name(chat_id)}"],
+            "Created": 0,
+        }
+        for chat_id in (idle, active, orphan)
+    ]
+    stopped: list[uuid.UUID] = []
+    monkeypatch.setattr(worker, "docker", lambda method, path: (200, containers))
+    monkeypatch.setattr(worker, "stop", lambda chat_id: stopped.append(chat_id))
+    monkeypatch.setattr(worker, "status", lambda chat_id: {"state": "running"})
+    monkeypatch.setattr(worker.time, "time", lambda: 250)
+    with worker.activity_lock:
+        worker.activity.clear()
+    worker.heartbeat(active)
+
+    worker.sweep(now=301)
+
+    assert stopped == [idle, orphan]
+    with worker.activity_lock:
+        worker.activity.clear()
+
+
+def test_preview_worker_restart_replaces_only_selected_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = importlib.import_module("app.services.preview_controller")
+    chat_id = uuid.uuid4()
+    calls: list[tuple[str, uuid.UUID]] = []
+    monkeypatch.setattr(
+        worker, "stop", lambda selected: calls.append(("stop", selected))
+    )
+    monkeypatch.setattr(
+        worker,
+        "start",
+        lambda selected: calls.append(("start", selected)) or {"state": "running"},
+    )
+
+    assert worker.restart(chat_id) == {"state": "running"}
+    assert calls == [("stop", chat_id), ("start", chat_id)]
 
 
 def test_cleanup_workspace_is_idempotent(tmp_path: Path) -> None:

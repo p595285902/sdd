@@ -21,6 +21,18 @@ class PreviewController:
         workspace_path(root=self.root, chat_id=chat_id)
         return self._request("GET", f"/workloads/{chat_id}")
 
+    def stop(self, chat_id: uuid.UUID) -> dict[str, str]:
+        return self._request("DELETE", f"/workloads/{chat_id}")
+
+    def restart(self, chat_id: uuid.UUID) -> dict[str, str]:
+        checkout = workspace_path(root=self.root, chat_id=chat_id)
+        if not checkout.is_dir():
+            raise FileNotFoundError("Development Chat checkout is not ready")
+        return self._request("PUT", f"/workloads/{chat_id}")
+
+    def activity(self, chat_id: uuid.UUID) -> dict[str, str]:
+        return self._request("POST", f"/workloads/{chat_id}/activity")
+
     def _request(self, method: str, path: str) -> dict[str, str]:
         with httpx.Client(base_url=self.url, timeout=10) as client:
             response = client.request(method, path)

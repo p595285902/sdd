@@ -54,3 +54,50 @@ Then('it has no host control socket or publicly published service port', functio
   this.previewWorkloadPage.expectOnlyCheckout(this.previewContainers[0], this.previewChats[0].id);
   this.previewWorkloadPage.expectSandbox(this.previewContainers[0]);
 });
+
+Given('a Development Chat has a running preview workload', async function () {
+  this.previewChats = [await readyChat(this)];
+  await this.previewWorkloadPage.start(this.previewChats[0].id);
+});
+
+When('five minutes pass without visible Context activity', function () {
+  this.previewWorkloadPage.advancePastIdle();
+});
+
+Then('its preview workload is stopped', function () {
+  assert.equal(this.previewWorkloadPage.isRunning(this.previewChats[0].id), false);
+});
+
+Then('its Development Chat remains available', async function () {
+  const chats = await this.apiClient.listDevelopmentChats(this.apiClient.superuserToken);
+  assert.ok(chats.data.some((chat) => chat.id === this.previewChats[0].id));
+});
+
+When('the user continues to use its visible Context panel', async function () {
+  const response = await this.apiClient.request(this.apiClient.superuserToken, 'post',
+    `/api/v1/develop/chats/${this.previewChats[0].id}/preview/activity`);
+  assert.equal(response.status(), 200, await response.text());
+});
+
+Then('the preview workload remains running', function () {
+  assert.equal(this.previewWorkloadPage.isRunning(this.previewChats[0].id), true);
+});
+
+Given('two Development Chats have running preview workloads', async function () {
+  this.previewChats = [await readyChat(this), await readyChat(this)];
+  for (const chat of this.previewChats) {
+    await this.previewWorkloadPage.start(chat.id);
+  }
+});
+
+When('the user deletes one Development Chat', async function () {
+  const response = await this.apiClient.deleteDevelopmentChat(
+    this.apiClient.superuserToken, this.previewChats[0].id,
+  );
+  assert.equal(response.status(), 200, await response.text());
+});
+
+Then('only the deleted chat\'s preview workload is removed', function () {
+  assert.equal(this.previewWorkloadPage.isRunning(this.previewChats[0].id), false);
+  assert.equal(this.previewWorkloadPage.isRunning(this.previewChats[1].id), true);
+});

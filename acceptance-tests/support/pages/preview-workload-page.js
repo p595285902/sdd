@@ -32,6 +32,19 @@ class PreviewWorkloadPage {
     return output ? output.split('\n') : [];
   }
 
+  advancePastIdle() {
+    const project = this.world.applicationState.projectName;
+    const controller = this.docker('ps', '--filter', `label=com.docker.compose.project=${project}`,
+      '--filter', 'label=com.docker.compose.service=preview-controller', '--format', '{{.ID}}');
+    assert.ok(controller);
+    this.docker('exec', controller, 'python', '-c',
+      'import sys, time; sys.path.insert(0, "/controller"); from preview_controller import sweep; sweep(now=time.time() + 301)');
+  }
+
+  isRunning(chatId) {
+    return this.containerIds(chatId).length === 1;
+  }
+
   async start(chatId) {
     this.chatIds.push(chatId);
     await runBackendPython(startScript, chatId);

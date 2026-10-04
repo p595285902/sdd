@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, or_, update
@@ -46,6 +47,7 @@ from app.services.develop_preview_detection import (
     relevant_turn_change,
     snapshot_workspace,
 )
+from app.services.develop_preview_runtime import PreviewController
 from app.services.develop_turns import (
     ChatTurnActiveError,
     TurnEvent,
@@ -65,6 +67,9 @@ from app.services.develop_workspace import (
 
 router = APIRouter(prefix="/develop/chats", tags=["develop"])
 logger = logging.getLogger(__name__)
+preview_controller = PreviewController(
+    root=settings.DEVELOP_WORKSPACE_ROOT, url="http://preview-controller:8090"
+)
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
@@ -538,6 +543,10 @@ def delete_development_chat(
             detail="Active Agent Turn did not stop before deletion",
         )
     try:
+        preview_controller.stop(chat.id)
+    except httpx.HTTPError, RuntimeError:
+        raise HTTPException(status_code=502, detail="Preview workload cleanup failed")
+    try:
         cleanup_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
     except OSError, WorkspacePathError:
         raise HTTPException(
@@ -547,6 +556,38 @@ def delete_development_chat(
     session.delete(chat)
     session.commit()
     return Message(message="Development Chat deleted")
+
+
+@router.post("/{chat_id}/preview/restart", response_model=dict[str, str])
+def restart_development_preview(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not chat.workspace_ready:
+        raise HTTPException(
+            status_code=409, detail="Development Workspace is not ready"
+        )
+    try:
+        return preview_controller.restart(chat.id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Development Workspace not found")
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Preview controller unavailable")
+
+
+@router.post("/{chat_id}/preview/activity", response_model=dict[str, str])
+def record_development_preview_activity(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    try:
+        return preview_controller.activity(chat.id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Preview workload not found")
+        raise HTTPException(status_code=502, detail="Preview controller unavailable")
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Preview controller unavailable")
 
 
 @router.get("/{chat_id}/messages", response_model=DevelopmentMessagesPublic)
