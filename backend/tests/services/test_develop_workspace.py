@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services.develop_preview_classification import classify_workspace
 from app.services.develop_preview_detection import (
     relevant_turn_change,
     snapshot_workspace,
@@ -33,6 +34,61 @@ class RecordingCommandRunner:
         self.calls.append((tuple(command), cwd, dict(env)))
         if command[0] == "git":
             Path(command[-1]).mkdir()
+
+
+def test_preview_classification_prefers_connected_website(tmp_path: Path) -> None:
+    chat_id = uuid.uuid4()
+    workspace = tmp_path / str(chat_id)
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "index.html").write_text('<script src="/src/main.ts"></script>')
+    (workspace / "src/main.ts").write_text("document.body.textContent = 'ready'")
+    (workspace / "README.md").write_text("Swagger UI at http://localhost:8000/docs")
+
+    result = classify_workspace(root=tmp_path, chat_id=chat_id)
+
+    assert result.kind == "website"
+    assert result.entry_point == "index.html"
+
+
+def test_preview_classification_ignores_unrelated_and_other_chat_files(
+    tmp_path: Path,
+) -> None:
+    chat_id = uuid.uuid4()
+    workspace = tmp_path / str(chat_id)
+    workspace.mkdir()
+    (workspace / "index.html").write_text("<h1>Notes</h1>")
+    (workspace / "utility.ts").write_text("export const value = 1")
+    other = tmp_path / str(uuid.uuid4())
+    other.mkdir()
+    (other / "README.md").write_text("Swagger UI at /docs")
+
+    assert classify_workspace(root=tmp_path, chat_id=chat_id).kind == "unknown"
+
+
+def test_preview_classification_handles_invalid_manifest(tmp_path: Path) -> None:
+    chat_id = uuid.uuid4()
+    workspace = tmp_path / str(chat_id)
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "package.json").write_text(
+        '{"scripts":{"dev":"vite"},"dependencies":[]}'
+    )
+    (workspace / "src/main.ts").write_text("document.body.textContent = 'ready'")
+
+    assert classify_workspace(root=tmp_path, chat_id=chat_id).kind == "unknown"
+
+
+def test_preview_classification_returns_documented_api_page(tmp_path: Path) -> None:
+    chat_id = uuid.uuid4()
+    workspace = tmp_path / str(chat_id)
+    workspace.mkdir()
+    (workspace / "README.md").write_text(
+        "API docs at http://localhost:8000/docs (Swagger UI)"
+    )
+
+    result = classify_workspace(root=tmp_path, chat_id=chat_id)
+
+    assert result.kind == "api_documentation"
+    assert result.entry_point == "/docs"
 
 
 def test_preview_snapshots_detect_new_and_repeated_dirty_edits(tmp_path: Path) -> None:

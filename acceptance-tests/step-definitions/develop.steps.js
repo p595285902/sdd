@@ -3,7 +3,58 @@ const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const {
   configureDemoRepository,
+  runBackendPython,
 } = require('../features/support/app-lifecycle.js');
+
+const assertPreviewClassificationScript = `
+import sys
+import uuid
+from pathlib import Path
+from app.core.config import settings
+from app.services.develop_preview_classification import classify_workspace
+
+result = classify_workspace(root=Path(settings.DEVELOP_WORKSPACE_ROOT), chat_id=uuid.UUID(sys.argv[1]))
+assert result.kind == sys.argv[2], f"Expected {sys.argv[2]}, got {result}"
+`;
+
+Given('a Development Chat checkout has an HTML entry point loading its JavaScript application', async function () {
+  await prepareReadyDevelopmentChat(this, 'HTML preview');
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'index.html', '<script src="/src/main.js"></script>');
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'src/main.js', 'document.body.textContent = "ready";');
+});
+
+Given('a Development Chat checkout has a framework application with a documented web entry point', async function () {
+  await prepareReadyDevelopmentChat(this, 'Framework preview');
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'package.json', JSON.stringify({ scripts: { dev: 'vite --host' }, dependencies: { vite: '*' } }));
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'src/main.ts', 'document.body.textContent = "ready";');
+});
+
+Given('a Development Chat checkout has an HTML document and an unrelated TypeScript utility', async function () {
+  await prepareReadyDevelopmentChat(this, 'Unrelated preview');
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'notes.html', '<h1>Notes</h1>');
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'tools/utility.ts', 'export const value = 1;');
+});
+
+Given('a Development Chat checkout documents an API Swagger page and has no website entry point', async function () {
+  await prepareReadyDevelopmentChat(this, 'API preview');
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'README.md', 'API documentation: http://localhost:8000/docs (Swagger UI)');
+});
+
+When('the checkout is classified for preview', function () {
+  this.classifyPreview = (kind) => runBackendPython(assertPreviewClassificationScript, this.developmentChat.id, kind);
+});
+
+Then('its preview type is website', async function () {
+  await this.classifyPreview('website');
+});
+
+Then('its preview type is not website', async function () {
+  await this.classifyPreview('unknown');
+});
+
+Then('its preview type is API documentation', async function () {
+  await this.classifyPreview('api_documentation');
+});
 
 async function prepareReadyDevelopmentChat(world, titlePrefix) {
   await configureDemoRepository(true);
