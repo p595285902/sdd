@@ -9,6 +9,7 @@ from app.services.develop_preview_detection import (
     relevant_turn_change,
     snapshot_workspace,
 )
+from app.services.develop_preview_runtime import PreviewController
 from app.services.develop_workspace import (
     FakeCommandRunner,
     WorkspacePathError,
@@ -156,6 +157,23 @@ def test_validate_workspace_path_requires_expected_direct_child(
             chat_id=chat_id,
             candidate=tmp_path / ".." / str(chat_id),
         )
+
+
+def test_preview_controller_rejects_missing_or_redirected_checkout(
+    tmp_path: Path,
+) -> None:
+    controller = PreviewController(root=tmp_path, url="http://preview-controller:8090")
+    chat_id = uuid.uuid4()
+
+    with pytest.raises(FileNotFoundError):
+        controller.start(chat_id)
+
+    other_checkout = tmp_path / str(uuid.uuid4())
+    other_checkout.mkdir()
+    (tmp_path / str(chat_id)).symlink_to(other_checkout, target_is_directory=True)
+
+    with pytest.raises(WorkspacePathError):
+        controller.start(chat_id)
 
 
 def test_cleanup_workspace_is_idempotent(tmp_path: Path) -> None:
