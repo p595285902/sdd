@@ -64,6 +64,18 @@ workspace = Path(settings.DEVELOP_WORKSPACE_ROOT) / str(uuid.UUID(sys.argv[1]))
 (workspace / sys.argv[2]).write_text("marked")
 `;
 
+const editWorkspaceFileScript = `
+import sys
+import uuid
+from pathlib import Path
+from app.core.config import settings
+
+workspace = Path(settings.DEVELOP_WORKSPACE_ROOT) / str(uuid.UUID(sys.argv[1]))
+target = workspace / sys.argv[2]
+target.parent.mkdir(parents=True, exist_ok=True)
+target.write_text(sys.argv[3])
+`;
+
 const assertWorkspaceMarkerScript = `
 import sys
 import uuid
@@ -387,6 +399,10 @@ class ApiClient {
 
   async markWorkspace(chatId, marker) {
     await runBackendPython(markWorkspaceScript, chatId, marker);
+  }
+
+  async editWorkspaceFile(chatId, name, content) {
+    await runBackendPython(editWorkspaceFileScript, chatId, name, content);
   }
 
   async assertWorkspaceMarker(chatId, marker, expected) {

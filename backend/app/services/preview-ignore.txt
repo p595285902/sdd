@@ -1,0 +1,11 @@
+.git/
+.claude/
+openspec/
+node_modules/
+.venv/
+venv/
+__pycache__/
+.next/
+dist/
+build/
+coverage/

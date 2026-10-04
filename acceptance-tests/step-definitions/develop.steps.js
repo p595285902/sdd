@@ -53,6 +53,55 @@ async function prepareUndecidedProposal(world, titlePrefix) {
   await world.developPage.expectProposalActions();
 }
 
+async function startPreviewDetectionTurn(world) {
+  await world.apiClient.configureFakeLlm([
+    { kind: 'delay', delay_seconds: 10, text: 'Turn finished' },
+  ]);
+  world.previewTurn = world.apiClient.request(
+    world.userToken, 'post',
+    `/api/v1/develop/chats/${world.developmentChat.id}/messages/explore/stream`,
+    { data: { content: 'Edit the checkout' } },
+  );
+  await world.apiClient.waitForAgentTurn(world.userToken, world.developmentChat.id);
+}
+
+Given('an Agent Turn starts in a ready Development Workspace', async function () {
+  await prepareReadyDevelopmentChat(this, 'Preview change');
+  await startPreviewDetectionTurn(this);
+});
+
+Given('a ready Development Workspace contains an existing uncommitted source edit', async function () {
+  await prepareReadyDevelopmentChat(this, 'Dirty preview change');
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'index.html', 'before');
+  await startPreviewDetectionTurn(this);
+});
+
+When('the turn completes after creating or changing a website source file', async function () {
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'index.html', 'after');
+  this.previewTurnResponse = await this.previewTurn;
+});
+
+When('an Agent Turn completes after changing that source file again', async function () {
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'index.html', 'again');
+  this.previewTurnResponse = await this.previewTurn;
+});
+
+When('the turn completes after changing only files under openspec and .claude', async function () {
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, 'openspec/spec.md', 'ignored');
+  await this.apiClient.editWorkspaceFile(this.developmentChat.id, '.claude/settings.json', '{}');
+  this.previewTurnResponse = await this.previewTurn;
+});
+
+Then('a preview-relevant change is reported for that Development Chat', async function () {
+  assert.equal(this.previewTurnResponse.status(), 200);
+  assert.match(await this.previewTurnResponse.text(), /event: preview-change\ndata: .*"data":"changed"/);
+});
+
+Then('no preview-relevant change is reported for that Development Chat', async function () {
+  assert.equal(this.previewTurnResponse.status(), 200);
+  assert.doesNotMatch(await this.previewTurnResponse.text(), /event: preview-change\n/);
+});
+
 Given(
   'an authenticated user has explored a ready Development Workspace',
   async function () {

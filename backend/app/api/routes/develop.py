@@ -42,6 +42,10 @@ from app.services.develop_agent import (
     execute_exploration,
     execute_proposal,
 )
+from app.services.develop_preview_detection import (
+    relevant_turn_change,
+    snapshot_workspace,
+)
 from app.services.develop_turns import (
     ChatTurnActiveError,
     TurnEvent,
@@ -191,6 +195,9 @@ def _run_streamed_exploration(
             turn.emit("error", "Agent provider is not configured")
             develop_turn_manager.finish_turn(turn, TurnTerminalState.failed)
             return
+        before = snapshot_workspace(
+            root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id
+        )
         try:
             completion = execute_exploration(
                 root=settings.DEVELOP_WORKSPACE_ROOT,
@@ -260,6 +267,12 @@ def _run_streamed_exploration(
         session.add(assistant_message)
         session.add(chat)
         session.commit()
+        if completion is not None:
+            after = snapshot_workspace(
+                root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id
+            )
+            if relevant_turn_change(before, after):
+                turn.emit("preview-change", "changed")
         develop_turn_manager.finish_turn(turn, state, content)
 
 
@@ -963,6 +976,7 @@ def explore_development_chat(
     session.add(chat)
     session.commit()
 
+    before = snapshot_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
     try:
         completion = execute_exploration(
             root=settings.DEVELOP_WORKSPACE_ROOT,
@@ -1037,6 +1051,9 @@ def explore_development_chat(
     session.add(chat)
     session.commit()
     session.refresh(assistant_message)
+    after = snapshot_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+    if relevant_turn_change(before, after):
+        turn.emit("preview-change", "changed")
     develop_turn_manager.finish_turn(
         turn, TurnTerminalState.completed, "Agent Turn completed"
     )

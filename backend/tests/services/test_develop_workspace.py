@@ -4,6 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from app.services.develop_preview_detection import (
+    relevant_turn_change,
+    snapshot_workspace,
+)
 from app.services.develop_workspace import (
     FakeCommandRunner,
     WorkspacePathError,
@@ -29,6 +33,60 @@ class RecordingCommandRunner:
         self.calls.append((tuple(command), cwd, dict(env)))
         if command[0] == "git":
             Path(command[-1]).mkdir()
+
+
+def test_preview_snapshots_detect_new_and_repeated_dirty_edits(tmp_path: Path) -> None:
+    chat_id = uuid.uuid4()
+    workspace = tmp_path / str(chat_id)
+    workspace.mkdir()
+    source = workspace / "index.html"
+    before = snapshot_workspace(root=tmp_path, chat_id=chat_id)
+    source.write_text("first")
+    dirty = snapshot_workspace(root=tmp_path, chat_id=chat_id)
+    source.write_text("second")
+    changed_again = snapshot_workspace(root=tmp_path, chat_id=chat_id)
+
+    assert relevant_turn_change(before, dirty) is True
+    assert relevant_turn_change(dirty, changed_again) is True
+    assert relevant_turn_change(changed_again, changed_again) is False
+
+
+def test_preview_ignore_rules_cannot_be_overridden_by_checkout(tmp_path: Path) -> None:
+    chat_id = uuid.uuid4()
+    workspace = tmp_path / str(chat_id)
+    workspace.mkdir()
+    (workspace / "preview-ignore.txt").write_text("!openspec/\n!.claude/\n")
+    before = snapshot_workspace(root=tmp_path, chat_id=chat_id)
+    for directory in (
+        "openspec",
+        ".claude",
+        ".git",
+        "frontend/node_modules",
+        "frontend/dist",
+    ):
+        target = workspace / directory
+        target.mkdir(parents=True)
+        (target / "index.html").write_text("ignored")
+    (workspace / "openspec" / "preview-ignore.txt").write_text("!openspec/\n")
+    (workspace / ".claude" / "preview-ignore.txt").write_text("!openspec/\n")
+
+    assert (
+        relevant_turn_change(before, snapshot_workspace(root=tmp_path, chat_id=chat_id))
+        is False
+    )
+
+
+def test_preview_snapshot_returns_unavailable_when_budget_exceeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat_id = uuid.uuid4()
+    workspace = tmp_path / str(chat_id)
+    workspace.mkdir()
+    (workspace / "index.html").write_text("too large")
+    monkeypatch.setattr("app.services.develop_preview_detection.MAX_BYTES", 1)
+
+    assert snapshot_workspace(root=tmp_path, chat_id=chat_id) is None
+    assert relevant_turn_change({}, None) is None
 
 
 def test_validate_workspace_path_requires_expected_direct_child(
