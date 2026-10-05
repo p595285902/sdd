@@ -1,18 +1,21 @@
 ## Context
 
-Classification describes likely content, while the private runtime can start a chat workload. Neither knows a repository's install, start commands or ports.
+Classification describes likely content, while the private runtime can start a chat workload. Neither knows a repository's install, start commands or ports. The existing Python-only workload has a read-only checkout and no networking, so it cannot build a typical website, acquire dependencies or run a website that calls a local API.
 
 ## Goals / Non-Goals
 
-**Goals:** Produce bounded chat-specific startup instructions or a request for user input.
+**Goals:** Resolve and execute supported documented dependency and startup commands for a website and API in one chat-private workload; report reachable localhost services and bounded failures.
 
-**Non-Goals:** Guess commands, require another approval, or parse/execute Compose (later change).
+**Non-Goals:** Guess commands, require another approval, parse/execute Compose or provision its database and auxiliary services (later change), trigger startup on Context/Agent Turns (later change), or expose services through a browser origin/gateway (later changes). This change verifies localhost inside the workload, not browser access from the user's machine.
 
 ## Decisions
 
-- Supply the root README and classifier result to a bounded agent selection step. Return structured commands, working directory, local ports and optional initial paths. Resolve user-provided pointers only within the validated checkout and retain their choice per chat.
-- When no usable instructions exist, ask in chat and wait; a reply containing commands or a document pointer completes resolution without a file-changing turn. Execute only in the isolated workload, with startup time/port limits and redacted failures.
+- Supply the root README and classifier result to a bounded agent selection step. Treat README text as untrusted data, not an instruction to override isolation policy. Return ordered dependency/setup commands, long-lived website/API commands, checkout-relative working directories, local ports and optional initial paths. Resolve user-provided pointers only within the validated checkout (including symlink resolution); retain the answer per chat. Reject missing, ambiguous or unsupported instructions, including Compose, host-control and `.env`-sourcing commands, and ask in chat for supported commands instead of guessing. A reply can complete resolution without a file-changing turn.
+- Use a pinned, maintained private workload image with a shell, Python/uv and Node.js/npm/Bun; validate availability of the documented tools before starting. Enable narrowly scoped package downloads from allowlisted registries via controlled egress or prefilled caches, without general outbound access or reachability to host/private/backend networks. Do not inject application credentials or inherit backend environment variables. Unsupported package sources or services must produce a clear chat-local request for alternative instructions, not a widened network policy.
+- Run dependency/setup steps and servers with bounded arguments, validated checkout-relative working directories and ports, and explicit per-stage timeouts; keep long-lived servers running only for the workload lifetime. Give build outputs and dependency installs writable storage scoped to this chat's checkout, and bounded temporary/cache space; prevent symlink/path escapes or writes to other checkouts and keep the rest of the container read-only. Preserve non-root execution, dropped capabilities, resource/pid limits, no host port publication and no Docker socket in the workload. Do not treat README/user-supplied commands as trusted, even without another approval prompt.
+- Allow the website and API to communicate over `localhost` inside the same isolated workload and check their documented HTTP ports for readiness there. Registration for later authenticated browser forwarding is separate; do not add a host bind or browser URL here. Stop child process groups on failed setup/readiness, timeout, idle expiry, restart or chat deletion; return bounded, redacted errors to the owning chat only.
 
 ## Risks / Trade-offs
 
-- The no-approval choice trusts README content and agent selection; workload isolation is a prerequisite, not optional hardening.
+- The no-approval choice executes untrusted checkout code; workload isolation and limited registry egress are prerequisites, not optional hardening. Dependency install scripts can run arbitrary code inside the workload, so constrain their write/network/CPU/memory/process and lifetime privileges just like server processes.
+- Writable checkout artifacts can outlive a stopped container in that chat's workspace; bound disk use and clean temporary processes/cache on expiry or deletion without modifying any other chat. A README that only documents Compose or needs database credentials cannot be faithfully started here; ask for a viable alternative rather than falsely reporting success.
