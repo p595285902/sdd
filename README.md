@@ -98,6 +98,6 @@ docker compose run --rm backend bash scripts/prestart.sh
 docker compose watch
 
 # rebuild to see new changes 
-docker compose build backend && docker compose run --rm backend bash scripts/prestart.sh && docker compose up -d backend
+docker compose up -d --no-deps --force-recreate backend && docker compose run --rm backend bash scripts/prestart.sh && docker compose up -d backend
 ```
 
