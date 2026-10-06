@@ -6,7 +6,8 @@ Some documented website startups need an API or other service, and the repositor
 
 - Use Compose only when the root README describes an existing Compose file in the selected checkout.
 - Start the website and required API in a chat-unique private project; preserve non-Compose startup when no documented Compose file exists.
-- Never generate Compose files or expose host resources and public ports.
+- Validate the full resolved dependency graph in a trusted controller adapter before launch; stage bounded checkout-local build inputs and constrain image acquisition, networks and resources for every service.
+- Never generate Compose files or expose host resources, backend secrets or public ports. Reject unsupported graphs and clean up only the owning chat's resources.
 
 ## Capabilities
 
@@ -20,4 +21,4 @@ None.
 
 ## Impact
 
-Trusted preview controller's Compose adapter and multi-chat lifecycle tests. Follows instruction resolution and isolated runtime.
+Trusted preview controller's Compose adapter, pinned parser/tooling, per-service isolation and multi-chat lifecycle tests. Follows instruction resolution and isolated runtime; browser forwarding remains a later change.
