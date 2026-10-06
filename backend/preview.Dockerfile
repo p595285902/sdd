@@ -11,4 +11,5 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 COPY backend/app/services/preview_controller.py /controller/preview_controller.py
 COPY backend/app/services/preview_registry_proxy.py /controller/preview_registry_proxy.py
 COPY backend/app/services/preview_proxy_client.py /controller/preview_proxy_client.py
+COPY backend/app/services/preview_workspace_sync.py /controller/preview_workspace_sync.py
 CMD ["python", "/controller/preview_controller.py"]

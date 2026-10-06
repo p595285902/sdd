@@ -188,7 +188,7 @@ def start(chat_id: uuid.UUID) -> dict[str, str]:
 def create_workload(chat_id: uuid.UUID, socket_volume: str) -> dict[str, str]:
     configuration = {
         "Image": IMAGE,
-        "Cmd": ["sh", "-c", "cp -R /checkout/. /workspace/ && exec python /controller/preview_proxy_client.py"],
+        "Cmd": ["python", "/controller/preview_proxy_client.py"],
         "User": "65534:65534",
         "WorkingDir": "/workspace",
         "Labels": labels(chat_id),
@@ -226,6 +226,15 @@ def create_workload(chat_id: uuid.UUID, socket_volume: str) -> dict[str, str]:
     code, _ = docker("POST", f"/containers/{result['Id']}/start")
     if code != 204:
         raise RuntimeError(f"Unable to start preview workload ({code})")
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            run_command(chat_id, {"cwd": ".", "argv": ["python", "-c", "from pathlib import Path; assert Path('/tmp/preview-source-ready').is_file()"]}, timeout=1)
+            break
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Preview source sync failed or timed out") from None
+            time.sleep(0.1)
     with activity_lock:
         failed_services.discard(chat_id)
     return status(chat_id)

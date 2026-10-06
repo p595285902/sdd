@@ -72,6 +72,9 @@ Then('its running preview remains available for hot reload', async function () {
   assert.equal(result.body.state, 'ready');
   assert.equal(result.body.id, this.startupResponse.body.id);
   assert.match(this.previewWorkloadPage.serviceResponse(this.startupChat.id, 8765), /API reachable true/);
+  await this.apiClient.editWorkspaceFile(this.startupChat.id, 'api/index.html', 'Live source update');
+  await this.previewWorkloadPage.waitForServiceResponse(this.startupChat.id, 8766, 'Live source update');
+  assert.equal((await this.previewWorkloadPage.contextStatus(this.startupChat.id)).body.id, result.body.id);
 });
 
 Given('a Development Chat has an API-only checkout with documented Swagger startup', async function () {

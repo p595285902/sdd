@@ -256,6 +256,105 @@ def test_preview_worker_restart_replaces_only_selected_chat(
     assert calls == [("stop", chat_id), ("start", chat_id)]
 
 
+def test_preview_workload_waits_for_initial_source_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PREVIEW_WORKSPACE_VOLUME", "test-workspaces")
+    monkeypatch.setenv("PREVIEW_PROJECT", "test-project")
+    monkeypatch.setenv("PREVIEW_IMAGE", "test-image")
+    worker = importlib.import_module("app.services.preview_controller")
+    chat_id = uuid.uuid4()
+    checks: list[dict] = []
+
+    def docker(method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
+        assert method == "POST"
+        if path.startswith("/containers/create"):
+            assert payload is not None
+            return 201, {"Id": "workload"}
+        assert path == "/containers/workload/start"
+        return 204, {}
+
+    def run_command(selected: uuid.UUID, command: dict, *, timeout: float) -> None:
+        assert selected == chat_id
+        assert timeout == 1
+        checks.append(command)
+        if len(checks) == 1:
+            raise RuntimeError("Preview command failed")
+
+    monkeypatch.setattr(worker, "docker", docker)
+    monkeypatch.setattr(worker, "run_command", run_command)
+    monkeypatch.setattr(worker, "status", lambda selected: {"state": "running"})
+    monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
+
+    assert worker.create_workload(chat_id, "socket") == {"state": "running"}
+    assert checks == [
+        {"cwd": ".", "argv": ["python", "-c", "from pathlib import Path; assert Path('/tmp/preview-source-ready').is_file()"]},
+        {"cwd": ".", "argv": ["python", "-c", "from pathlib import Path; assert Path('/tmp/preview-source-ready').is_file()"]},
+    ]
+
+
+def test_preview_workspace_sync_tracks_source_without_exposing_private_files(
+    tmp_path: Path,
+) -> None:
+    from app.services.preview_workspace_sync import sync_workspace
+
+    checkout = tmp_path / "chat" / "checkout"
+    workspace = tmp_path / "chat" / "workspace"
+    checkout.mkdir(parents=True)
+    workspace.mkdir()
+    (checkout / "site").mkdir()
+    source = checkout / "site" / "index.html"
+    source.write_text("before")
+    (checkout / ".env").write_text("secret")
+    (checkout / ".claude").mkdir()
+    (checkout / ".claude" / "notes.md").write_text("hidden")
+    other_chat = tmp_path / "other-chat-secret"
+    other_chat.write_text("private")
+    (checkout / "site" / "outside").symlink_to(other_chat)
+    (checkout / "site" / "server.key").write_text("private key")
+
+    previous = sync_workspace(checkout, workspace, {})
+    assert (workspace / "site" / "index.html").read_text() == "before"
+    assert not (workspace / ".env").exists()
+    assert not (workspace / ".claude").exists()
+    assert not (workspace / "site" / "outside").exists()
+    assert not (workspace / "site" / "server.key").exists()
+
+    (workspace / "site" / "node_modules").mkdir()
+    (workspace / "site" / "node_modules" / "installed").write_text("dependency")
+    source.write_text("after")
+    current = sync_workspace(checkout, workspace, previous)
+    assert (workspace / "site" / "index.html").read_text() == "after"
+    assert (workspace / "site" / "node_modules" / "installed").read_text() == "dependency"
+    source.unlink()
+    sync_workspace(checkout, workspace, current)
+    assert not (workspace / "site" / "index.html").exists()
+
+
+def test_preview_workspace_sync_rejects_redirected_output_and_large_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import preview_workspace_sync
+
+    checkout = tmp_path / "checkout"
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    (checkout / "site").mkdir(parents=True)
+    workspace.mkdir()
+    outside.mkdir()
+    (checkout / "site" / "index.html").write_text("content")
+    (workspace / "site").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="redirected directory"):
+        preview_workspace_sync.sync_workspace(checkout, workspace, {})
+    assert not (outside / "index.html").exists()
+
+    (workspace / "site").unlink()
+    monkeypatch.setattr(preview_workspace_sync, "MAX_BYTES", 2)
+    with pytest.raises(RuntimeError, match="size limit"):
+        preview_workspace_sync.sync_workspace(checkout, workspace, {})
+    assert not (workspace / "site" / "index.html").exists()
+
+
 def test_cleanup_workspace_is_idempotent(tmp_path: Path) -> None:
     cleanup_workspace(root=tmp_path, chat_id=uuid.uuid4())
 

@@ -125,6 +125,15 @@ http.createServer((request, response) => {
       'import urllib.request; print(urllib.request.build_opener(urllib.request.ProxyHandler({})).open("http://127.0.0.1:' + port + '/").read().decode())');
   }
 
+  async waitForServiceResponse(chatId, port, expected) {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      if (this.serviceResponse(chatId, port).includes(expected)) return;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.fail(`Preview service did not serve updated source: ${expected}`);
+  }
+
   installedDependency(chatId) {
     return this.docker('exec', this.containerIds(chatId)[0], 'test', '-f', '/workspace/site/node_modules/is-number/package.json') === '';
   }
