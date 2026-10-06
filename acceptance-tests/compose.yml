@@ -2,6 +2,10 @@ services:
   db:
     ports: []
 
+  preview-controller:
+    environment:
+      PREVIEW_DIAGNOSTICS: "1"
+
   backend:
     command: ["fastapi", "run", "--workers", "1"]
     ports:

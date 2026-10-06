@@ -59,6 +59,28 @@ def _read_text(path: Path) -> str | None:
         return None
 
 
+def read_preview_instructions(
+    *, root: Path, chat_id: uuid.UUID, pointer: str = "README.md"
+) -> str | None:
+    workspace = workspace_path(root=root, chat_id=chat_id).resolve(strict=True)
+    relative = Path(pointer)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("Instruction pointer must be checkout-relative")
+    try:
+        target = (workspace / relative).resolve(strict=True)
+        target.relative_to(workspace)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        raise ValueError("Instruction pointer is outside the checkout") from None
+    try:
+        if not target.is_file() or target.stat().st_size > MAX_TEXT_BYTES:
+            return None
+        return target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+
 def _files(workspace: Path) -> set[str] | None:
     deadline = time.monotonic() + MAX_SECONDS
     files: set[str] = set()

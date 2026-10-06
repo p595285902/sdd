@@ -33,6 +33,13 @@ class PreviewController:
     def activity(self, chat_id: uuid.UUID) -> dict[str, str]:
         return self._request("POST", f"/workloads/{chat_id}/activity")
 
+    def launch(self, chat_id: uuid.UUID, plan: dict) -> dict[str, str]:
+        workspace_path(root=self.root, chat_id=chat_id)
+        with httpx.Client(base_url=self.url, timeout=180) as client:
+            response = client.post(f"/workloads/{chat_id}/launch", json=plan)
+            response.raise_for_status()
+            return response.json()
+
     def _request(self, method: str, path: str) -> dict[str, str]:
         with httpx.Client(base_url=self.url, timeout=10) as client:
             response = client.request(method, path)

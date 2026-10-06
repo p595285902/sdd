@@ -43,7 +43,7 @@ function composeArgs(projectName, ...args) {
   return [
     'compose',
     '--progress',
-    'quiet',
+    'json',
     '--project-name',
     projectName,
     '--file',

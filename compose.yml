@@ -108,18 +108,20 @@ services:
       - traefik.http.routers.backend-http.entrypoints=http
 
   preview-controller:
-    image: python:3.14-alpine
+    image: ${COMPOSE_PROJECT_NAME:-sdd}-preview:runtime
+    build:
+      context: .
+      dockerfile: backend/preview.Dockerfile
     command: ["python", "/controller/preview_controller.py"]
     environment:
       PREVIEW_WORKSPACE_VOLUME: ${COMPOSE_PROJECT_NAME:-sdd}_sdd-develop-workspaces
       PREVIEW_PROJECT: ${COMPOSE_PROJECT_NAME:-sdd}
-      PREVIEW_IMAGE: python:3.14-alpine
+      PREVIEW_IMAGE: ${COMPOSE_PROJECT_NAME:-sdd}-preview:runtime
     networks:
       - preview-control
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sdd-develop-workspaces:/develop-workspaces:ro
-      - ./backend/app/services/preview_controller.py:/controller/preview_controller.py:ro
     labels:
       - traefik.enable=false
 

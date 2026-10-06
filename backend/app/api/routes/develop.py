@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, update
 from sqlmodel import Session, col, func, select
 
@@ -47,6 +48,7 @@ from app.services.develop_preview_detection import (
     relevant_turn_change,
     snapshot_workspace,
 )
+from app.services.develop_preview_instructions import resolve_preview_plan
 from app.services.develop_preview_runtime import PreviewController
 from app.services.develop_turns import (
     ChatTurnActiveError,
@@ -70,6 +72,13 @@ logger = logging.getLogger(__name__)
 preview_controller = PreviewController(
     root=settings.DEVELOP_WORKSPACE_ROOT, url="http://preview-controller:8090"
 )
+
+
+class PreviewLaunchRequest(BaseModel):
+    answer: str | None = Field(default=None, max_length=16384)
+    pointer: str = Field(default="README.md", max_length=240)
+
+
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
@@ -573,6 +582,60 @@ def restart_development_preview(
         raise HTTPException(status_code=404, detail="Development Workspace not found")
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="Preview controller unavailable")
+
+
+@router.post("/{chat_id}/preview/launch", response_model=dict[str, str])
+def launch_development_preview(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID,
+    request: PreviewLaunchRequest,
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not chat.workspace_ready:
+        raise HTTPException(status_code=409, detail="Development Workspace is not ready")
+    provider_key = settings.OPENAI_API_KEY
+    if provider_key is None:
+        raise HTTPException(status_code=503, detail="Agent provider is not configured")
+    if request.answer:
+        session.add(DevelopmentMessage(
+            role="user", content=request.answer, chat_id=chat.id,
+            activity=[{"preview_instruction_answer": "true"}],
+        ))
+        session.commit()
+    previous = session.exec(
+        select(DevelopmentMessage)
+        .where(DevelopmentMessage.chat_id == chat.id, DevelopmentMessage.role == "user")
+        .order_by(col(DevelopmentMessage.created_at).desc(), col(DevelopmentMessage.id).desc())
+    ).all()
+    answer = request.answer or next(
+        (message.content for message in previous if any(
+            part.get("preview_instruction_answer") == "true" for part in message.activity
+        )), None,
+    )
+    try:
+        plan = resolve_preview_plan(
+            root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id,
+            provider_key=provider_key.get_secret_value(),
+            provider_base_url=str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None,
+            model=settings.DEVELOP_AGENT_MODEL, answer=answer, pointer=request.pointer,
+        )
+    except ValueError:
+        plan = None
+    except (httpx.HTTPError, KeyError, StopIteration, TypeError):
+        raise HTTPException(status_code=502, detail="Preview instruction resolution failed") from None
+    if plan is None:
+        prompt = (
+            "Please provide non-Compose dependency and website/API startup commands "
+            "with working directories and localhost ports, or a checkout-local pointer. "
+            "Docker Compose, .env sourcing and external services are not supported."
+        )
+        session.add(DevelopmentMessage(role="assistant", content=prompt, chat_id=chat.id))
+        session.commit()
+        return {"state": "needs_instructions", "message": prompt}
+    try:
+        preview_controller.start(chat.id)
+        return preview_controller.launch(chat.id, plan.model_dump())
+    except (httpx.HTTPError, RuntimeError, FileNotFoundError):
+        raise HTTPException(status_code=502, detail="Preview startup failed or timed out") from None
 
 
 @router.post("/{chat_id}/preview/activity", response_model=dict[str, str])

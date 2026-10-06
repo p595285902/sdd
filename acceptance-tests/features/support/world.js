@@ -28,7 +28,7 @@ class AcceptanceWorld extends World {
   }
 
   async dispose() {
-    this.previewWorkloadPage.stopAll();
+    await this.previewWorkloadPage.stopAll();
     await this.page?.close();
     await this.context?.close();
     await Promise.all(this.apiContexts.map((api) => api.dispose()));
