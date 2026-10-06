@@ -1,6 +1,6 @@
 ## 1. Startup triggers
 
-- [ ] 1.1 Add owner-checked first-open startup and status with initial website/Swagger selection.
+- [x] 1.1 Add owner-checked first-open startup and status with initial website/Swagger selection.
 - [ ] 1.2 Wire completed relevant turns to idempotent startup while preserving healthy servers and ignoring metadata-only edits.
 
 ## 2. Acceptance

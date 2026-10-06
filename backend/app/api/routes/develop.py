@@ -48,6 +48,7 @@ from app.services.develop_preview_detection import (
     relevant_turn_change,
     snapshot_workspace,
 )
+from app.services.develop_preview_classification import classify_workspace
 from app.services.develop_preview_instructions import resolve_preview_plan
 from app.services.develop_preview_runtime import PreviewController
 from app.services.develop_turns import (
@@ -90,6 +91,59 @@ SSE_KIND_ALIASES = {
     "started": "status",
     "terminal": "done",
 }
+
+
+def _preview_status(chat_id: uuid.UUID) -> dict[str, str]:
+    try:
+        workload = preview_controller.status(chat_id)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 404:
+            return {"state": "stopped"}
+        raise
+    if workload["state"] != "running":
+        return {"state": "failed" if workload["state"] == "failed" else "stopped"}
+    if "initial_port" in workload:
+        return {**workload, "state": "ready"}
+    return {"state": "starting"}
+
+
+def _start_preview(session: Session, chat: DevelopmentChat) -> dict[str, str]:
+    if not chat.workspace_ready:
+        return {"state": "unavailable"}
+    try:
+        current = _preview_status(chat.id)
+    except httpx.HTTPError:
+        logger.exception("Preview status unavailable for chat %s", chat.id)
+        return {"state": "failed"}
+    if current["state"] in ("ready", "starting"):
+        return current
+    provider_key = settings.OPENAI_API_KEY
+    if provider_key is None:
+        return {"state": "unavailable"}
+    answer = next((message.content for message in session.exec(
+        select(DevelopmentMessage).where(
+            DevelopmentMessage.chat_id == chat.id, DevelopmentMessage.role == "user"
+        ).order_by(col(DevelopmentMessage.created_at).desc(), col(DevelopmentMessage.id).desc())
+    ).all() if any(part.get("preview_instruction_answer") == "true" for part in message.activity)), None)
+    try:
+        plan = resolve_preview_plan(
+            root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id,
+            provider_key=provider_key.get_secret_value(),
+            provider_base_url=str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None,
+            model=settings.DEVELOP_AGENT_MODEL, answer=answer,
+        )
+        if plan is None:
+            return {"state": "unavailable"}
+        payload = plan.model_dump()
+        classification = classify_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+        if plan.website is None and classification.kind == "api_documentation":
+            payload["initial_path"] = classification.entry_point
+        preview_controller.start(chat.id)
+        preview_controller.launch(chat.id, payload)
+        return _preview_status(chat.id)
+    except (ValueError, FileNotFoundError, RuntimeError, httpx.HTTPError):
+        logger.exception("Preview startup failed for chat %s", chat.id)
+        return {"state": "failed"}
 
 
 def _get_chat(
@@ -287,6 +341,10 @@ def _run_streamed_exploration(
             )
             if relevant_turn_change(before, after):
                 turn.emit("preview-change", "changed")
+                try:
+                    _start_preview(session, chat)
+                except httpx.HTTPError:
+                    logger.exception("Preview startup unavailable for chat %s", chat.id)
         develop_turn_manager.finish_turn(turn, state, content)
 
 
@@ -298,6 +356,7 @@ def _run_streamed_apply(*, chat_id: uuid.UUID, turn: TurnSession) -> None:
                 turn, TurnTerminalState.failed, "Development Chat not found"
             )
             return
+        before = snapshot_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
         provider_key = settings.OPENAI_API_KEY
         if provider_key is None:
             turn.emit("error", "Agent provider is not configured")
@@ -364,6 +423,14 @@ def _run_streamed_apply(*, chat_id: uuid.UUID, turn: TurnSession) -> None:
         session.add(assistant_message)
         session.add(chat)
         session.commit()
+        if completion is not None:
+            after = snapshot_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+            if relevant_turn_change(before, after):
+                turn.emit("preview-change", "changed")
+                try:
+                    _start_preview(session, chat)
+                except httpx.HTTPError:
+                    logger.exception("Preview startup unavailable for chat %s", chat.id)
         develop_turn_manager.finish_turn(turn, state, content)
 
 
@@ -567,6 +634,27 @@ def delete_development_chat(
     return Message(message="Development Chat deleted")
 
 
+@router.post("/{chat_id}/preview/start", response_model=dict[str, str])
+def start_development_preview(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    return _start_preview(session, chat)
+
+
+@router.get("/{chat_id}/preview/status", response_model=dict[str, str])
+def development_preview_status(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> Any:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not chat.workspace_ready:
+        return {"state": "unavailable"}
+    try:
+        return _preview_status(chat.id)
+    except httpx.HTTPError:
+        return {"state": "failed"}
+
+
 @router.post("/{chat_id}/preview/restart", response_model=dict[str, str])
 def restart_development_preview(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
@@ -632,8 +720,12 @@ def launch_development_preview(
         session.commit()
         return {"state": "needs_instructions", "message": prompt}
     try:
+        payload = plan.model_dump()
+        classification = classify_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+        if plan.website is None and classification.kind == "api_documentation":
+            payload["initial_path"] = classification.entry_point
         preview_controller.start(chat.id)
-        return preview_controller.launch(chat.id, plan.model_dump())
+        return preview_controller.launch(chat.id, payload)
     except (httpx.HTTPError, RuntimeError, FileNotFoundError):
         raise HTTPException(status_code=502, detail="Preview startup failed or timed out") from None
 

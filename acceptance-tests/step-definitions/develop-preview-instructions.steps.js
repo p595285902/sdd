@@ -83,9 +83,11 @@ Then('neither service has a published host port or access to backend secrets', f
   this.previewWorkloadPage.expectNoExternalNetwork(this.instructionChat.id);
 });
 
-Then('startup fails with a redacted diagnostic visible in that chat', function () {
+Then('startup fails with a redacted diagnostic visible in that chat', async function () {
   assert.equal(this.previewWorkloadPage.lastLaunch.status, 502);
   assert.match(this.previewWorkloadPage.lastLaunch.body.detail, /startup failed or timed out/i);
+  const status = await this.previewWorkloadPage.contextStatus(this.instructionChat.id);
+  assert.equal(status.body.state, 'failed');
 });
 
 Then('its startup processes are stopped without affecting another chat\'s workload', function () {

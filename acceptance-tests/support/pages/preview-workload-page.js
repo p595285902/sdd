@@ -92,6 +92,34 @@ http.createServer((request, response) => {
     return this.lastLaunch;
   }
 
+  async openContext(chatId) {
+    this.chatIds.push(chatId);
+    const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
+      `/api/v1/develop/chats/${chatId}/preview/start`);
+    return { status: response.status(), body: await response.json() };
+  }
+
+  async contextStatus(chatId, token = this.world.apiClient.superuserToken) {
+    const response = await this.world.apiClient.request(token, 'get',
+      `/api/v1/develop/chats/${chatId}/preview/status`);
+    return { status: response.status(), body: await response.json() };
+  }
+
+  async completedTurn(chatId, filename) {
+    const plan = this.documentedPlan();
+    await this.selectInstructions(plan);
+    await this.world.apiClient.configureFakeLlm([
+      { kind: 'delay', delay_seconds: 3, text: 'Turn finished' },
+      { kind: 'text', text: JSON.stringify(plan) },
+    ]);
+    const turn = this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
+      `/api/v1/develop/chats/${chatId}/messages/explore/stream`, { data: { content: 'Edit checkout' } });
+    await this.world.apiClient.waitForAgentTurn(this.world.apiClient.superuserToken, chatId);
+    await this.world.apiClient.editWorkspaceFile(chatId, filename, `updated ${Date.now()}`);
+    const result = await turn;
+    assert.equal(result.status(), 200, await result.text());
+  }
+
   serviceResponse(chatId, port) {
     return this.docker('exec', this.containerIds(chatId)[0], 'python', '-c',
       'import urllib.request; print(urllib.request.build_opener(urllib.request.ProxyHandler({})).open("http://127.0.0.1:' + port + '/").read().decode())');

@@ -18,6 +18,8 @@ IMAGE = os.environ["PREVIEW_IMAGE"]
 logger = logging.getLogger(__name__)
 IDLE_SECONDS = 300
 activity: dict[uuid.UUID, float] = {}
+ready_services: dict[uuid.UUID, dict[str, str]] = {}
+failed_services: set[uuid.UUID] = set()
 activity_lock = threading.Lock()
 resource_lock = threading.RLock()
 
@@ -126,8 +128,15 @@ def inspect(chat_id: uuid.UUID) -> dict | None:
 def status(chat_id: uuid.UUID) -> dict[str, str]:
     container = inspect(chat_id)
     if container is None:
+        with activity_lock:
+            if chat_id in failed_services:
+                return {"state": "failed"}
         raise FileNotFoundError("Preview workload not found")
-    return {"id": container["Id"], "state": container["State"]["Status"]}
+    result = {"id": container["Id"], "state": container["State"]["Status"]}
+    with activity_lock:
+        if container["State"]["Running"]:
+            result.update(ready_services.get(chat_id, {}))
+    return result
 
 
 def start(chat_id: uuid.UUID) -> dict[str, str]:
@@ -217,6 +226,8 @@ def create_workload(chat_id: uuid.UUID, socket_volume: str) -> dict[str, str]:
     code, _ = docker("POST", f"/containers/{result['Id']}/start")
     if code != 204:
         raise RuntimeError(f"Unable to start preview workload ({code})")
+    with activity_lock:
+        failed_services.discard(chat_id)
     return status(chat_id)
 
 
@@ -239,6 +250,8 @@ def stop(chat_id: uuid.UUID) -> dict[str, str]:
     remove_resource(f"/volumes/{resource_name(chat_id, 'socket')}")
     with activity_lock:
         activity.pop(chat_id, None)
+        ready_services.pop(chat_id, None)
+        failed_services.discard(chat_id)
     return {"state": "stopped"}
 
 
@@ -291,15 +304,19 @@ def run_command(
 
 
 def launch(chat_id: uuid.UUID, plan: dict) -> dict[str, str]:
-    if status(chat_id)["state"] != "running":
+    current = status(chat_id)
+    if current["state"] != "running":
         raise FileNotFoundError("Preview workload not running")
+    if "initial_port" in current:
+        return current
     try:
         for command in plan["setup"]:
             run_command(chat_id, command, timeout=60)
-        for role in ("api", "website"):
+        roles = [role for role in ("api", "website") if plan.get(role)]
+        for role in roles:
             server = plan[role]
             run_command(chat_id, server, timeout=5, detached=True)
-        for role in ("api", "website"):
+        for role in roles:
             server = plan[role]
             port = int(server["port"])
             if port < 1024 or port > 65535:
@@ -321,10 +338,22 @@ def launch(chat_id: uuid.UUID, plan: dict) -> dict[str, str]:
                         raise RuntimeError("Preview startup timed out") from None
                     time.sleep(0.25)
         heartbeat(chat_id)
-        return {"state": "running", "website_port": str(plan["website"]["port"]), "api_port": str(plan["api"]["port"])}
+        selected = plan.get("website") or plan["api"]
+        details = {
+            "initial_port": str(selected["port"]),
+            "initial_path": plan.get("initial_path", selected["path"]),
+            "api_port": str(plan["api"]["port"]),
+        }
+        if plan.get("website"):
+            details["website_port"] = str(plan["website"]["port"])
+        with activity_lock:
+            ready_services[chat_id] = details
+        return {"state": "running", **details}
     except (OSError, RuntimeError, KeyError, ValueError, TypeError) as error:
         logger.error("Preview launch failed: %s", error)
         stop(chat_id)
+        with activity_lock:
+            failed_services.add(chat_id)
         raise RuntimeError("Preview startup failed or timed out") from None
 
 
