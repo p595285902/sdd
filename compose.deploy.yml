@@ -48,6 +48,7 @@ services:
     restart: always
     environment:
       FRONTEND_HOST: https://${DOMAIN:?Variable not set}
+      PREVIEW_ORIGIN: https://preview.${DOMAIN:?Variable not set}
     labels:
       # Route HTTPS traffic for this domain
       - traefik.http.routers.backend-https.rule=Host(`${DOMAIN:?Variable not set}`)
@@ -55,6 +56,11 @@ services:
       - traefik.http.routers.backend-https.tls=true
       # Use the Let's Encrypt resolver
       - traefik.http.routers.backend-https.tls.certresolver=le
+      - traefik.http.routers.preview-https.rule=Host(`preview.${DOMAIN:?Variable not set}`) && PathPrefix(`/api/v1/develop/chats/preview-browser`)
+      - traefik.http.routers.preview-https.entrypoints=https
+      - traefik.http.routers.preview-https.tls=true
+      - traefik.http.routers.preview-https.tls.certresolver=le
+      - traefik.http.routers.preview-https.service=backend
 
 volumes:
   # Create a volume to store the certificates, even if the container is recreated

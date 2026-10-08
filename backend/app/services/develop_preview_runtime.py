@@ -1,5 +1,7 @@
+import base64
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -32,6 +34,16 @@ class PreviewController:
 
     def activity(self, chat_id: uuid.UUID) -> dict[str, str]:
         return self._request("POST", f"/workloads/{chat_id}/activity")
+
+    def fetch(self, chat_id: uuid.UUID, path: str, query: str) -> dict:
+        if len(path) + len(query) > 2000 or not path.startswith("/") or path.startswith("//"):
+            raise ValueError("Invalid preview path")
+        with httpx.Client(base_url=self.url, timeout=20) as client:
+            response = client.get(f"/workloads/{chat_id}/browser?path={quote(path + ('?' + query if query else ''), safe='')}")
+            response.raise_for_status()
+            result = response.json()
+            return {"status": result["status"], "content_type": result["content_type"],
+                    "body": base64.b64decode(result["body"], validate=True)}
 
     def launch(self, chat_id: uuid.UUID, plan: dict) -> dict[str, str]:
         workspace_path(root=self.root, chat_id=chat_id)

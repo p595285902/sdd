@@ -1,21 +1,25 @@
 import base64
+import hashlib
 import json
 import logging
 import threading
 import uuid
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+import jwt
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, update
 from sqlmodel import Session, col, func, select
 
 from app.api.deps import CurrentUser, SessionDep
 from app.core.config import settings
+from app.core.security import ALGORITHM
 from app.core.db import engine
 from app.models import (
     DevelopmentChat,
@@ -80,6 +84,42 @@ preview_controller = PreviewController(
 class PreviewLaunchRequest(BaseModel):
     answer: str | None = Field(default=None, max_length=16384)
     pointer: str = Field(default="README.md", max_length=240)
+
+
+class BrowserSessionRequest(BaseModel):
+    credential: str
+
+
+def _browser_origin() -> str:
+    if settings.PREVIEW_ORIGIN is None or settings.PREVIEW_ORIGIN.host == urlsplit(settings.FRONTEND_HOST).hostname:
+        raise HTTPException(status_code=503, detail="Preview origin is not configured")
+    return str(settings.PREVIEW_ORIGIN).rstrip("/")
+
+
+def _browser_key() -> bytes:
+    return hashlib.sha256((settings.SECRET_KEY + ":preview-browser").encode()).digest()
+
+
+def _require_browser_host(request: Request) -> str:
+    origin = _browser_origin()
+    if request.headers.get("host") != origin.split("://", 1)[1]:
+        raise HTTPException(status_code=404, detail="Not found")
+    return origin
+
+
+def _browser_claims(credential: str, *, session: Session) -> uuid.UUID:
+    try:
+        claims = jwt.decode(credential, _browser_key(), algorithms=[ALGORITHM], options={"require": ["exp", "chat", "owner"]})
+        chat_id = uuid.UUID(claims["chat"])
+        owner_id = uuid.UUID(claims["owner"])
+    except (jwt.PyJWTError, ValueError, KeyError, TypeError):
+        raise HTTPException(status_code=404, detail="Not found") from None
+    chat = session.exec(select(DevelopmentChat).where(
+        DevelopmentChat.id == chat_id, DevelopmentChat.owner_id == owner_id,
+    )).first()
+    if chat is None or not chat.workspace_ready:
+        raise HTTPException(status_code=404, detail="Not found")
+    return chat_id
 
 
 SSE_HEADERS = {
@@ -650,6 +690,70 @@ def start_development_preview(
 ) -> Any:
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
     return _start_preview(session, chat)
+
+
+@router.post("/{chat_id}/preview/browser-session")
+def issue_browser_session(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID,
+) -> dict[str, str | int]:
+    origin = _browser_origin()
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not chat.workspace_ready or _preview_status(chat.id).get("state") != "ready":
+        raise HTTPException(status_code=409, detail="Preview is not ready")
+    credential = jwt.encode({
+        "chat": str(chat.id), "owner": str(current_user.id),
+        "exp": datetime.now(UTC) + timedelta(minutes=5),
+    }, _browser_key(), algorithm=ALGORITHM)
+    return {"chat_id": str(chat.id), "origin": origin, "credential": credential, "expires_in": 300}
+
+
+@router.post("/preview-browser/session")
+async def exchange_browser_session(
+    *, request: Request, session: SessionDep,
+) -> Response:
+    origin = _require_browser_host(request)
+    body = await request.body()
+    if len(body) > 8192:
+        raise HTTPException(status_code=413, detail="Browser session request is too large")
+    form = request.headers.get("content-type", "").split(";", 1)[0] == "application/x-www-form-urlencoded"
+    try:
+        if form:
+            values = parse_qs(body.decode("utf-8"), strict_parsing=True)
+            if set(values) != {"credential"} or len(values["credential"]) != 1:
+                raise ValueError
+            credential = values["credential"][0]
+        else:
+            credential = BrowserSessionRequest.model_validate_json(body).credential
+    except (UnicodeError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid browser session request") from None
+    chat_id = _browser_claims(credential, session=session)
+    path = f"{settings.API_V1_STR}/develop/chats/preview-browser/{chat_id}/"
+    response = Response(status_code=303 if form else 200, headers={
+        "Cache-Control": "no-store", "Content-Security-Policy": f"frame-ancestors {settings.FRONTEND_HOST}",
+        **({"Location": path} if form else {}),
+    })
+    response.set_cookie("preview_session", credential, max_age=300, httponly=True,
+                        secure=origin.startswith("https://"), samesite="none" if origin.startswith("https://") else "lax",
+                        path=path)
+    return response
+
+
+@router.get("/preview-browser/{chat_id}/{asset_path:path}")
+def browser_preview_resource(
+    *, request: Request, session: SessionDep, chat_id: uuid.UUID, asset_path: str,
+) -> Response:
+    _require_browser_host(request)
+    if _browser_claims(request.cookies.get("preview_session", ""), session=session) != chat_id:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        result = preview_controller.fetch(chat_id, "/" + asset_path, request.url.query)
+    except (httpx.HTTPError, FileNotFoundError, RuntimeError):
+        raise HTTPException(status_code=404, detail="Not found") from None
+    return Response(content=result["body"], status_code=result["status"], headers={
+        "Content-Type": result["content_type"], "Cache-Control": "no-store",
+        "Content-Security-Policy": f"frame-ancestors {settings.FRONTEND_HOST}",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 @router.get("/{chat_id}/preview/status", response_model=dict[str, str])

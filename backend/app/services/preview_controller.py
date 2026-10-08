@@ -11,7 +11,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from app.services.preview_compose import (
     documented_compose,
@@ -779,6 +779,58 @@ def heartbeat(chat_id: uuid.UUID) -> dict[str, str]:
     return current
 
 
+def browser_resource(chat_id: uuid.UUID, path: str) -> dict[str, str | int]:
+    current = status(chat_id)
+    if current.get("state") != "running" or "initial_port" not in current:
+        raise FileNotFoundError("Preview is not ready")
+    parsed = urlsplit(path)
+    if not path.startswith("/") or path.startswith("//") or parsed.scheme or parsed.netloc or len(path) > 2000:
+        raise ValueError("Invalid preview path")
+    port = int(current["initial_port"])
+    script = (
+        "import base64,json,sys,urllib.request,urllib.error\n"
+        "url='http://127.0.0.1:'+sys.argv[1]+sys.argv[2]\n"
+        "class NoRedirect(urllib.request.HTTPRedirectHandler):\n"
+        " def redirect_request(self,request,fp,code,msg,headers,newurl): return None\n"
+        "try:\n response=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect()).open(url,timeout=5)\n"
+        "except urllib.error.HTTPError as error: response=error\n"
+        "with response:\n"
+        " body=response.read(2097153)\n"
+        " assert len(body)<=2097152\n"
+        " print(json.dumps({'status':response.status,'content_type':response.headers.get('Content-Type','application/octet-stream'),"
+        "'body':base64.b64encode(body).decode()}))\n"
+    )
+    node_script = (
+        "(async()=>{const response=await fetch('http://127.0.0.1:'+process.argv[1]+process.argv[2],"
+        "{redirect:'manual',signal:AbortSignal.timeout(5000)});"
+        "const reader=response.body.getReader(),parts=[];let size=0;"
+        "while(true){const {done,value}=await reader.read();if(done)break;size+=value.length;"
+        "if(size>2097152)throw Error('Resource too large');parts.push(value)}"
+        "console.log(JSON.stringify({status:response.status,content_type:response.headers.get('content-type')||"
+        "'application/octet-stream',body:Buffer.concat(parts).toString('base64')}))})().catch(()=>process.exit(1))"
+    )
+    for command in (["python", "-c", script, str(port), path], ["node", "-e", node_script, str(port), path]):
+        code, result = docker("POST", f"/containers/{container_name(chat_id)}/exec", {
+            "Cmd": command, "User": "65534:65534", "AttachStdout": True, "AttachStderr": False,
+        })
+        if code != 201:
+            continue
+        connection = DockerConnection()
+        try:
+            connection.request("POST", f"/v1.47/exec/{result['Id']}/start", body=b'{"Detach":false,"Tty":true}',
+                               headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            body = response.read(3 * 1024 * 1024)
+            if response.status != 200 or len(body) >= 3 * 1024 * 1024:
+                raise RuntimeError("Preview resource exceeded limits")
+        finally:
+            connection.close()
+        code, state = docker("GET", f"/exec/{result['Id']}/json")
+        if code == 200 and state["ExitCode"] == 0:
+            return json.loads(body)
+    raise RuntimeError("Unable to fetch preview resource")
+
+
 def sweep(now: float | None = None) -> None:
     now = time.time() if now is None else now
     code, containers = docker(
@@ -828,6 +880,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def handle_workload(self) -> None:
+        if self.command == "GET" and "/browser?" in self.path:
+            parts = self.path.split("?", 1)[0].split("/")
+            try:
+                if len(parts) != 4 or parts[1] != "workloads" or parts[3] != "browser":
+                    raise ValueError
+                chat_id = uuid.UUID(parts[2])
+                if str(chat_id) != parts[2]:
+                    raise ValueError
+                paths = parse_qs(urlsplit(self.path).query).get("path", [])
+                if len(paths) != 1:
+                    raise ValueError
+                self.respond(200, browser_resource(chat_id, paths[0]))
+            except (ValueError, FileNotFoundError, RuntimeError, json.JSONDecodeError):
+                self.respond(404, {"error": "Not found"})
+            return
         parts = self.path.split("/")
         if (
             len(parts) not in (3, 4)

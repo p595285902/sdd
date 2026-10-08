@@ -81,6 +81,7 @@ services:
       DEMO_GITHUB_TOKEN: ${DEMO_GITHUB_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       DEVELOP_WORKSPACE_ROOT: /develop-workspaces
+      PREVIEW_ORIGIN: ${PREVIEW_ORIGIN:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
 
     volumes:
@@ -106,6 +107,9 @@ services:
       # Route HTTP traffic for this domain
       - traefik.http.routers.backend-http.rule=Host(`${DOMAIN:-localhost}`)
       - traefik.http.routers.backend-http.entrypoints=http
+      - traefik.http.routers.preview-http.rule=Host(`preview.${DOMAIN:-localhost}`) && PathPrefix(`/api/v1/develop/chats/preview-browser`)
+      - traefik.http.routers.preview-http.entrypoints=http
+      - traefik.http.routers.preview-http.service=backend
 
   preview-controller:
     image: ${COMPOSE_PROJECT_NAME:-sdd}-preview:runtime

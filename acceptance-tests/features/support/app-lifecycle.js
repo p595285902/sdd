@@ -80,6 +80,7 @@ async function startApplication() {
     FIRST_SUPERUSER_PASSWORD: 'acceptance-admin-password',
     POSTGRES_PASSWORD: 'acceptance-postgres-password',
     SMTP_HOST: '',
+    PREVIEW_ORIGIN: 'http://preview.localhost',
     EMAILS_FROM_EMAIL: 'test@example.com',
   };
 

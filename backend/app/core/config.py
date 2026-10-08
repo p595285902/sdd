@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     DEMO_GITHUB_REPO: HttpUrl | None = None
     DEMO_GITHUB_TOKEN: SecretStr | None = None
     DEVELOP_WORKSPACE_ROOT: Path = Path("/tmp/sdd-develop-workspaces")
+    PREVIEW_ORIGIN: HttpUrl | None = None
     DEVELOP_SETUP_TIMEOUT_SECONDS: int = Field(default=300, ge=1, le=3600)
     DEVELOP_FAKE_SETUP_RUNNER: bool = False
     DEVELOP_AGENT_TIMEOUT_SECONDS: int = Field(default=600, ge=1, le=3600)
@@ -81,6 +82,13 @@ class Settings(BaseSettings):
     def _require_absolute_workspace_root(cls, value: Path) -> Path:
         if not value.is_absolute():
             raise ValueError("Development workspace root must be absolute")
+        return value
+
+    @field_validator("PREVIEW_ORIGIN")
+    @classmethod
+    def _require_isolated_preview_origin(cls, value: HttpUrl | None) -> HttpUrl | None:
+        if value is not None and (value.username or value.password or value.path != "/" or value.query or value.fragment):
+            raise ValueError("Preview origin must be a bare origin")
         return value
 
     SMTP_TLS: bool = True
