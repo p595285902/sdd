@@ -44,11 +44,11 @@ from app.services.develop_agent import (
     execute_exploration,
     execute_proposal,
 )
+from app.services.develop_preview_classification import classify_workspace
 from app.services.develop_preview_detection import (
     relevant_turn_change,
     snapshot_workspace,
 )
-from app.services.develop_preview_classification import classify_workspace
 from app.services.develop_preview_instructions import resolve_preview_plan
 from app.services.develop_preview_runtime import PreviewController
 from app.services.develop_turns import (
@@ -66,7 +66,9 @@ from app.services.develop_workspace import (
     WorkspaceSetupError,
     cleanup_workspace,
     setup_workspace,
+    workspace_path,
 )
+from app.services.preview_compose import documented_compose
 
 router = APIRouter(prefix="/develop/chats", tags=["develop"])
 logger = logging.getLogger(__name__)
@@ -114,6 +116,14 @@ def _start_preview(session: Session, chat: DevelopmentChat) -> dict[str, str]:
         current = _preview_status(chat.id)
     except httpx.HTTPError:
         logger.exception("Preview status unavailable for chat %s", chat.id)
+        return {"state": "failed"}
+    try:
+        checkout = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+        if documented_compose(checkout):
+            preview_controller.start(chat.id)
+            return _preview_status(chat.id)
+    except (ValueError, FileNotFoundError, RuntimeError, httpx.HTTPError):
+        logger.exception("Compose preview startup failed for chat %s", chat.id)
         return {"state": "failed"}
     if current["state"] in ("ready", "starting"):
         return current
@@ -680,6 +690,15 @@ def launch_development_preview(
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
     if not chat.workspace_ready:
         raise HTTPException(status_code=409, detail="Development Workspace is not ready")
+    try:
+        checkout = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+        if documented_compose(checkout):
+            return preview_controller.start(chat.id)
+    except (ValueError, FileNotFoundError, RuntimeError, httpx.HTTPError):
+        prompt = "The documented Compose project is unsafe or unsupported. Please provide compatible checkout-local instructions."
+        session.add(DevelopmentMessage(role="assistant", content=prompt, chat_id=chat.id))
+        session.commit()
+        return {"state": "needs_instructions", "message": prompt}
     provider_key = settings.OPENAI_API_KEY
     if provider_key is None:
         raise HTTPException(status_code=503, detail="Agent provider is not configured")

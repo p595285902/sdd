@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const { runBackendPython } = require('../../features/support/app-lifecycle.js');
 
 const startScript = `
@@ -28,6 +28,12 @@ class PreviewWorkloadPage {
 
   docker(...args) {
     return execFileSync('docker', args, { encoding: 'utf8' }).trim();
+  }
+
+  controllerLogs() {
+    const result = spawnSync('docker', ['logs', `${this.world.applicationState.projectName}-preview-controller-1`],
+      { encoding: 'utf8' });
+    return `${result.stdout || ''}${result.stderr || ''}`;
   }
 
   containerIds(chatId) {
@@ -84,6 +90,187 @@ http.createServer((request, response) => {
     };
   }
 
+  async prepareCompose(chatId) {
+    const image = 'python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88';
+    await this.world.apiClient.editWorkspaceFile(chatId, 'README.md',
+      'Run `docker compose -f compose.yml up website api` to start the website and API.');
+    await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
+  website:
+    build:
+      context: site
+      dockerfile: Dockerfile
+    depends_on:
+      - api
+    command: ["python", "server.py"]
+    expose: [8765]
+  api:
+    build:
+      context: api
+      dockerfile: Dockerfile
+    command: ["python", "-m", "http.server", "8766", "--bind", "0.0.0.0"]
+    expose: [8766]
+`);
+    const dockerfile = `FROM ${image}\nCOPY . /workspace\nWORKDIR /workspace\nUSER 65534\n`;
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/Dockerfile', dockerfile);
+    await this.world.apiClient.editWorkspaceFile(chatId, 'api/Dockerfile', dockerfile);
+    await this.world.apiClient.editWorkspaceFile(chatId, 'api/index.html', 'API reachable');
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.request import urlopen
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        with urlopen('http://api:8766/', timeout=2) as response:
+            result = response.read()
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(result)
+HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
+`);
+  }
+
+  async prepareDependencyCompose(chatId) {
+    await this.world.apiClient.editWorkspaceFile(chatId, 'README.md',
+      'Run `docker compose -f compose.yml up website` to start the website.');
+    await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
+  website:
+    build:
+      context: site
+      dockerfile: Dockerfile
+    command: ["python", "server.py"]
+    expose: [8765]
+`);
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/requirements.txt', 'six==1.17.0\n');
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/Dockerfile',
+      'FROM python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88\nCOPY . /workspace\nWORKDIR /workspace\nRUN pip install --no-cache-dir -r requirements.txt\nUSER 65534\n');
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
+import six
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'dependency ready' if six.PY3 else b'dependency missing')
+HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
+`);
+  }
+
+  async prepareNpmDependencyCompose(chatId) {
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/package.json',
+      JSON.stringify({ name: 'preview-site', version: '1.0.0', dependencies: { 'is-number': '7.0.0' } }));
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/package-lock.json', JSON.stringify({
+      name: 'preview-site', version: '1.0.0', lockfileVersion: 3, requires: true,
+      packages: {
+        '': { name: 'preview-site', version: '1.0.0', dependencies: { 'is-number': '7.0.0' } },
+        'node_modules/is-number': {
+          version: '7.0.0',
+          resolved: 'https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz',
+          integrity: 'sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==',
+        },
+      },
+    }));
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/Dockerfile',
+      'FROM node:24.15-bookworm-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d\nCOPY . /workspace\nWORKDIR /workspace\nRUN npm ci --ignore-scripts\nUSER 65534\n');
+    await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
+  website:
+    build:
+      context: site
+      dockerfile: Dockerfile
+    command: ["node", "server.js"]
+    expose: [8765]
+`);
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.js', `const http = require('node:http');
+const isNumber = require('is-number');
+http.createServer((request, response) => response.end(isNumber(42) ? 'dependency ready' : 'dependency missing')).listen(8765, '0.0.0.0');
+`);
+  }
+
+  async prepareComposeDependencies(chatId) {
+    const dockerfile = 'FROM python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88\nCOPY . /workspace\nWORKDIR /workspace\nRUN pip install --no-cache-dir -r requirements.txt\nUSER 65534\n';
+    for (const directory of ['site', 'api']) {
+      await this.world.apiClient.editWorkspaceFile(chatId, `${directory}/requirements.txt`, 'six==1.17.0\n');
+      await this.world.apiClient.editWorkspaceFile(chatId, `${directory}/Dockerfile`, dockerfile);
+    }
+  }
+
+  async introduceUnsafeBuildSymlink(chatId) {
+    await runBackendPython(`
+import sys
+import uuid
+from pathlib import Path
+from app.core.config import settings
+from app.services.develop_workspace import workspace_path
+checkout = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=uuid.UUID(sys.argv[1]))
+(checkout / "site" / "redirect").symlink_to(Path("/etc/passwd"))
+`, chatId);
+  }
+
+  async removeUnsafeBuildSymlink(chatId) {
+    await runBackendPython(`
+import sys
+import uuid
+from app.core.config import settings
+from app.services.develop_workspace import workspace_path
+checkout = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=uuid.UUID(sys.argv[1]))
+target = checkout / "site" / "redirect"
+assert target.is_symlink()
+target.unlink()
+`, chatId);
+  }
+
+  composeContainers(chatId) {
+    const project = this.world.applicationState.projectName;
+    const output = this.docker('ps', '--filter', `label=sdd.preview.chat-id=${chatId}`,
+      '--filter', `label=sdd.preview.project=${project}`,
+      '--filter', 'label=sdd.preview.compose-service', '--format', '{{.ID}}');
+    return output ? output.split('\n') : [];
+  }
+
+  composeNetwork(chatId) {
+    return `${this.world.applicationState.projectName}-preview-${chatId}-compose`;
+  }
+
+  composeNetworkDetails(chatId) {
+    return JSON.parse(this.docker('network', 'inspect', this.composeNetwork(chatId)))[0];
+  }
+
+  assertComposeIsolation(chatId, otherChatId) {
+    const network = this.composeNetworkDetails(chatId);
+    assert.equal(network.Internal, true);
+    assert.equal(network.Options['com.docker.network.bridge.gateway_mode_ipv4'], 'isolated');
+    assert.equal(network.IPAM.Config.some((item) => item.Gateway), false);
+    const backend = JSON.parse(this.docker('inspect', `${this.world.applicationState.projectName}-backend-1`))[0];
+    const backendIp = backend.NetworkSettings.Networks[`${this.world.applicationState.projectName}_default`].IPAddress;
+    const other = JSON.parse(this.docker('inspect', this.containerIds(otherChatId)[0]))[0];
+    const otherIp = other.NetworkSettings.Networks[this.composeNetwork(otherChatId)].IPAddress;
+    for (const containerId of this.composeContainers(chatId)) {
+      const container = JSON.parse(this.docker('inspect', containerId))[0];
+      const host = container.HostConfig;
+      assert.equal(host.NetworkMode, this.composeNetwork(chatId));
+      assert.equal(container.Config.User, '65534:65534');
+      assert.equal(host.Memory, 268435456);
+      assert.equal(host.NanoCpus, 1000000000);
+      assert.equal(host.PidsLimit, 64);
+      assert.equal(host.ReadonlyRootfs, true);
+      assert.deepEqual(host.CapDrop, ['ALL']);
+      assert.deepEqual(host.PortBindings, {});
+      assert.deepEqual(host.Mounts || [], []);
+      assert.deepEqual(container.Config.Env.map((entry) => entry.split('=')[0]).sort(),
+        ['HOME', 'PATH', 'PYTHON_VERSION', 'PYTHON_SHA256'].sort());
+      assert.ok(host.Tmpfs['/tmp'].includes('size=64m'));
+      for (const address of [backendIp, otherIp, backend.NetworkSettings.Networks[`${this.world.applicationState.projectName}_default`].Gateway, '1.1.1.1']) {
+        assert.throws(() => this.docker('exec', containerId, 'python', '-c',
+          'import socket,sys; socket.create_connection((sys.argv[1],8000),timeout=1)', address));
+      }
+      assert.throws(() => this.docker('exec', containerId, 'python', '-c',
+        'import socket; socket.create_connection(("host.docker.internal",8000),timeout=1)'));
+    }
+  }
+
+  composeImages(chatId) {
+    const project = this.world.applicationState.projectName;
+    const output = this.docker('image', 'ls', '--filter', `label=sdd.preview.chat-id=${chatId}`,
+      '--filter', `label=sdd.preview.project=${project}`, '--format', '{{.ID}}');
+    return output ? output.split('\n') : [];
+  }
+
   async launch(chatId, answer) {
     this.chatIds.push(chatId);
     const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
@@ -92,10 +279,28 @@ http.createServer((request, response) => {
     return this.lastLaunch;
   }
 
-  async openContext(chatId) {
+  async deleteChat(chatId) {
+    const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'delete',
+      `/api/v1/develop/chats/${chatId}?confirm=true`);
+    assert.equal(response.status(), 200, await response.text());
+  }
+
+  async restartCompose(chatId, expectedStatus = 200, timeout = 30000) {
+    const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
+      `/api/v1/develop/chats/${chatId}/preview/restart`, { timeout });
+    assert.equal(response.status(), expectedStatus, `${await response.text()}\n${this.controllerLogs()}`);
+    if (expectedStatus === 200) assert.equal((await response.json()).state, 'running');
+  }
+
+  expireCompose(chatId) {
+    this.docker('exec', `${this.world.applicationState.projectName}-preview-controller-1`, 'python', '-c',
+      'import sys,time,uuid; sys.path.insert(0,"/controller"); from preview_controller import activity,activity_lock,sweep; chat=uuid.UUID(sys.argv[1]); activity_lock.acquire(); activity[chat]=time.time()-301; activity_lock.release(); sweep()', chatId);
+  }
+
+  async openContext(chatId, timeout = 30000) {
     this.chatIds.push(chatId);
     const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
-      `/api/v1/develop/chats/${chatId}/preview/start`);
+      `/api/v1/develop/chats/${chatId}/preview/start`, { timeout });
     return { status: response.status(), body: await response.json() };
   }
 
@@ -123,6 +328,11 @@ http.createServer((request, response) => {
   serviceResponse(chatId, port) {
     return this.docker('exec', this.containerIds(chatId)[0], 'python', '-c',
       'import urllib.request; print(urllib.request.build_opener(urllib.request.ProxyHandler({})).open("http://127.0.0.1:' + port + '/").read().decode())');
+  }
+
+  nodeServiceResponse(chatId, port) {
+    return this.docker('exec', this.containerIds(chatId)[0], 'node', '-e',
+      `require('http').get('http://127.0.0.1:${port}/',response=>{response.on('data',chunk=>process.stdout.write(chunk));response.on('end',()=>process.exit())})`);
   }
 
   async waitForServiceResponse(chatId, port, expected) {
@@ -167,6 +377,23 @@ http.createServer((request, response) => {
     return JSON.parse(this.docker('inspect', ids[0]))[0];
   }
 
+  async expectRejectedCompose(chatId) {
+    await runBackendPython(`
+import sys
+import uuid
+import httpx
+from app.core.config import settings
+from app.services.develop_preview_runtime import PreviewController
+controller = PreviewController(root=settings.DEVELOP_WORKSPACE_ROOT, url="http://preview-controller:8090")
+try:
+    controller.start(uuid.UUID(sys.argv[1]))
+except httpx.HTTPStatusError as error:
+    assert error.response.status_code == 400
+else:
+    raise AssertionError("Unsafe Compose was not rejected by the trusted controller")
+`, chatId);
+  }
+
   canRead(container, filename) {
     return this.docker('exec', container.Id, 'test', '-f', `/workspace/${filename}`) === '';
   }
@@ -208,13 +435,18 @@ http.createServer((request, response) => {
 
   async stopAll() {
     for (const chatId of this.chatIds) {
-      await runBackendPython(`
+      try {
+        await runBackendPython(`
 import sys
 import uuid
 from app.core.config import settings
 from app.services.develop_preview_runtime import PreviewController
 PreviewController(root=settings.DEVELOP_WORKSPACE_ROOT, url="http://preview-controller:8090").stop(uuid.UUID(sys.argv[1]))
 `, chatId);
+      } catch (error) {
+        console.error(this.docker('logs', `${this.world.applicationState.projectName}-preview-controller-1`));
+        throw error;
+      }
     }
   }
 }

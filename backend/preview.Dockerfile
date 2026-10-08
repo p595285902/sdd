@@ -8,7 +8,10 @@ COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=uv /uv /uvx /usr/local/bin/
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+RUN uv pip install --system pyyaml==6.0.3
 COPY backend/app/services/preview_controller.py /controller/preview_controller.py
+COPY backend/app/services/preview_compose.py /controller/app/services/preview_compose.py
+COPY backend/app/services/preview_workspace_sync.py /controller/app/services/preview_workspace_sync.py
 COPY backend/app/services/preview_registry_proxy.py /controller/preview_registry_proxy.py
 COPY backend/app/services/preview_proxy_client.py /controller/preview_proxy_client.py
 COPY backend/app/services/preview_workspace_sync.py /controller/preview_workspace_sync.py

@@ -41,7 +41,8 @@ class PreviewController:
             return response.json()
 
     def _request(self, method: str, path: str) -> dict[str, str]:
-        with httpx.Client(base_url=self.url, timeout=10) as client:
+        timeout = 180 if method in ("POST", "PUT") and path.count("/") == 2 else 10
+        with httpx.Client(base_url=self.url, timeout=timeout) as client:
             response = client.request(method, path)
             response.raise_for_status()
             return response.json()

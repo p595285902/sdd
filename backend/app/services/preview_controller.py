@@ -1,14 +1,23 @@
+import base64
 import http.client
+import io
 import json
 import logging
 import os
 import socket
+import tarfile
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
+
+from app.services.preview_compose import (
+    documented_compose,
+    staged_build,
+    validated_graph,
+)
 
 SOCKET = "/var/run/docker.sock"
 WORKSPACE_ROOT = "/develop-workspaces"
@@ -58,6 +67,104 @@ def docker(
         connection.close()
 
 
+def docker_stream(method: str, path: str, body: bytes | None = None, *, content_type: str = "application/json") -> bytes:
+    connection = DockerConnection()
+    connection.timeout = 120
+    try:
+        connection.request(method, "/v1.47" + path, body=body, headers={"Content-Type": content_type})
+        response = connection.getresponse()
+        data = response.read(4 * 1024 * 1024 + 1)
+        if len(data) > 4 * 1024 * 1024 or response.status >= 400:
+            raise RuntimeError(f"Preview image operation failed ({response.status})")
+        for line in data.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                raise RuntimeError("Invalid Docker image response") from None
+            if event.get("error") or event.get("errorDetail"):
+                raise RuntimeError("Preview image operation failed")
+        return data
+    finally:
+        connection.close()
+
+
+def stream_into_container(container: str, archive: bytes) -> None:
+    if len(archive) > 16 * 1024 * 1024:
+        raise ValueError("Dependency build context exceeds setup limits")
+    def execute(arguments: list[str]) -> None:
+        code, result = docker("POST", f"/containers/{container}/exec", {
+            "Cmd": arguments, "User": "65534:65534", "AttachStdout": False, "AttachStderr": False,
+        })
+        if code != 201 or docker("POST", f"/exec/{result['Id']}/start", {"Detach": True, "Tty": False})[0] != 200:
+            raise RuntimeError("Unable to stage preview input")
+        deadline = time.monotonic() + 10
+        while True:
+            code, state = docker("GET", f"/exec/{result['Id']}/json")
+            if code != 200 or time.monotonic() >= deadline:
+                raise RuntimeError("Preview input staging timed out")
+            if not state["Running"]:
+                if state["ExitCode"] != 0:
+                    raise RuntimeError("Preview input staging failed")
+                return
+            time.sleep(0.05)
+
+    for offset in range(0, len(archive), 24 * 1024):
+        chunk = base64.b64encode(archive[offset:offset + 24 * 1024]).decode("ascii")
+        execute(["python", "-c", "import base64,sys; open('/workspace/.preview-input.tar','ab').write(base64.b64decode(sys.argv[1]))", chunk])
+    execute(["python", "-c", "import tarfile; tarfile.open('/workspace/.preview-input.tar').extractall('/workspace',filter='data')"])
+    execute(["python", "-c", "import os; os.unlink('/workspace/.preview-input.tar')"])
+    execute(["python", "-c", "from pathlib import Path; assert Path('/workspace/requirements.txt').is_file() or Path('/workspace/package-lock.json').is_file()"])
+
+
+def read_dependencies(container: str) -> bytes:
+    def output(script: str, *args: str) -> bytes:
+        code, result = docker("POST", f"/containers/{container}/exec", {
+            "Cmd": ["python", "-c", script, *args], "User": "65534:65534",
+            "AttachStdout": True, "AttachStderr": True,
+        })
+        if code != 201:
+            raise RuntimeError("Unable to inspect preview dependencies")
+        connection = DockerConnection()
+        try:
+            connection.request("POST", f"/v1.47/exec/{result['Id']}/start", body=b'{"Detach":false,"Tty":true}', headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            data = response.read(64 * 1024)
+            if response.status != 200 or len(data) >= 64 * 1024:
+                raise RuntimeError("Preview dependency output exceeded limits")
+        finally:
+            connection.close()
+        code, state = docker("GET", f"/exec/{result['Id']}/json")
+        if code != 200 or state["ExitCode"] != 0:
+            logger.error("Preview dependency read exit: %s, output: %s", state.get("ExitCode"), data[:512])
+            raise RuntimeError("Unable to read preview dependencies")
+        return data.strip()
+
+    output("import tarfile\nwith tarfile.open('/workspace/.preview-output.tar','w') as archive:\n archive.add('/workspace/.preview-deps',arcname='.preview-deps')")
+    size = int(output("from pathlib import Path; print(Path('/workspace/.preview-output.tar').stat().st_size)"))
+    if size > 16 * 1024 * 1024:
+        raise ValueError("Preview dependency output exceeds limits")
+    return b"".join(base64.b64decode(output(
+        "import base64,sys; file=open('/workspace/.preview-output.tar','rb'); file.seek(int(sys.argv[1])); print(base64.b64encode(file.read(24576)).decode())",
+        str(offset),
+    )) for offset in range(0, size, 24576))
+
+
+def read_helper_ready(container: str) -> bool:
+    code, result = docker("POST", f"/containers/{container}/exec", {
+        "Cmd": ["python", "-c", "from pathlib import Path; assert Path('/workspace/.preview-ready').is_file()"],
+        "User": "65534:65534", "AttachStdout": False, "AttachStderr": False,
+    })
+    if code != 201 or docker("POST", f"/exec/{result['Id']}/start", {"Detach": True, "Tty": False})[0] != 200:
+        raise RuntimeError("Unable to check preview dependency readiness")
+    while True:
+        code, state = docker("GET", f"/exec/{result['Id']}/json")
+        if code != 200:
+            raise RuntimeError("Unable to inspect preview dependency readiness")
+        if not state["Running"]:
+            return state["ExitCode"] == 0
+        time.sleep(0.05)
+
+
 def container_name(chat_id: uuid.UUID) -> str:
     return f"{PROJECT}-preview-{chat_id}"
 
@@ -103,7 +210,7 @@ def remove_container(name: str) -> None:
 def remove_resource(path: str) -> None:
     for attempt in range(10):
         code, _ = docker("DELETE", path)
-        if code in (204, 404):
+        if code in (200, 204, 404):
             return
         if code != 409 or attempt == 9:
             raise RuntimeError(f"Unable to remove preview resource ({code})")
@@ -143,6 +250,22 @@ def start(chat_id: uuid.UUID) -> dict[str, str]:
     checkout = os.path.join(WORKSPACE_ROOT, str(chat_id))
     if os.path.islink(checkout) or not os.path.isdir(checkout):
         raise FileNotFoundError("Development Chat checkout is not ready")
+    documented = documented_compose(Path(checkout))
+    if documented is not None:
+        graph = validated_graph(Path(checkout), *documented)
+        roots = [name for name in documented[1] if not any(
+            name in service.get("depends_on", []) for other, service in graph if other != name
+        )]
+        if len(roots) != 1:
+            raise ValueError("Document one website entry service")
+        primary = roots[0]
+        if not dict(graph)[primary].get("expose"):
+            raise ValueError("Documented website port is required")
+        staged = {
+            name: staged_build(Path(checkout), service["build"])
+            for name, service in graph if "build" in service
+        }
+        return start_compose(chat_id, graph, primary, staged)
     existing = inspect(chat_id)
     if existing is not None:
         if existing["State"]["Running"]:
@@ -183,6 +306,260 @@ def start(chat_id: uuid.UUID) -> dict[str, str]:
         raise
     heartbeat(chat_id)
     return result
+
+
+def ensure_image(image: str) -> None:
+    code, _ = docker("GET", f"/images/{quote(image, safe='')}/json")
+    if code == 404:
+        docker_stream("POST", f"/images/create?fromImage={quote(image, safe='')}")
+    elif code != 200:
+        raise RuntimeError("Unable to inspect approved preview image")
+
+
+def compose_image(chat_id: uuid.UUID, service: str, context: bytes, dockerfile: str) -> str:
+    tag = f"{PROJECT}-preview-{chat_id}-{service}:staged"
+    query = f"/build?t={quote(tag)}&dockerfile={quote(dockerfile)}&networkmode=none&pull=0&nocache=1&rm=1&memory=268435456&cpuquota=100000&cpuperiod=100000&labels={quote(json.dumps(labels(chat_id)))}"
+    docker_stream("POST", query, context, content_type="application/x-tar")
+    code, image = docker("GET", f"/images/{quote(tag, safe='')}/json")
+    if code != 200 or not image.get("Id"):
+        raise RuntimeError("Preview build did not produce an image")
+    return tag
+
+
+def compose_dependencies(chat_id: uuid.UUID, service: str, context: bytes, kind: str) -> bytes:
+    socket_volume = resource_name(chat_id, "socket")
+    proxy = resource_name(chat_id, "registry")
+    with resource_lock:
+        code, volume = docker("GET", f"/volumes/{socket_volume}")
+        if code == 404:
+            code, _ = docker("POST", "/volumes/create", {"Name": socket_volume, "Labels": labels(chat_id)})
+            if code != 201:
+                raise RuntimeError("Unable to create preview dependency socket")
+        elif code != 200 or volume.get("Labels") != labels(chat_id):
+            raise RuntimeError("Preview dependency socket is not owned by this chat")
+        ensure_outbound_network()
+        code, existing = docker("GET", f"/containers/{proxy}/json")
+        if code == 404:
+            code, _ = docker("POST", f"/containers/create?name={quote(proxy)}", {
+                "Image": IMAGE, "Cmd": ["python", "/controller/preview_registry_proxy.py"],
+                "Labels": labels(chat_id),
+                "HostConfig": {
+                    "NetworkMode": outbound_network(),
+                    "Mounts": [{"Type": "volume", "Source": socket_volume, "Target": "/registry-socket"}],
+                    "ReadonlyRootfs": True, "CapDrop": ["ALL"],
+                    "SecurityOpt": ["no-new-privileges:true"], "Memory": 134217728,
+                    "NanoCpus": 500000000, "PidsLimit": 32, "AutoRemove": True,
+                },
+            })
+            if code != 201 or docker("POST", f"/containers/{proxy}/start")[0] != 204:
+                raise RuntimeError("Unable to start preview dependency proxy")
+        else:
+            if (code != 200 or any(existing["Config"]["Labels"].get(key) != value for key, value in labels(chat_id).items())
+                or existing["HostConfig"]["NetworkMode"] != outbound_network()
+                or not any(mount.get("Source") == socket_volume and mount.get("Target") == "/registry-socket"
+                           for mount in existing["HostConfig"].get("Mounts", []))
+                or not existing["State"]["Running"]):
+                raise RuntimeError("Preview dependency proxy is not owned by this chat")
+    helper = resource_name(chat_id, f"build-{service}")
+    script = """import shutil, subprocess, threading, time
+from pathlib import Path
+from preview_proxy_client import Server, Forwarder
+server = Server(('127.0.0.1', 3128), Forwarder)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+deadline = time.monotonic() + 60
+while not Path('/workspace/requirements.txt' if __import__('sys').argv[1] == 'python' else '/workspace/package-lock.json').exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError('Dependency input staging timed out')
+    time.sleep(0.1)
+command = (['python', '-m', 'pip', 'install', '--no-cache-dir', '--no-compile', '--only-binary=:all:', '--target', '/workspace/.preview-deps/python', '-r', '/workspace/requirements.txt'] if __import__('sys').argv[1] == 'python' else ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', '/workspace'])
+subprocess.run(command, check=True, timeout=35, cwd='/workspace', stdout=subprocess.DEVNULL)
+if __import__('sys').argv[1] == 'node':
+    Path('/workspace/.preview-deps').mkdir()
+    shutil.move('/workspace/node_modules', '/workspace/.preview-deps/node_modules')
+Path('/workspace/.preview-ready').touch()
+time.sleep(90)
+"""
+    code, _ = docker("POST", f"/containers/create?name={quote(helper)}", {
+        "Image": IMAGE, "User": "65534:65534", "WorkingDir": "/controller", "Cmd": ["python", "-c", script, kind],
+        "Labels": {**labels(chat_id), "sdd.preview.compose-service": f"build-{service}"},
+        "Env": ["HOME=/tmp", "PATH=/usr/local/bin:/usr/bin:/bin", "HTTP_PROXY=http://127.0.0.1:3128", "HTTPS_PROXY=http://127.0.0.1:3128", "NO_PROXY=localhost,127.0.0.1", "PIP_DISABLE_PIP_VERSION_CHECK=1", "PIP_INDEX_URL=https://pypi.org/simple", "npm_config_registry=https://registry.npmjs.org/", "npm_config_cache=/tmp/npm"],
+        "HostConfig": {
+            "NetworkMode": "none", "Mounts": [{"Type": "volume", "Source": socket_volume, "Target": "/registry-socket", "ReadOnly": True}],
+            "ReadonlyRootfs": True, "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"],
+            "Memory": 268435456, "NanoCpus": 1000000000, "PidsLimit": 64,
+            "Tmpfs": {"/tmp": "rw,nosuid,size=64m,uid=65534,gid=65534", "/workspace": "rw,nosuid,size=64m,uid=65534,gid=65534"},
+        },
+    })
+    if code != 201:
+        raise RuntimeError("Unable to create preview dependency setup")
+    if docker("POST", f"/containers/{helper}/start")[0] != 204:
+        raise RuntimeError("Unable to start preview dependency setup")
+    stream_into_container(helper, context)
+    deadline = time.monotonic() + 90
+    while True:
+        if read_helper_ready(helper):
+            break
+        code, state = docker("GET", f"/containers/{helper}/json")
+        if code != 200:
+            raise RuntimeError("Unable to inspect preview dependency setup")
+        if not state["State"]["Running"]:
+            logger.error("Preview dependency helper exited with code %s", state["State"]["ExitCode"])
+            raise ValueError("Unsupported preview dependencies or download source")
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Preview dependency setup timed out")
+        time.sleep(0.25)
+    archive = read_dependencies(helper)
+    remove_container(helper)
+    entries = []
+    total = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive)) as staged:
+            for member in staged:
+                path = Path(member.name)
+                if (
+                    not path.parts or path.parts[0] != ".preview-deps"
+                    or ".." in path.parts or path.is_absolute()
+                    or not (member.isfile() or member.isdir())
+                ):
+                    raise ValueError("Unsupported dependency archive entry")
+                if member.isfile():
+                    total += member.size
+                    if len(entries) >= 2000 or total > 16 * 1024 * 1024:
+                        raise ValueError("Preview dependencies exceed limits")
+                    entries.append((member.name, staged.extractfile(member).read()))
+    except tarfile.TarError:
+        raise ValueError("Invalid dependency archive") from None
+    if not entries:
+        raise ValueError("Empty dependency archive")
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as target, tarfile.open(fileobj=io.BytesIO(context)) as original:
+        for member in original:
+            target.addfile(member, original.extractfile(member) if member.isfile() else None)
+        for path, content in entries:
+            entry = tarfile.TarInfo(path)
+            entry.size = len(content)
+            entry.mode = 0o644
+            entry.uid = entry.gid = 65534
+            target.addfile(entry, io.BytesIO(content))
+    return output.getvalue()
+
+
+def compose_network(chat_id: uuid.UUID) -> str:
+    name = resource_name(chat_id, "compose")
+    code, _ = docker("POST", "/networks/create", {
+        "Name": name,
+        "Labels": labels(chat_id),
+        "Internal": True,
+        "EnableIPv6": False,
+        "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+    })
+    if code != 201:
+        raise RuntimeError("Unable to create isolated preview network")
+    code, result = docker("GET", f"/networks/{name}")
+    if code != 200 or not result.get("Internal") or any(
+        item.get("Gateway") for item in result.get("IPAM", {}).get("Config", [])
+    ) or result.get("Options", {}).get("com.docker.network.bridge.gateway_mode_ipv4") != "isolated":
+        raise RuntimeError("Docker did not enforce isolated preview networking")
+    return name
+
+
+def start_compose(
+    chat_id: uuid.UUID, graph: list[tuple[str, dict]], primary: str, staged: dict[str, tuple[bytes, str | None, str]]
+) -> dict[str, str]:
+    existing = inspect(chat_id)
+    if existing is not None:
+        if existing["State"]["Running"] and existing["Config"]["Labels"].get("sdd.preview.compose-service") == primary:
+            return status(chat_id)
+        stop(chat_id)
+    network = resource_name(chat_id, "compose")
+    try:
+        for image in {staged[name][2] if name in staged else service["image"] for name, service in graph}:
+            ensure_image(image)
+        images = {
+            name: compose_image(chat_id, name,
+                compose_dependencies(chat_id, name, staged[name][0], staged[name][1])
+                if staged[name][1] else staged[name][0], service["build"]["dockerfile"])
+            if name in staged else service["image"]
+            for name, service in graph
+        }
+        compose_network(chat_id)
+        for name, service in graph:
+            container = container_name(chat_id) if name == primary else resource_name(chat_id, f"compose-{name}")
+            code, result = docker("POST", f"/containers/create?name={quote(container)}", {
+                "Image": images[name],
+                "User": "65534:65534",
+                "Cmd": service["command"],
+                "WorkingDir": service.get("working_dir", "/workspace"),
+                "Env": ["HOME=/tmp", "PATH=/usr/local/bin:/usr/bin:/bin"],
+                "Labels": {**labels(chat_id), "sdd.preview.compose-service": name},
+                "HostConfig": {
+                    "NetworkMode": network,
+                    "Privileged": False,
+                    "ReadonlyRootfs": True,
+                    "CapDrop": ["ALL"],
+                    "SecurityOpt": ["no-new-privileges:true"],
+                    "Memory": 268435456,
+                    "NanoCpus": 1000000000,
+                    "PidsLimit": 64,
+                    "Tmpfs": {"/tmp": "rw,nosuid,size=64m,uid=65534,gid=65534"},
+                },
+                "NetworkingConfig": {"EndpointsConfig": {network: {"Aliases": [name]}}},
+            })
+            if code != 201:
+                raise RuntimeError("Unable to create private Compose service")
+            code, _ = docker("POST", f"/containers/{result['Id']}/start")
+            if code != 204:
+                raise RuntimeError("Unable to start private Compose service")
+            for port in service.get("expose", []):
+                deadline = time.monotonic() + 15
+                while True:
+                    base_image = staged[name][2] if name in staged else service["image"]
+                    probe_command = (
+                        ["node", "-e", "require('net').connect(Number(process.argv[1]),'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))", str(port)]
+                        if base_image.startswith("node:") else
+                        ["python", "-c", "import socket,sys; socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=1).close()", str(port)]
+                    )
+                    code, probe = docker("POST", f"/containers/{result['Id']}/exec", {
+                        "Cmd": probe_command,
+                        "AttachStdout": False,
+                        "AttachStderr": False,
+                    })
+                    if code != 201:
+                        raise RuntimeError("Unable to check private Compose service readiness")
+                    code, _ = docker("POST", f"/exec/{probe['Id']}/start", {"Detach": True, "Tty": False})
+                    if code != 200:
+                        raise RuntimeError("Unable to start private Compose readiness check")
+                    while True:
+                        code, state = docker("GET", f"/exec/{probe['Id']}/json")
+                        if code != 200:
+                            raise RuntimeError("Unable to inspect private Compose readiness check")
+                        if not state["Running"] or time.monotonic() >= deadline:
+                            break
+                        time.sleep(0.1)
+                    if not state["Running"] and state["ExitCode"] == 0:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("Private Compose service did not become ready")
+                    time.sleep(0.25)
+        selected = dict(graph)[primary]
+        ports = selected.get("expose", [])
+        if not ports:
+            raise RuntimeError("Documented website port is required")
+        details = {"initial_port": str(ports[0]), "initial_path": "/", "website_port": str(ports[0])}
+        for name, service in graph:
+            if name != primary and service.get("expose"):
+                details["api_port"] = str(service["expose"][0])
+                break
+        with activity_lock:
+            failed_services.discard(chat_id)
+            ready_services[chat_id] = details
+        heartbeat(chat_id)
+        return status(chat_id)
+    except (OSError, RuntimeError, ValueError):
+        stop(chat_id)
+        with activity_lock:
+            failed_services.add(chat_id)
+        raise
 
 
 def create_workload(chat_id: uuid.UUID, socket_volume: str) -> dict[str, str]:
@@ -248,6 +625,33 @@ def stop(chat_id: uuid.UUID) -> dict[str, str]:
             if code not in (204, 304, 404):
                 raise RuntimeError("Unable to stop preview workload")
         remove_container(existing["Id"])
+    filters = quote(json.dumps({"label": [
+        f"sdd.preview.project={PROJECT}", f"sdd.preview.chat-id={chat_id}",
+        "sdd.preview.compose-service",
+    ]}))
+    code, containers = docker("GET", f"/containers/json?all=1&filters={filters}")
+    if code != 200:
+        raise RuntimeError("Unable to list private Compose containers")
+    for container in containers:
+        if container.get("Labels", {}).get("sdd.preview.chat-id") == str(chat_id):
+            remove_container(container["Id"])
+    network_name = resource_name(chat_id, "compose")
+    code, network = docker("GET", f"/networks/{network_name}")
+    if code == 200:
+        if network.get("Labels") != labels(chat_id):
+            raise RuntimeError("Private Compose network name is already in use")
+        remove_resource(f"/networks/{network_name}")
+    elif code != 404:
+        raise RuntimeError("Unable to inspect private Compose network")
+    image_filters = quote(json.dumps({"label": [
+        f"sdd.preview.project={PROJECT}", f"sdd.preview.chat-id={chat_id}",
+    ]}))
+    code, images = docker("GET", f"/images/json?filters={image_filters}")
+    if code != 200:
+        raise RuntimeError("Unable to list private Compose images")
+    for image in images:
+        if image.get("Labels") == labels(chat_id):
+            remove_resource(f"/images/{quote(image['Id'], safe='')}")
     with resource_lock:
         remove_container(resource_name(chat_id, "registry"))
         code, network = docker("GET", f"/networks/{outbound_network()}")
@@ -464,7 +868,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(200, result)
         except FileNotFoundError:
             self.respond(404, {"error": "Not found"})
-        except (ValueError, KeyError, json.JSONDecodeError):
+        except (ValueError, KeyError, json.JSONDecodeError) as error:
+            logger.info("Invalid preview request: %s", error)
             self.respond(400, {"error": "Invalid preview request"})
         except RuntimeError as error:
             logger.error("Preview request failed: %s", error)
