@@ -3,9 +3,15 @@ from pathlib import Path
 import sentry_sdk
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
+from starlette.routing import Host
 from starlette.middleware.cors import CORSMiddleware
 
 from app.api.main import api_router
+from app.api.routes.develop import (
+    browser_service_resource,
+    browser_service_socket,
+    exchange_browser_session,
+)
 from app.core.config import settings
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
@@ -31,6 +37,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if settings.PREVIEW_ORIGIN is not None:
+    preview_app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+    preview_app.add_api_route("/session", exchange_browser_session, methods=["POST"])
+    preview_app.add_api_route("/{asset_path:path}", browser_service_resource, methods=["GET", "POST"])
+    preview_app.add_api_websocket_route("/{asset_path:path}", browser_service_socket)
+    app.router.routes.insert(0, Host(f"{{service}}.{settings.PREVIEW_ORIGIN.host}", app=preview_app))
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
 app.frontend("/", directory=FRONTEND_DIR)

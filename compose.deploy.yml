@@ -2,6 +2,8 @@ services:
 
   proxy:
     restart: always
+    env_file:
+      - ${PREVIEW_DNS_ENV_FILE:?Provide a DNS provider credentials file for preview wildcard TLS}
     ports:
       # Listen on port 80, default for HTTP, necessary to redirect to HTTPS
       - "80:80"
@@ -26,6 +28,8 @@ services:
       - --certificatesresolvers.le.acme.storage=/certificates/acme.json
       # Use the TLS Challenge for Let's Encrypt
       - --certificatesresolvers.le.acme.tlschallenge=true
+      - --certificatesresolvers.preview.acme.storage=/certificates/preview-acme.json
+      - --certificatesresolvers.preview.acme.dnschallenge.provider=${PREVIEW_DNS_PROVIDER:?Provide a Traefik DNS challenge provider}
       # Enable the access log, with HTTP requests
       - --accesslog
       # Enable the Traefik log, for configurations and errors
@@ -61,6 +65,13 @@ services:
       - traefik.http.routers.preview-https.tls=true
       - traefik.http.routers.preview-https.tls.certresolver=le
       - traefik.http.routers.preview-https.service=backend
+      - traefik.http.routers.preview-service-https.rule=HostRegexp(`[0-9a-f-]+-[0-9]+[.]preview[.]${DOMAIN:?Variable not set}`)
+      - traefik.http.routers.preview-service-https.entrypoints=https
+      - traefik.http.routers.preview-service-https.tls=true
+      - traefik.http.routers.preview-service-https.tls.certresolver=preview
+      - traefik.http.routers.preview-service-https.tls.domains[0].main=preview.${DOMAIN:?Variable not set}
+      - traefik.http.routers.preview-service-https.tls.domains[0].sans=*.preview.${DOMAIN:?Variable not set}
+      - traefik.http.routers.preview-service-https.service=backend
 
 volumes:
   # Create a volume to store the certificates, even if the container is recreated

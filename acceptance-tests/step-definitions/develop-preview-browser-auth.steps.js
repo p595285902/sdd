@@ -104,3 +104,125 @@ Then('access is denied without disclosing preview content', async function () {
   assert.equal(this.deletedAccess.status(), 404);
   assert.ok(!(await this.deletedAccess.text()).includes('API reachable'));
 });
+
+Given('an authenticated user owns a Development Chat with registered website and API ports', async function () {
+  await configureDemoRepository(true);
+  await this.apiClient.authenticateSuperuser();
+  this.browserChat = await this.apiClient.createDevelopmentChat(this.apiClient.superuserToken, `Route ${randomUUID()}`);
+  assert.equal((await this.apiClient.setupDevelopmentWorkspace(this.apiClient.superuserToken, this.browserChat.id)).status(), 200);
+  await this.previewWorkloadPage.prepareRoutingCompose(this.browserChat.id, 'first');
+  assert.equal((await this.previewWorkloadPage.openContext(this.browserChat.id)).body.state, 'ready',
+    this.previewWorkloadPage.controllerLogs());
+  this.routedBrowser = await this.previewWorkloadPage.browserContext(this.browserChat.id, 8765);
+});
+
+When('the user requests its website localhost address', async function () {
+  this.routedWebsite = await this.routedBrowser.get('/');
+});
+
+Then("the website and its assets load only from that chat's service", async function () {
+  assert.equal(this.routedWebsite.status(), 200, await this.routedWebsite.text());
+  assert.match(await this.routedWebsite.text(), /Website first/);
+  const assetUrl = await this.previewWorkloadPage.assetFromPage(this.routedWebsite,
+    this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8765));
+  assert.equal(assetUrl.origin, this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8765));
+  assert.equal(assetUrl.pathname, '/assets/site.css');
+  const asset = await this.routedBrowser.get(assetUrl.pathname);
+  assert.equal(asset.status(), 200, await asset.text());
+  assert.match(await asset.text(), /color: green/);
+  const formUrl = await this.previewWorkloadPage.formFromPage(this.routedWebsite,
+    this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8765));
+  assert.equal(formUrl.pathname, '/submit');
+  const form = await this.routedBrowser.post(formUrl.pathname, { form: { title: 'saved' } });
+  assert.equal(form.status(), 200, await form.text());
+  assert.match(await form.text(), /Form title=saved/);
+  const redirect = await this.routedBrowser.get('/return', { maxRedirects: 0 });
+  assert.equal(redirect.status(), 302, await redirect.text());
+  assert.equal(redirect.headers().location, `${this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8765)}/result`);
+  const apiRedirect = await this.routedBrowser.get('/api-return', { maxRedirects: 0 });
+  assert.equal(apiRedirect.status(), 302, await apiRedirect.text());
+  assert.equal(apiRedirect.headers().location, `${this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8766)}/docs`);
+  const apiHost = new URL(apiRedirect.headers().location).host;
+  const redirected = await this.openApiContext({ Host: apiHost, Cookie: this.previewWorkloadPage.browserCookie });
+  const redirectedSwagger = await redirected.get('/docs/');
+  assert.equal(redirectedSwagger.status(), 200, await redirectedSwagger.text());
+  assert.match(await redirectedSwagger.text(), /Swagger first/);
+  const reload = await this.previewWorkloadPage.browserHotReload(this.browserChat.id).catch((error) => {
+    throw new Error(`${error.message}\n${this.previewWorkloadPage.controllerLogs()}`);
+  });
+  assert.match(reload, /101 Switching Protocols/);
+  assert.match(reload, /reload/);
+});
+
+When('the user requests its API localhost Swagger address', async function () {
+  this.routedApiBrowser = await this.previewWorkloadPage.browserContext(this.browserChat.id, 8766);
+  this.routedSwagger = await this.routedApiBrowser.get('/docs/');
+});
+
+Then("that chat's Swagger page loads", async function () {
+  assert.equal(this.routedSwagger.status(), 200, await this.routedSwagger.text());
+  assert.match(this.routedSwagger.headers()['content-type'], /text\/html/);
+  assert.match(await this.routedSwagger.text(), /Swagger first/);
+  const specUrl = await this.previewWorkloadPage.assetFromPage(this.routedSwagger,
+    this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8766), 'a');
+  assert.equal(specUrl.pathname, '/openapi.json');
+  const spec = await this.routedApiBrowser.get(specUrl.pathname);
+  assert.equal(spec.status(), 200, await spec.text());
+  assert.equal((await spec.json()).info.title, 'first');
+  const scriptUrl = await this.previewWorkloadPage.assetFromPage(this.routedSwagger,
+    this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8766), 'script');
+  const script = await this.routedApiBrowser.get(scriptUrl.pathname);
+  assert.equal(script.status(), 200, await script.text());
+  assert.match(await script.text(), /swaggerReady/);
+});
+
+Given('a Development Chat has a registered website port', async function () {
+  await configureDemoRepository(true);
+  await this.apiClient.authenticateSuperuser();
+  this.browserChat = await this.apiClient.createDevelopmentChat(this.apiClient.superuserToken, `Route ${randomUUID()}`);
+  assert.equal((await this.apiClient.setupDevelopmentWorkspace(this.apiClient.superuserToken, this.browserChat.id)).status(), 200);
+  await this.previewWorkloadPage.prepareRoutingCompose(this.browserChat.id, 'first');
+  assert.equal((await this.previewWorkloadPage.openContext(this.browserChat.id)).body.state, 'ready');
+  this.routedBrowser = await this.previewWorkloadPage.browserContext(this.browserChat.id);
+});
+
+When('the user requests an external URL or an unregistered localhost port', async function () {
+  this.externalRoute = await this.routedBrowser.get(this.previewWorkloadPage.browserRoute(this.browserChat.id, 8765, '//example.com'));
+  this.externalUrlRoute = await this.routedBrowser.get(this.previewWorkloadPage.browserRoute(this.browserChat.id, 8765, 'https://example.com'));
+  this.unknownRoute = await this.routedBrowser.get(this.previewWorkloadPage.browserRoute(this.browserChat.id, 9876));
+  this.externalRedirect = await this.previewWorkloadPage.browserExternalRedirect(this.routedBrowser, this.browserChat.id);
+});
+
+Then('navigation is rejected without contacting that destination', function () {
+  assert.equal(this.externalRoute.status(), 404);
+  assert.equal(this.externalUrlRoute.status(), 404);
+  assert.equal(this.unknownRoute.status(), 404);
+  assert.equal(this.externalRedirect.status(), 404);
+});
+
+Given('two Development Chats each have a registered localhost port', async function () {
+  await configureDemoRepository(true);
+  await this.apiClient.authenticateSuperuser();
+  this.browserChat = await this.apiClient.createDevelopmentChat(this.apiClient.superuserToken, `Route ${randomUUID()}`);
+  this.otherBrowserChat = await this.apiClient.createDevelopmentChat(this.apiClient.superuserToken, `Route ${randomUUID()}`);
+  for (const [chat, content] of [[this.browserChat, 'first'], [this.otherBrowserChat, 'second']]) {
+    assert.equal((await this.apiClient.setupDevelopmentWorkspace(this.apiClient.superuserToken, chat.id)).status(), 200);
+    await this.previewWorkloadPage.prepareRoutingCompose(chat.id, content);
+    assert.equal((await this.previewWorkloadPage.openContext(chat.id)).body.state, 'ready');
+  }
+  this.routedBrowser = await this.previewWorkloadPage.browserContext(this.browserChat.id);
+});
+
+When("a user requests the first chat's route with the second chat's service address", async function () {
+  this.crossChatRoute = await this.routedBrowser.get(this.previewWorkloadPage.browserRoute(this.otherBrowserChat.id, 8765));
+  const secondHost = new URL(this.previewWorkloadPage.serviceOrigin(this.otherBrowserChat.id, 8765)).host;
+  const crossHost = await this.openApiContext({ Host: secondHost, Cookie: this.previewWorkloadPage.browserCookie });
+  this.crossChatHost = await crossHost.get('/');
+});
+
+Then("the gateway does not return the second chat's preview content", async function () {
+  assert.equal(this.crossChatRoute.status(), 404);
+  assert.doesNotMatch(await this.crossChatRoute.text(), /Website second/);
+  assert.equal(this.crossChatHost.status(), 404);
+  assert.doesNotMatch(await this.crossChatHost.text(), /Website second/);
+});

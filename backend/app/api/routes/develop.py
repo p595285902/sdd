@@ -1,17 +1,20 @@
+import asyncio
 import base64
 import hashlib
 import json
 import logging
+import re
 import threading
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 import jwt
-from fastapi import APIRouter, HTTPException, Request
+import websockets
+from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, update
@@ -102,9 +105,37 @@ def _browser_key() -> bytes:
 
 def _require_browser_host(request: Request) -> str:
     origin = _browser_origin()
-    if request.headers.get("host") != origin.split("://", 1)[1]:
+    if request.headers.get("host") != origin.split("://", 1)[1] and _service_host(request) is None:
         raise HTTPException(status_code=404, detail="Not found")
     return origin
+
+
+def _service_origin(chat_id: uuid.UUID, port: str) -> str:
+    origin = urlsplit(_browser_origin())
+    return f"{origin.scheme}://{chat_id}-{port}.{origin.netloc}"
+
+
+def _service_host(request: Request) -> tuple[uuid.UUID, str] | None:
+    origin = urlsplit(_browser_origin())
+    match = re.fullmatch(r"([0-9a-f-]{36})-([0-9]{1,5})\." + re.escape(origin.netloc), request.headers.get("host", ""))
+    if match is None:
+        return None
+    try:
+        chat_id = uuid.UUID(match[1])
+    except ValueError:
+        return None
+    if match[1] != str(chat_id) or not 1 <= int(match[2]) <= 65535:
+        return None
+    return chat_id, match[2]
+
+
+def _service_cookie(chat_id: uuid.UUID) -> str:
+    return f"preview_session_{chat_id.hex}"
+
+
+def _browser_cookie(request: Request, chat_id: uuid.UUID) -> str:
+    name = _service_cookie(chat_id) if _service_host(request) is not None else "preview_session"
+    return request.cookies.get(name, "")
 
 
 def _browser_claims(credential: str, *, session: Session) -> uuid.UUID:
@@ -695,16 +726,19 @@ def start_development_preview(
 @router.post("/{chat_id}/preview/browser-session")
 def issue_browser_session(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID,
-) -> dict[str, str | int]:
+) -> dict[str, Any]:
     origin = _browser_origin()
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
-    if not chat.workspace_ready or _preview_status(chat.id).get("state") != "ready":
+    ready = _preview_status(chat.id) if chat.workspace_ready else {}
+    if ready.get("state") != "ready":
         raise HTTPException(status_code=409, detail="Preview is not ready")
     credential = jwt.encode({
         "chat": str(chat.id), "owner": str(current_user.id),
         "exp": datetime.now(UTC) + timedelta(minutes=5),
     }, _browser_key(), algorithm=ALGORITHM)
-    return {"chat_id": str(chat.id), "origin": origin, "credential": credential, "expires_in": 300}
+    ports = {key: _service_origin(chat.id, ready[key]) for key in ("initial_port", "website_port", "api_port") if key in ready}
+    return {"chat_id": str(chat.id), "origin": origin, "services": ports,
+            "credential": credential, "expires_in": 300}
 
 
 @router.post("/preview-browser/session")
@@ -727,33 +761,155 @@ async def exchange_browser_session(
     except (UnicodeError, ValueError):
         raise HTTPException(status_code=422, detail="Invalid browser session request") from None
     chat_id = _browser_claims(credential, session=session)
-    path = f"{settings.API_V1_STR}/develop/chats/preview-browser/{chat_id}/"
+    service = _service_host(request)
+    if service is not None:
+        if service[0] != chat_id:
+            raise HTTPException(status_code=404, detail="Not found")
+        ready = _preview_status(chat_id)
+        if service[1] not in (ready.get("initial_port"), ready.get("website_port"), ready.get("api_port")):
+            raise HTTPException(status_code=404, detail="Not found")
+    path = "/" if service is not None else f"{settings.API_V1_STR}/develop/chats/preview-browser/{chat_id}/"
     response = Response(status_code=303 if form else 200, headers={
         "Cache-Control": "no-store", "Content-Security-Policy": f"frame-ancestors {settings.FRONTEND_HOST}",
         **({"Location": path} if form else {}),
     })
-    response.set_cookie("preview_session", credential, max_age=300, httponly=True,
+    response.set_cookie(_service_cookie(chat_id) if service is not None else "preview_session",
+                        credential, max_age=300, httponly=True,
                         secure=origin.startswith("https://"), samesite="none" if origin.startswith("https://") else "lax",
-                        path=path)
+                        path=path, domain=settings.PREVIEW_ORIGIN.host if service is not None else None)
     return response
 
 
-@router.get("/preview-browser/{chat_id}/{asset_path:path}")
-def browser_preview_resource(
+async def browser_service_resource(request: Request, session: SessionDep, asset_path: str) -> Response:
+    service = _service_host(request)
+    if service is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    chat_id, port = service
+    return await browser_preview_resource(request=request, session=session, chat_id=chat_id,
+                                          asset_path=f"localhost/{port}/{asset_path}")
+
+
+async def browser_service_socket(websocket: WebSocket, session: SessionDep, asset_path: str) -> None:
+    service = _service_host(websocket)
+    if service is None:
+        await websocket.close(code=1008)
+        return
+    chat_id, port = service
+    await browser_preview_socket(websocket, session, chat_id, f"localhost/{port}/{asset_path}")
+
+
+@router.api_route("/preview-browser/{chat_id}/{asset_path:path}", methods=["GET", "POST"])
+async def browser_preview_resource(
     *, request: Request, session: SessionDep, chat_id: uuid.UUID, asset_path: str,
 ) -> Response:
     _require_browser_host(request)
-    if _browser_claims(request.cookies.get("preview_session", ""), session=session) != chat_id:
+    if _browser_claims(_browser_cookie(request, chat_id), session=session) != chat_id:
         raise HTTPException(status_code=404, detail="Not found")
+    port = None
+    if asset_path.startswith("localhost/"):
+        parts = asset_path.split("/", 2)
+        if len(parts) < 2 or not parts[1].isdigit():
+            raise HTTPException(status_code=404, detail="Not found")
+        port = parts[1]
+        asset_path = parts[2] if len(parts) == 3 else ""
+    if urlsplit(asset_path).scheme:
+        raise HTTPException(status_code=404, detail="Not found")
+    content_type = request.headers.get("content-type", "").split(";", 1)[0]
+    body = None
+    if request.method == "POST":
+        if content_type not in ("application/x-www-form-urlencoded", "multipart/form-data", "text/plain"):
+            raise HTTPException(status_code=415, detail="Unsupported preview form")
+        body = await request.body()
+        if len(body) > 32768:
+            raise HTTPException(status_code=413, detail="Preview form is too large")
     try:
-        result = preview_controller.fetch(chat_id, "/" + asset_path, request.url.query)
-    except (httpx.HTTPError, FileNotFoundError, RuntimeError):
+        result = preview_controller.fetch(chat_id, "/" + asset_path, request.url.query, port,
+                                          body, request.headers.get("content-type", "") if body is not None else "")
+    except (httpx.HTTPError, FileNotFoundError, RuntimeError, ValueError):
         raise HTTPException(status_code=404, detail="Not found") from None
-    return Response(content=result["body"], status_code=result["status"], headers={
+    headers = {
         "Content-Type": result["content_type"], "Cache-Control": "no-store",
         "Content-Security-Policy": f"frame-ancestors {settings.FRONTEND_HOST}",
         "X-Content-Type-Options": "nosniff",
-    })
+    }
+    if 300 <= result["status"] < 400:
+        location = urlsplit(result["location"])
+        redirect_port = port
+        if location.scheme or location.netloc:
+            if location.scheme != "http" or location.hostname not in ("localhost", "127.0.0.1"):
+                raise HTTPException(status_code=404, detail="Not found")
+            try:
+                redirect_port = str(location.port or 80)
+            except ValueError:
+                raise HTTPException(status_code=404, detail="Not found") from None
+            ready = _preview_status(chat_id)
+            if redirect_port not in (ready.get("initial_port"), ready.get("website_port"), ready.get("api_port")):
+                raise HTTPException(status_code=404, detail="Not found")
+            redirect_path = location.path
+        else:
+            if result["location"].startswith("//"):
+                raise HTTPException(status_code=404, detail="Not found")
+            redirect_path = location.path if location.path.startswith("/") else "/" + location.path
+        service = _service_host(request)
+        if service is not None:
+            base = _service_origin(chat_id, redirect_port or service[1])
+        else:
+            base = f"{settings.API_V1_STR}/develop/chats/preview-browser/{chat_id}/"
+            if redirect_port is not None:
+                base += f"localhost/{redirect_port}/"
+        headers["Location"] = base.rstrip("/") + redirect_path
+        if location.query:
+            headers["Location"] += "?" + location.query
+    return Response(content=result["body"], status_code=result["status"], headers=headers)
+
+
+@router.websocket("/preview-browser/{chat_id}/{asset_path:path}")
+async def browser_preview_socket(
+    websocket: WebSocket, session: SessionDep, chat_id: uuid.UUID, asset_path: str,
+) -> None:
+    try:
+        _require_browser_host(websocket)
+        if _browser_claims(_browser_cookie(websocket, chat_id), session=session) != chat_id:
+            raise ValueError("Not found")
+        parts = asset_path.split("/", 2)
+        if len(parts) != 3 or parts[0] != "localhost" or not parts[1].isdigit():
+            raise ValueError("Invalid preview port")
+        port = parts[1]
+        path = "/" + parts[2]
+        if path.startswith("//") or len(path) + len(websocket.url.query) > 2000:
+            raise ValueError("Invalid preview path")
+        target = f"ws://preview-controller:8090/workloads/{chat_id}/browser?path="
+        target += quote(path + ("?" + websocket.url.query if websocket.url.query else ""), safe="")
+        target += f"&port={port}"
+        async with websockets.connect(target, max_size=2 * 1024 * 1024) as upstream:
+            await websocket.accept()
+
+            async def to_upstream() -> None:
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        break
+                    data = message.get("bytes") if message.get("bytes") is not None else message.get("text")
+                    if data is not None:
+                        await upstream.send(data)
+
+            async def to_browser() -> None:
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+
+            tasks = [asyncio.create_task(to_upstream()), asyncio.create_task(to_browser())]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()
+    except (HTTPException, ValueError, OSError, websockets.WebSocketException) as error:
+        logger.warning("Preview WebSocket rejected: %s", error)
+        await websocket.close(code=1008)
 
 
 @router.get("/{chat_id}/preview/status", response_model=dict[str, str])

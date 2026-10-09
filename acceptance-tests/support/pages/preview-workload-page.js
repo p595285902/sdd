@@ -1,5 +1,8 @@
 const assert = require('node:assert/strict');
 const { execFileSync, spawnSync } = require('node:child_process');
+const { randomBytes } = require('node:crypto');
+const net = require('node:net');
+const cheerio = require('cheerio');
 const { runBackendPython } = require('../../features/support/app-lifecycle.js');
 
 const startScript = `
@@ -125,6 +128,139 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(result)
 HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
 `);
+  }
+
+  async prepareRoutingCompose(chatId, content) {
+    await this.prepareCompose(chatId);
+    await this.world.apiClient.editWorkspaceFile(chatId, 'api/docs/index.html',
+      `<html><script src="/swagger-ui.js"></script><a href="/openapi.json">Swagger ${content}</a></html>`);
+    await this.world.apiClient.editWorkspaceFile(chatId, 'api/openapi.json', JSON.stringify({ openapi: '3.1.0', info: { title: content } }));
+    await this.world.apiClient.editWorkspaceFile(chatId, 'api/swagger-ui.js', 'window.swaggerReady = true;');
+    await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/assets/site.css':
+            body = b'body { color: green; }'
+            content_type = 'text/css'
+        elif self.path == '/hot' and self.headers.get('Upgrade', '').lower() == 'websocket':
+          import base64, hashlib
+          key = self.headers['Sec-WebSocket-Key']
+          accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+          self.send_response(101)
+          self.send_header('Upgrade', 'websocket')
+          self.send_header('Connection', 'Upgrade')
+          self.send_header('Sec-WebSocket-Accept', accept)
+          self.end_headers()
+          self.connection.sendall(b'\\x81\\x06reload')
+          return
+        elif self.path == '/return':
+            self.send_response(302)
+            self.send_header('Location', '/result')
+            self.end_headers()
+            return
+        elif self.path == '/api-return':
+          self.send_response(302)
+          self.send_header('Location', 'http://localhost:8766/docs')
+          self.end_headers()
+          return
+        elif self.path == '/external-return':
+          self.send_response(302)
+          self.send_header('Location', 'https://example.com/')
+          self.end_headers()
+          return
+        else:
+            body = b'<html><link rel="stylesheet" href="/assets/site.css"><form action="/submit" method="post"></form>Website ${content}</html>'
+            content_type = 'text/html'
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.end_headers()
+        self.wfile.write(body)
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers['Content-Length']))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'Form ' + body)
+HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
+`);
+  }
+
+  browserRoute(chatId, port, path = '') {
+    return `/api/v1/develop/chats/preview-browser/${chatId}/localhost/${port}/${path}`;
+  }
+
+  serviceOrigin(chatId, port) {
+    const origin = new URL(this.world.applicationState.env.PREVIEW_ORIGIN);
+    return `${origin.protocol}//${chatId}-${port}.${origin.host}`;
+  }
+
+  async assetFromPage(response, origin, selector = 'link[rel="stylesheet"]') {
+    const asset = cheerio.load((await response.body()).toString())(selector).attr(selector === 'script' ? 'src' : 'href');
+    assert.ok(asset);
+    return new URL(asset, origin);
+  }
+
+  async formFromPage(response, origin) {
+    const action = cheerio.load((await response.body()).toString())('form').attr('action');
+    assert.ok(action);
+    return new URL(action, origin);
+  }
+
+  async browserContext(chatId, port = null) {
+    const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
+      `/api/v1/develop/chats/${chatId}/preview/browser-session`);
+    assert.equal(response.status(), 200, await response.text());
+    const access = await response.json();
+    const service = port === 8765 ? 'website_port' : 'api_port';
+    const host = new URL(port === null ? access.origin : access.services[service]).host;
+    if (port !== null) assert.equal(access.services[service], this.serviceOrigin(chatId, port));
+    const preview = await this.world.openApiContext({ Host: host });
+    const exchange = await preview.post(port === null ? '/api/v1/develop/chats/preview-browser/session' : '/session',
+      { data: { credential: access.credential } });
+    assert.equal(exchange.status(), 200, await exchange.text());
+    this.browserCookie = exchange.headers()['set-cookie'].split(';')[0];
+    return this.world.openApiContext({
+      Host: host,
+      Cookie: this.browserCookie,
+    });
+  }
+
+  async browserHotReload(chatId) {
+    const target = new URL(this.world.applicationState.baseUrl);
+    const host = new URL(this.serviceOrigin(chatId, 8765)).host;
+    const path = '/hot';
+    return new Promise((resolve, reject) => {
+      const connection = net.createConnection(Number(target.port), target.hostname);
+      let response = Buffer.alloc(0);
+      connection.setTimeout(10000, () => connection.destroy(new Error('WebSocket timeout')));
+      connection.on('error', reject);
+      connection.on('connect', () => connection.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nCookie: ${this.browserCookie}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n\r\n`));
+      connection.on('data', (chunk) => {
+        response = Buffer.concat([response, chunk]);
+        if (response.includes('reload')) {
+          connection.destroy();
+          resolve(response.toString('latin1'));
+        }
+      });
+      connection.on('close', () => {
+        if (!response.includes('reload')) reject(new Error(`WebSocket closed: ${response.toString('latin1')}`));
+      });
+    });
+  }
+
+  async submitBrowserForm(browser, chatId) {
+    return browser.post(this.browserRoute(chatId, 8765, 'submit'), { form: { title: 'saved' } });
+  }
+
+  async browserRedirect(browser, chatId) {
+    return browser.get(this.browserRoute(chatId, 8765, 'return'), { maxRedirects: 0 });
+  }
+
+  async browserApiRedirect(browser, chatId) {
+    return browser.get(this.browserRoute(chatId, 8765, 'api-return'), { maxRedirects: 0 });
+  }
+
+  async browserExternalRedirect(browser, chatId) {
+    return browser.get(this.browserRoute(chatId, 8765, 'external-return'), { maxRedirects: 0 });
   }
 
   async prepareDependencyCompose(chatId) {

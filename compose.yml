@@ -108,6 +108,8 @@ services:
       - traefik.http.routers.backend-http.rule=Host(`${DOMAIN:-localhost}`)
       - traefik.http.routers.backend-http.entrypoints=http
       - traefik.http.routers.preview-http.rule=Host(`preview.${DOMAIN:-localhost}`) && PathPrefix(`/api/v1/develop/chats/preview-browser`)
+      - traefik.http.routers.preview-service-http.rule=HostRegexp(`[0-9a-f-]+-[0-9]+[.]preview[.]${DOMAIN:-localhost}`)
+      - traefik.http.routers.preview-service-http.service=backend
       - traefik.http.routers.preview-http.entrypoints=http
       - traefik.http.routers.preview-http.service=backend
 

@@ -38,6 +38,8 @@ You can also configure these environment variables as needed:
 
 Develop may be disabled by leaving `DEMO_GITHUB_REPO`, `DEMO_GITHUB_TOKEN`, and `OPENAI_API_KEY` unset. A production deployment that sets any one of them must set all three or backend startup fails. The Compose deployment stores workspaces at `DEVELOP_WORKSPACE_ROOT=/develop-workspaces` on the `sdd-develop-workspaces` named volume.
 
+Preview sites use one hostname per chat and port, such as `<chat-id>-8765.preview.${DOMAIN}`. Configure DNS for both `preview.${DOMAIN}` and `*.preview.${DOMAIN}` pointing to the proxy. Wildcard HTTPS certificates require a DNS challenge (the existing HTTP/TLS challenge cannot issue wildcard certificates). Set `PREVIEW_DNS_PROVIDER` to a Traefik-supported DNS provider and `PREVIEW_DNS_ENV_FILE` to an absolute path to a private environment file with that provider's credentials (for example, `CF_DNS_API_TOKEN` for Cloudflare). Keep that file outside the repository, readable only by the deployment user, and never commit it. The proxy uses these credentials to issue a certificate for `preview.${DOMAIN}` and `*.preview.${DOMAIN}`. Without wildcard DNS and TLS, preview browser sessions cannot load root-relative resources or WebSocket connections in production.
+
 ### Secrets
 
 Generate and set secure values for the database password, token signing key, and first superuser password:
