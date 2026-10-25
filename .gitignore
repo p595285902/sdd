@@ -6,3 +6,4 @@ acceptance-tests/reports/
 backend/app/frontend/
 !.vscode/
 !.vscode/launch.json
+.vscode/settings.json
