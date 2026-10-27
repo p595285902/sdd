@@ -133,12 +133,38 @@ Then("the website and its assets load only from that chat's service", async func
   const formUrl = await this.previewWorkloadPage.formFromPage(this.routedWebsite,
     this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8765));
   assert.equal(formUrl.pathname, '/submit');
-  const form = await this.routedBrowser.post(formUrl.pathname, { form: { title: 'saved' } });
-  assert.equal(form.status(), 200, await form.text());
-  assert.match(await form.text(), /Form title=saved/);
+  const cookies = (await this.routedWebsite.headersArray()).filter((header) => header.name.toLowerCase() === 'set-cookie');
+  assert.equal(cookies.length, 2);
+  assert.ok(cookies.every((header) => !/;\s*Domain=/i.test(header.value)));
+  assert.ok(cookies.every((header) => !header.value.startsWith('preview_session=')));
+  const appCookies = cookies.map((header) => header.value.split(';')[0]).join('; ');
+  const appBrowser = await this.openApiContext({
+    Host: new URL(formUrl).host,
+    Cookie: `${this.previewWorkloadPage.browserCookie}; ${appCookies.split('; ')[0]}; app_session=root; `
+      + `preview_session_${randomUUID()}=other-chat; ${appCookies.split('; ')[1]}`,
+  });
+  const form = await this.previewWorkloadPage.submitServiceForm(appBrowser, formUrl);
+  assert.equal(form.status(), 200, `${await form.text()}\n${this.previewWorkloadPage.controllerLogs()}`);
+  assert.match(await form.text(), /Form alice title=saved/);
+  const logout = await this.routedBrowser.get('/logout');
+  const logoutHeaders = await logout.headersArray();
+  assert.ok(logoutHeaders.some((header) =>
+    header.name.toLowerCase() === 'set-cookie' && /^app_session=(?:"")?;.*Max-Age=-1/i.test(header.value)),
+  `Logout returned ${logout.status()} with headers ${JSON.stringify(logoutHeaders)}`);
+  const foreignForm = await this.previewWorkloadPage.submitServiceForm(this.routedBrowser, formUrl, 'https://example.com');
+  assert.equal(foreignForm.status(), 403, await foreignForm.text());
+  const missingOriginForm = await this.previewWorkloadPage.submitServiceForm(this.routedBrowser, formUrl, null);
+  assert.equal(missingOriginForm.status(), 403, await missingOriginForm.text());
   const redirect = await this.routedBrowser.get('/return', { maxRedirects: 0 });
   assert.equal(redirect.status(), 302, await redirect.text());
   assert.equal(redirect.headers().location, `${this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8765)}/result`);
+  const relative = await this.routedBrowser.get('/docs/relative', { maxRedirects: 0 });
+  assert.equal(relative.status(), 302, await relative.text());
+  assert.equal(relative.headers().location,
+    `${this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8765)}/docs/assets/app.js?mode=preview`);
+  const relativeAsset = await this.routedBrowser.get('/docs/assets/app.js?mode=preview');
+  assert.equal(relativeAsset.status(), 200, await relativeAsset.text());
+  assert.match(await relativeAsset.text(), /relativeAsset/);
   const apiRedirect = await this.routedBrowser.get('/api-return', { maxRedirects: 0 });
   assert.equal(apiRedirect.status(), 302, await apiRedirect.text());
   assert.equal(apiRedirect.headers().location, `${this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8766)}/docs`);
@@ -151,7 +177,15 @@ Then("the website and its assets load only from that chat's service", async func
     throw new Error(`${error.message}\n${this.previewWorkloadPage.controllerLogs()}`);
   });
   assert.match(reload, /101 Switching Protocols/);
+  assert.match(reload, /Sec-WebSocket-Protocol: vite-hmr/i);
   assert.match(reload, /reload/);
+  const foreign = await this.previewWorkloadPage.browserHotReload(this.browserChat.id, 'https://example.com');
+  assert.match(foreign, /403 Forbidden/);
+  assert.doesNotMatch(foreign, /reload/);
+  const otherService = await this.previewWorkloadPage.browserHotReload(this.browserChat.id,
+    this.previewWorkloadPage.serviceOrigin(this.browserChat.id, 8766));
+  assert.match(otherService, /403 Forbidden/);
+  assert.doesNotMatch(otherService, /reload/);
 });
 
 When('the user requests its API localhost Swagger address', async function () {
@@ -191,6 +225,8 @@ When('the user requests an external URL or an unregistered localhost port', asyn
   this.externalUrlRoute = await this.routedBrowser.get(this.previewWorkloadPage.browserRoute(this.browserChat.id, 8765, 'https://example.com'));
   this.unknownRoute = await this.routedBrowser.get(this.previewWorkloadPage.browserRoute(this.browserChat.id, 9876));
   this.externalRedirect = await this.previewWorkloadPage.browserExternalRedirect(this.routedBrowser, this.browserChat.id);
+  this.schemeRelativeRedirect = await this.routedBrowser.get(
+    this.previewWorkloadPage.browserRoute(this.browserChat.id, 8765, 'scheme-relative-return'), { maxRedirects: 0 });
 });
 
 Then('navigation is rejected without contacting that destination', function () {
@@ -198,6 +234,7 @@ Then('navigation is rejected without contacting that destination', function () {
   assert.equal(this.externalUrlRoute.status(), 404);
   assert.equal(this.unknownRoute.status(), 404);
   assert.equal(this.externalRedirect.status(), 404);
+  assert.equal(this.schemeRelativeRedirect.status(), 404);
 });
 
 Given('two Development Chats each have a registered localhost port', async function () {

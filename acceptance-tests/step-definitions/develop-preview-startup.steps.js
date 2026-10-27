@@ -349,4 +349,22 @@ Then('the initial preview page is its Swagger page', async function () {
   assert.equal(this.startupResponse.body.initial_port, '8766');
   assert.equal(this.startupResponse.body.initial_path, '/docs');
   assert.match(this.previewWorkloadPage.serviceResponse(this.startupChat.id, 8766), /directory/i);
+  const accessResponse = await this.apiClient.request(this.apiClient.superuserToken, 'post',
+    `/api/v1/develop/chats/${this.startupChat.id}/preview/browser-session`);
+  assert.equal(accessResponse.status(), 200, await accessResponse.text());
+  const access = await accessResponse.json();
+  assert.equal(access.initial_url, `${access.services.initial_port}/docs`);
+  const preview = await this.openApiContext({ Host: new URL(access.initial_url).host });
+  const exchange = await preview.post('/session',
+    { form: { credential: access.credential }, maxRedirects: 0 });
+  assert.equal(exchange.status(), 303, await exchange.text());
+  assert.equal(exchange.headers().location, '/docs');
+  assert.match(exchange.headers()['set-cookie'], /Path=\//);
+  const swagger = await this.openApiContext({
+    Host: new URL(access.initial_url).host,
+    Cookie: exchange.headers()['set-cookie'].split(';')[0],
+  });
+  const page = await swagger.get('/docs');
+  assert.equal(page.status(), 200, await page.text());
+  assert.match(await page.text(), /Swagger UI/);
 });

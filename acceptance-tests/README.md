@@ -34,6 +34,8 @@ cd acceptance-tests && npx cucumber-js --dry-run
 
 Each run uses a unique `sdd-acceptance-<pid>` Compose project and removes only
 that project's containers, network, and volumes during teardown.
+The test stack uses fixed fake provider and repository credentials rather than
+credentials from the host environment.
 
 Run specific scenario
 ```sh

@@ -82,6 +82,8 @@ async function startApplication() {
     SMTP_HOST: '',
     PREVIEW_ORIGIN: 'http://preview.localhost',
     EMAILS_FROM_EMAIL: 'test@example.com',
+    OPENAI_API_KEY: 'acceptance-provider-key',
+    DEMO_GITHUB_TOKEN: 'acceptance-token',
   };
 
   state.projectName = projectName;

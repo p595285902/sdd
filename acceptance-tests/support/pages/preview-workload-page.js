@@ -139,17 +139,24 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
     await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if 'preview_session=' in self.headers.get('Cookie', '') or 'preview_session_' in self.headers.get('Cookie', ''):
+          self.send_error(403, 'Leaked gateway credential')
+          return
         if self.path == '/assets/site.css':
             body = b'body { color: green; }'
             content_type = 'text/css'
         elif self.path == '/hot' and self.headers.get('Upgrade', '').lower() == 'websocket':
           import base64, hashlib
+          if self.headers.get('Sec-WebSocket-Protocol') != 'vite-hmr':
+            self.send_error(400)
+            return
           key = self.headers['Sec-WebSocket-Key']
           accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
           self.send_response(101)
           self.send_header('Upgrade', 'websocket')
           self.send_header('Connection', 'Upgrade')
           self.send_header('Sec-WebSocket-Accept', accept)
+          self.send_header('Sec-WebSocket-Protocol', 'vite-hmr')
           self.end_headers()
           self.connection.sendall(b'\\x81\\x06reload')
           return
@@ -163,9 +170,27 @@ class Handler(BaseHTTPRequestHandler):
           self.send_header('Location', 'http://localhost:8766/docs')
           self.end_headers()
           return
+        elif self.path == '/docs/relative':
+          self.send_response(302)
+          self.send_header('Location', 'assets/app.js?mode=preview')
+          self.end_headers()
+          return
+        elif self.path == '/docs/assets/app.js?mode=preview':
+          body = b'window.relativeAsset = true;'
+          content_type = 'application/javascript'
         elif self.path == '/external-return':
           self.send_response(302)
           self.send_header('Location', 'https://example.com/')
+          self.end_headers()
+          return
+        elif self.path == '/scheme-relative-return':
+          self.send_response(302)
+          self.send_header('Location', '//example.com/')
+          self.end_headers()
+          return
+        elif self.path == '/logout':
+          self.send_response(200)
+          self.send_header('Set-Cookie', 'app_session=; Path=/; Max-Age=-1')
           self.end_headers()
           return
         else:
@@ -173,13 +198,21 @@ class Handler(BaseHTTPRequestHandler):
             content_type = 'text/html'
         self.send_response(200)
         self.send_header('Content-Type', content_type)
+        if self.path == '/':
+          self.send_header('Set-Cookie', 'app_session=alice; Domain=example.com; Path=/; HttpOnly')
+          self.send_header('Set-Cookie', 'app_theme=green; Path=/')
+          self.send_header('Set-Cookie', 'preview_session=forged; Path=/')
         self.end_headers()
         self.wfile.write(body)
     def do_POST(self):
         body = self.rfile.read(int(self.headers['Content-Length']))
+        cookies = self.headers.get('Cookie', '')
+        if cookies.split('; ') != ['app_session=alice', 'app_session=root', 'app_theme=green']:
+            self.send_error(403, 'Missing app session or leaked gateway credential')
+            return
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'Form ' + body)
+        self.wfile.write(b'Form alice ' + body)
 HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
 `);
   }
@@ -205,6 +238,13 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
     return new URL(action, origin);
   }
 
+  async submitServiceForm(browser, formUrl, origin = formUrl.origin) {
+    return browser.post(formUrl.pathname, {
+      form: { title: 'saved' },
+      ...(origin === null ? {} : { headers: { Origin: origin } }),
+    });
+  }
+
   async browserContext(chatId, port = null) {
     const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
       `/api/v1/develop/chats/${chatId}/preview/browser-session`);
@@ -224,7 +264,7 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
     });
   }
 
-  async browserHotReload(chatId) {
+  async browserHotReload(chatId, origin = this.serviceOrigin(chatId, 8765)) {
     const target = new URL(this.world.applicationState.baseUrl);
     const host = new URL(this.serviceOrigin(chatId, 8765)).host;
     const path = '/hot';
@@ -233,16 +273,16 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
       let response = Buffer.alloc(0);
       connection.setTimeout(10000, () => connection.destroy(new Error('WebSocket timeout')));
       connection.on('error', reject);
-      connection.on('connect', () => connection.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nCookie: ${this.browserCookie}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n\r\n`));
+      connection.on('connect', () => connection.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nOrigin: ${origin}\r\nCookie: ${this.browserCookie}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: vite-hmr\r\n\r\n`));
       connection.on('data', (chunk) => {
         response = Buffer.concat([response, chunk]);
-        if (response.includes('reload')) {
+        if (response.includes('reload') || (response.includes('\r\n\r\n') && !response.includes('101 Switching Protocols'))) {
           connection.destroy();
           resolve(response.toString('latin1'));
         }
       });
       connection.on('close', () => {
-        if (!response.includes('reload')) reject(new Error(`WebSocket closed: ${response.toString('latin1')}`));
+        if (!response.includes('reload') && !response.includes('\r\n\r\n')) reject(new Error(`WebSocket closed: ${response.toString('latin1')}`));
       });
     });
   }

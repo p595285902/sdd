@@ -8,8 +8,9 @@ import threading
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from http.cookies import CookieError, SimpleCookie
 from typing import Any
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
 import httpx
 import jwt
@@ -738,6 +739,7 @@ def issue_browser_session(
     }, _browser_key(), algorithm=ALGORITHM)
     ports = {key: _service_origin(chat.id, ready[key]) for key in ("initial_port", "website_port", "api_port") if key in ready}
     return {"chat_id": str(chat.id), "origin": origin, "services": ports,
+            "initial_url": ports["initial_port"] + ready.get("initial_path", "/"),
             "credential": credential, "expires_in": 300}
 
 
@@ -769,9 +771,12 @@ async def exchange_browser_session(
         if service[1] not in (ready.get("initial_port"), ready.get("website_port"), ready.get("api_port")):
             raise HTTPException(status_code=404, detail="Not found")
     path = "/" if service is not None else f"{settings.API_V1_STR}/develop/chats/preview-browser/{chat_id}/"
+    redirect_path = path
+    if service is not None and service[1] == ready["initial_port"]:
+        redirect_path = ready.get("initial_path", "/")
     response = Response(status_code=303 if form else 200, headers={
         "Cache-Control": "no-store", "Content-Security-Policy": f"frame-ancestors {settings.FRONTEND_HOST}",
-        **({"Location": path} if form else {}),
+        **({"Location": redirect_path} if form else {}),
     })
     response.set_cookie(_service_cookie(chat_id) if service is not None else "preview_session",
                         credential, max_age=300, httponly=True,
@@ -802,7 +807,12 @@ async def browser_service_socket(websocket: WebSocket, session: SessionDep, asse
 async def browser_preview_resource(
     *, request: Request, session: SessionDep, chat_id: uuid.UUID, asset_path: str,
 ) -> Response:
-    _require_browser_host(request)
+    origin = _require_browser_host(request)
+    service = _service_host(request)
+    if request.method == "POST" and request.headers.get("origin") != (
+        _service_origin(*service) if service is not None else origin
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
     if _browser_claims(_browser_cookie(request, chat_id), session=session) != chat_id:
         raise HTTPException(status_code=404, detail="Not found")
     port = None
@@ -822,9 +832,27 @@ async def browser_preview_resource(
         body = await request.body()
         if len(body) > 32768:
             raise HTTPException(status_code=413, detail="Preview form is too large")
+    forwarded_cookies = []
+    if service is not None:
+        raw_cookie = request.headers.get("cookie", "")
+        if len(raw_cookie) > 8192:
+            raise HTTPException(status_code=400, detail="Preview cookie is too large")
+        for raw_pair in raw_cookie.split(";") if raw_cookie else []:
+            name, separator, value = raw_pair.strip().partition("=")
+            if not separator or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+                raise HTTPException(status_code=400, detail="Invalid preview cookie")
+            cookie_value = value[1:-1] if value.startswith('"') and value.endswith('"') else value
+            if not re.fullmatch(r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*", cookie_value):
+                raise HTTPException(status_code=400, detail="Invalid preview cookie")
+            if name != "preview_session" and not name.startswith("preview_session_"):
+                forwarded_cookies.append(f"{name}={value}")
+    forwarded_cookie = "; ".join(forwarded_cookies)
+    if len(forwarded_cookie) > 8192:
+        raise HTTPException(status_code=400, detail="Preview cookie is too large")
     try:
         result = preview_controller.fetch(chat_id, "/" + asset_path, request.url.query, port,
-                                          body, request.headers.get("content-type", "") if body is not None else "")
+                                          body, request.headers.get("content-type", "") if body is not None else "",
+                                          forwarded_cookie)
     except (httpx.HTTPError, FileNotFoundError, RuntimeError, ValueError):
         raise HTTPException(status_code=404, detail="Not found") from None
     headers = {
@@ -849,7 +877,7 @@ async def browser_preview_resource(
         else:
             if result["location"].startswith("//"):
                 raise HTTPException(status_code=404, detail="Not found")
-            redirect_path = location.path if location.path.startswith("/") else "/" + location.path
+            redirect_path = urlsplit(urljoin("http://localhost/" + asset_path, result["location"])).path
         service = _service_host(request)
         if service is not None:
             base = _service_origin(chat_id, redirect_port or service[1])
@@ -860,7 +888,29 @@ async def browser_preview_resource(
         headers["Location"] = base.rstrip("/") + redirect_path
         if location.query:
             headers["Location"] += "?" + location.query
-    return Response(content=result["body"], status_code=result["status"], headers=headers)
+    response = Response(content=result["body"], status_code=result["status"], headers=headers)
+    cookies = result.get("cookies", [])
+    if service is not None and isinstance(cookies, list) and len(cookies) <= 8:
+        for raw_cookie in cookies:
+            if not isinstance(raw_cookie, str) or len(raw_cookie) > 4096 or any(ord(char) < 32 or ord(char) == 127 for char in raw_cookie):
+                continue
+            parsed_cookie = SimpleCookie()
+            try:
+                parsed_cookie.load(raw_cookie)
+            except CookieError:
+                continue
+            if len(parsed_cookie) != 1:
+                continue
+            name, morsel = next(iter(parsed_cookie.items()))
+            if name == "preview_session" or name.startswith("preview_session_"):
+                continue
+            same_site = morsel["samesite"].capitalize() if morsel["samesite"].lower() in ("lax", "strict", "none") else "lax"
+            path = morsel["path"] if morsel["path"].startswith("/") and not morsel["path"].startswith("//") else "/"
+            response.set_cookie(name, morsel.value, path=path, secure=origin.startswith("https://") or bool(morsel["secure"]),
+                                httponly=bool(morsel["httponly"]), samesite=same_site,
+                                max_age=int(morsel["max-age"]) if re.fullmatch(r"-?[0-9]{1,10}", morsel["max-age"]) else None,
+                                expires=morsel["expires"] or None)
+    return response
 
 
 @router.websocket("/preview-browser/{chat_id}/{asset_path:path}")
@@ -868,7 +918,11 @@ async def browser_preview_socket(
     websocket: WebSocket, session: SessionDep, chat_id: uuid.UUID, asset_path: str,
 ) -> None:
     try:
-        _require_browser_host(websocket)
+        origin = _require_browser_host(websocket)
+        service = _service_host(websocket)
+        expected_origin = _service_origin(*service) if service is not None else origin
+        if websocket.headers.get("origin") != expected_origin:
+            raise ValueError("Invalid preview origin")
         if _browser_claims(_browser_cookie(websocket, chat_id), session=session) != chat_id:
             raise ValueError("Not found")
         parts = asset_path.split("/", 2)
@@ -878,11 +932,17 @@ async def browser_preview_socket(
         path = "/" + parts[2]
         if path.startswith("//") or len(path) + len(websocket.url.query) > 2000:
             raise ValueError("Invalid preview path")
+        offered = websocket.headers.get("sec-websocket-protocol", "")
+        protocols = [value.strip() for value in offered.split(",")] if offered else []
+        if len(offered) > 256 or len(protocols) > 8 or any(
+            not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", value) for value in protocols
+        ):
+            raise ValueError("Invalid preview protocols")
         target = f"ws://preview-controller:8090/workloads/{chat_id}/browser?path="
         target += quote(path + ("?" + websocket.url.query if websocket.url.query else ""), safe="")
         target += f"&port={port}"
-        async with websockets.connect(target, max_size=2 * 1024 * 1024) as upstream:
-            await websocket.accept()
+        async with websockets.connect(target, subprotocols=protocols or None, max_size=2 * 1024 * 1024) as upstream:
+            await websocket.accept(subprotocol=upstream.subprotocol)
 
             async def to_upstream() -> None:
                 while True:

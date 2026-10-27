@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import re
 import select
 import socket
 import tarfile
@@ -782,7 +783,8 @@ def heartbeat(chat_id: uuid.UUID) -> dict[str, str]:
 
 
 def browser_resource(chat_id: uuid.UUID, path: str, requested_port: str | None = None,
-                     method: str = "GET", body: bytes = b"", content_type: str = "") -> dict[str, str | int]:
+                     method: str = "GET", body: bytes = b"", content_type: str = "",
+                     cookie: str = "") -> dict:
     current = status(chat_id)
     if current.get("state") != "running" or "initial_port" not in current:
         raise FileNotFoundError("Preview is not ready")
@@ -792,7 +794,7 @@ def browser_resource(chat_id: uuid.UUID, path: str, requested_port: str | None =
     port = requested_port or current["initial_port"]
     if port not in (current.get("website_port"), current.get("api_port"), current["initial_port"]):
         raise ValueError("Unregistered preview port")
-    if method not in ("GET", "POST") or len(body) > 32768 or len(content_type) > 200:
+    if method not in ("GET", "POST") or len(body) > 32768 or len(content_type) > 200 or len(cookie) > 8192:
         raise ValueError("Invalid preview request")
     host = current.get("api_host", "127.0.0.1") if port == current.get("api_port") else "127.0.0.1"
     script = (
@@ -800,27 +802,29 @@ def browser_resource(chat_id: uuid.UUID, path: str, requested_port: str | None =
         "url='http://'+sys.argv[1]+':'+sys.argv[2]+sys.argv[3]\n"
         "class NoRedirect(urllib.request.HTTPRedirectHandler):\n"
         " def redirect_request(self,request,fp,code,msg,headers,newurl): return None\n"
-        "request=urllib.request.Request(url,data=base64.b64decode(sys.argv[5]) if sys.argv[4]=='POST' else None,headers={'Content-Type':sys.argv[6]} if sys.argv[6] else {},method=sys.argv[4])\n"
+        "headers={'Content-Type':sys.argv[6]} if sys.argv[6] else {}\n"
+        "if sys.argv[7]: headers['Cookie']=sys.argv[7]\n"
+        "request=urllib.request.Request(url,data=base64.b64decode(sys.argv[5]) if sys.argv[4]=='POST' else None,headers=headers,method=sys.argv[4])\n"
         "try:\n response=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect()).open(request,timeout=5)\n"
         "except urllib.error.HTTPError as error: response=error\n"
         "with response:\n"
         " body=response.read(2097153)\n"
         " assert len(body)<=2097152\n"
-        " print(json.dumps({'status':response.status,'location':response.headers.get('Location',''),'content_type':response.headers.get('Content-Type','application/octet-stream'),"
+        " print(json.dumps({'status':response.status,'location':response.headers.get('Location',''),'content_type':response.headers.get('Content-Type','application/octet-stream'),'cookies':response.headers.get_all('Set-Cookie',[]),"
         "'body':base64.b64encode(body).decode()}))\n"
     )
     node_script = (
         "(async()=>{const response=await fetch('http://'+process.argv[1]+':'+process.argv[2]+process.argv[3],"
-        "{method:process.argv[4],body:process.argv[4]==='POST'?Buffer.from(process.argv[5],'base64'):undefined,headers:process.argv[6]?{'content-type':process.argv[6]}:{},redirect:'manual',signal:AbortSignal.timeout(5000)});"
+        "{method:process.argv[4],body:process.argv[4]==='POST'?Buffer.from(process.argv[5],'base64'):undefined,headers:{...(process.argv[6]?{'content-type':process.argv[6]}:{}),...(process.argv[7]?{'cookie':process.argv[7]}:{})},redirect:'manual',signal:AbortSignal.timeout(5000)});"
         "const reader=response.body?.getReader(),parts=[];let size=0;"
         "while(reader){const {done,value}=await reader.read();if(done)break;size+=value.length;"
         "if(size>2097152)throw Error('Resource too large');parts.push(value)}"
         "console.log(JSON.stringify({status:response.status,location:response.headers.get('location')||'',content_type:response.headers.get('content-type')||"
-        "'application/octet-stream',body:Buffer.concat(parts).toString('base64')}))})().catch(()=>process.exit(1))"
+        "'application/octet-stream',cookies:response.headers.getSetCookie(),body:Buffer.concat(parts).toString('base64')}))})().catch(()=>process.exit(1))"
     )
     encoded_body = base64.b64encode(body).decode()
-    for command in (["python", "-c", script, host, port, path, method, encoded_body, content_type],
-                    ["node", "-e", node_script, host, port, path, method, encoded_body, content_type]):
+    for command in (["python", "-c", script, host, port, path, method, encoded_body, content_type, cookie],
+                    ["node", "-e", node_script, host, port, path, method, encoded_body, content_type, cookie]):
         code, result = docker("POST", f"/containers/{container_name(chat_id)}/exec", {
             "Cmd": command, "User": "65534:65534", "AttachStdout": True, "AttachStderr": False,
         })
@@ -854,6 +858,12 @@ def browser_socket(handler: BaseHTTPRequestHandler, chat_id: uuid.UUID, path: st
     key = handler.headers.get("Sec-WebSocket-Key", "")
     if len(key) != 24 or handler.headers.get("Sec-WebSocket-Version") != "13":
         raise ValueError("Invalid WebSocket handshake")
+    offered = handler.headers.get("Sec-WebSocket-Protocol", "")
+    protocols = [value.strip() for value in offered.split(",")] if offered else []
+    if len(offered) > 256 or len(protocols) > 8 or any(
+        not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", value) for value in protocols
+    ):
+        raise ValueError("Invalid WebSocket protocols")
     host = current.get("api_host", "127.0.0.1") if port == current.get("api_port") else "127.0.0.1"
     script = (
         "import os,select,socket,sys,tty\n"
@@ -886,7 +896,10 @@ def browser_socket(handler: BaseHTTPRequestHandler, chat_id: uuid.UUID, path: st
         if response.read(6) != b"READY\n":
             raise RuntimeError("Private WebSocket exec did not start")
         handshake = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
-                     f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
+                     f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n")
+        if protocols:
+            handshake += f"Sec-WebSocket-Protocol: {', '.join(protocols)}\r\n"
+        handshake += "\r\n"
         upstream_socket.sendall(handshake.encode("ascii"))
         upstream_headers = bytearray()
         while b"\r\n\r\n" not in upstream_headers and len(upstream_headers) < 8192:
@@ -995,10 +1008,12 @@ class Handler(BaseHTTPRequestHandler):
                     if length <= 0 or length > 46000:
                         raise ValueError
                     payload = json.loads(self.rfile.read(length))
-                    if set(payload) != {"body", "content_type"}:
+                    if set(payload) != {"body", "content_type", "cookie"}:
                         raise ValueError
                     payload = {"body": base64.b64decode(payload["body"], validate=True),
-                               "content_type": payload["content_type"]}
+                               "content_type": payload["content_type"], "cookie": payload["cookie"]}
+                if self.command == "GET":
+                    payload["cookie"] = self.headers.get("Cookie", "")
                 self.respond(200, browser_resource(chat_id, paths[0], ports[0] if ports else None,
                                                    self.command, **payload))
             except (ValueError, FileNotFoundError, RuntimeError, json.JSONDecodeError):
