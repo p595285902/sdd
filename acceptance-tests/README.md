@@ -67,6 +67,14 @@ and a fresh project for each run. Backend recreations exclude initial startup.
 | --- | ---: | ---: | ---: | --- | ---: | ---: |
 | Before reuse | 1 | 88 | 514 | Passed | 62 | 1111.78 |
 | Before reuse | 2 | 88 | 514 | Passed | 62 | 1113.66 |
+| After reuse | 1 | 88 | 514 | Passed | 2 | 422.61 |
+| After reuse | 2 | 88 | 514 | Passed | 2 | 423.26 |
+
+The observed median fell from 1112.72 to 422.94 seconds (689.78 seconds
+less on this host). This is a measurement of these runs, not a guaranteed
+performance threshold. The separate effective-suite run passed 91 scenarios
+and 534 steps in 496.90 seconds, with four backend recreations; its additional
+active-delta scenarios make it unsuitable for the matched timing comparison.
 
 Run specific scenario
 ```sh
