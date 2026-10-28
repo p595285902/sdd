@@ -23,3 +23,7 @@ _Avoid_: Develop conversation, chat session
 **Development Message**:
 An ordered user or assistant entry in a Development Chat.
 _Avoid_: Chat message, message entry
+
+**Preview workload**:
+An isolated, resource-bounded execution environment owned by one Development Chat for running that chat's preview.
+_Avoid_: Preview service, shared preview
