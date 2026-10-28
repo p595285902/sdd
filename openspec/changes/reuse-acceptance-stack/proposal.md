@@ -1,20 +1,19 @@
 ## Why
 
-Repeated local acceptance runs currently create and tear down an isolated Compose stack on every invocation, even when the application image and configuration have not changed. We want faster feedback without hiding stale code, retaining test data, or weakening the default and CI suite.
+The acceptance suite repeatedly recreates its backend container while scenarios run, even when the requested demo-repository configuration is already active. Those unnecessary recreations add work to a single full-suite run without resetting its database or development workspaces.
 
 ## What Changes
 
-- Measure cold and repeated full-suite wall time before and after the change; ship warm reuse only if median full-suite repeat time improves by at least 30% while the full suite stays green without new flakes.
-- Provide an opt-in local workflow that keeps an acceptance-only backend running across invocations and resets and verifies persistent test state before every invocation, including filtered runs.
-- Detect changes to relevant source and configuration, including uncommitted changes, and automatically rebuild/restart the acceptance stack rather than testing stale code.
-- Reject concurrent use of the same warm stack; fail clearly when reset or verification cannot establish a clean run.
-- Preserve fresh isolated stacks for the default runner and CI. Defer parallel workers and the Compose isolation they would require.
+- Keep one acceptance Compose project per full-suite run, as today, but avoid recreating its backend when a scenario requests an unchanged demo-repository configuration.
+- Recreate the backend when the effective configuration actually changes, and preserve the behavior of scenarios that depend on the configured or unconfigured repository.
+- Preserve scenario isolation, default and CI teardown, and the fresh browser context per scenario. Measure full-suite time before and after the change without a fixed percentage gate.
+- Do not retain a stack across separate runs or add general database, workspace, mail, or preview-store resets.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `acceptance-stack-reuse`: Local acceptance stack lifecycle, clean-state guarantees, freshness, concurrency, and performance validation.
+- `acceptance-stack-reuse`: Reuse the running acceptance backend within a full-suite run when its requested configuration has not changed, while retaining correct configuration transitions and test isolation.
 
 ### Modified Capabilities
 
@@ -22,6 +21,5 @@ None.
 
 ## Impact
 
-- Acceptance runner hooks, application lifecycle, reset/verification helpers, documentation, and focused runner tests.
-- Docker Compose orchestration of the acceptance project and its database, workspaces, preview workloads, and optional mail store.
-- No production application API or normal development Compose behavior changes; parallel execution is out of scope.
+- Acceptance runner lifecycle, scenario fixtures, focused runner tests, and acceptance test documentation.
+- No production application behavior or normal development Compose behavior changes.

@@ -1,71 +1,58 @@
 ## Context
 
-The JavaScript acceptance runner starts a PID-named Compose project in `BeforeAll`, runs database prestart, waits for the backend, and removes that project's volumes in `AfterAll`. The backend image contains both backend and frontend source; a fresh Playwright context and preview-workload cleanup occur per scenario, but application records and named volumes remain until suite teardown. The initial-data script migrates/seeds; it does not reset an existing database. The suite currently builds/checks images at startup, not per scenario.
+The JavaScript acceptance runner starts a PID-scoped Compose project once per full-suite run and removes that project's volumes in `AfterAll`. Every scenario receives a new browser context, but scenarios in the same run share the backend, database, and development-workspace volume. `configureDemoRepository` currently forces a backend recreation for every request, including repeated requests for the already-active configuration. Most callers request the configured repository; one scenario requests the unconfigured state. Restarting the backend does not clean database records or workspace files, but it does clear process-local test state.
 
-The target is faster repeated local runs without changing the existing default/CI lifecycle. A warm stack must remain acceptance-only, tolerate runner crashes without trusting leftover data, and fail before scenarios if it cannot prove a clean start.
+The first observed source-of-truth full run took 20m 5s with one intermittent preview timeout; a later user run took 18m 23s with the six active-delta scenarios still undefined. Neither is a matched, green before/after benchmark. The goal is to remove unnecessary backend recreations during a single run, not to keep a stack running between runs.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- An explicit local command keeps one healthy backend alive between test invocations, including filtered invocations.
-- Each warm invocation exclusively owns its stack, refreshes changed application/config inputs, then resets and verifies every persistent state store before running scenarios.
-- Default and CI runs remain fresh and project-scoped; failures are visible and recoverable.
-- Establish repeatable cold/repeat full-suite timing and only accept the change if median repeat time improves by at least 30% without new flakes.
+- Avoid a Compose backend recreation when the requested demo-repository configuration already matches the running backend.
+- Apply genuine configured-to-unconfigured and unconfigured-to-configured transitions before a scenario uses the backend.
+- Preserve scenario behavior and isolation previously provided incidentally by backend restarts, while keeping PID-scoped default and CI teardown.
+- Measure comparable full-suite runs and record the actual improvement without requiring a predetermined percentage.
 
 **Non-Goals:**
 
-- Parallel Cucumber workers, multiple shared warm projects, or changes to the normal development stack's behavior.
-- Reusing data, mail, previews, or browser contexts across invocations; bypassing the full acceptance gate.
+- Reuse a stack across separate full-suite runs, optimize Docker image builds, or parallelize scenarios.
+- Reset all database records, workspaces, mail, or preview workloads between scenarios; retain existing scenario-owned fixtures and cleanup.
+- Change production configuration semantics or the normal development Compose project.
 
 ## Decisions
 
-### Separate explicit warm lifecycle from the default lifecycle
+### Track the configuration applied to the live backend
 
-Expose an opt-in local runner command plus an explicit acceptance-only teardown/recovery command. Identify its project by a stable checkout-specific acceptance identity rather than process ID; keep its allocated port and non-secret provenance discoverable across processes. Check actual Docker project ownership/labels and health before any reset or teardown. Never infer ownership from a user-provided Compose name alone. Keep PID-scoped projects and volume-removing `AfterAll` for default/CI. Do not silently turn on warm reuse in CI.
+Start with an explicit, fixed acceptance demo-repository configuration rather than inheriting an ambiguous host override. Track the effective configuration and backend container identity after successful startup or recreation. If the requested state matches the verified live backend, return without calling Compose. On a genuine change, recreate only the acceptance backend with the requested environment, wait for health, and update the tracked state only after success. If identity or health cannot be established, fail explicitly or recreate the owned backend; never treat uncertain state as an unchanged warm hit.
 
-Alternative: automatically reuse every test invocation. Rejected because it changes CI and existing test expectations and makes dirty-state failures harder to diagnose.
+Alternative: compare only `state.env` or always call `docker compose up`. Rejected because `state.env` alone does not establish what is running, and `up` can still recreate a container or spend time checking it.
 
-### Serialize warm invocations and fail closed
+### Preserve process-local test isolation explicitly
 
-Acquire an exclusive lock before inspecting, starting, resetting, or rebuilding the warm project; hold it through the test run and release it even on failure. Lock ownership must recover when the runner process dies, rather than permanently blocking subsequent invocations. A competing command reports stack-in-use without mutating the first run's project. Do not reset or stop an unknown or normal development project.
+Audit fixtures that implicitly rely on a forced restart to clear in-memory state, notably fake LLM replies and mutable turn settings. Reset only the affected acceptance-only test state before scenarios that could observe prior state; use the existing acceptance-mode test interface or a narrowly scoped addition if it cannot currently express an empty reset. Wait for scenario-owned background work and preview cleanup before resetting shared state. Keep a fresh browser context and existing scenario cleanup. Do not equate skipping a restart with clearing persistent database or workspace data.
 
-Alternative: let processes share one backend. Rejected because one process's reset can invalidate another's scenarios.
+Alternative: skip recreations with no fixture audit. Rejected because scenarios could see stale fake replies or runtime settings despite the correct demo-repository environment.
 
-### Reset in place, then verify, before any scenario
+### Measure matched full-suite runs
 
-On every warm run, first stop leftover preview workloads and wait for their cleanup. Reset application-owned database records (preserving migrations and reseeding the initial acceptance administrator), development workspaces, and captured mail if the mail service/store exists. Restrict destructive operations to the verified acceptance project and its named resources. Verify the required baseline and absence of prior-run state in all stores, including after an interrupted run; any error aborts the run with an explicit fresh-stack recovery instruction. Keep the backend process running if inputs and configuration are unchanged. Maintain per-scenario browser contexts and independent, scenario-owned fixtures. Do not replace whole stateful volumes on the normal reuse path.
+Record scenario counts, backend recreation counts, wall times, and pass/fail results for multiple fresh full-suite runs before and after the change on the same host and scenario set. Compare medians without a fixed speed threshold. The suite must be green with zero pending or undefined steps before declaring implementation complete; a transient failure is investigated or reported, not silently counted as a pass. Keep the existing source-of-truth regression and effective-suite gates.
 
-Alternative: destroy and recreate volumes on each invocation. Rejected for the warm path because it requires restarting dependencies and may forfeit much of the intended speedup; it remains a safe manual recovery path.
-
-### Refresh only when build/config inputs change
-
-Record a digest of relevant Docker build inputs (including changed and untracked source), acceptance Compose/runtime configuration, and the inputs that control the baked backend/frontend and preview-controller images. Exclude generated outputs and the warm-run metadata itself. Never store credentials or their raw values in the provenance file. If provenance is missing, inputs cannot be evaluated, or a stack is unhealthy, do not claim a warm hit: rebuild/recreate the acceptance-only stack or report a clear error. On detected changes, build and restart that stack, run required initialization, then perform the same reset/verification before scenarios. Capture the effective acceptance configuration so a still-running backend never serves an older configuration.
-
-Alternative: rely only on `git HEAD` or `--build` cache checks. Rejected because uncommitted changes and configuration drift can leave a running container with stale code.
-
-### Validate speed and behavior independently
-
-Use focused runner/lifecycle tests with controlled Docker process boundaries for locking, reset failures, drift, recovery, and unchanged default teardown. Implement delta acceptance steps without recursively launching the entire acceptance suite for each scenario. Run the effective suite and source-of-truth regression, exercise a warm full run and filtered rerun, and compare several identical clean cold/full and warm/full runs on the same host. Record durations and calculate the median repeat-run improvement against baseline; a green suite alone does not meet the 30% target.
-
-Alternative: enable Cucumber `--parallel` now. Rejected because workers would share application state, preview naming can escape project scoping, and Mailpit declares global container name/ports. Parallelism requires separately approved isolated projects and measurement showing scenario time is the remaining bottleneck.
+Alternative: infer a percentage gain from startup duration or from a filtered run. Rejected because the optimization targets recreations *during* the scenarios, not only initial startup.
 
 ## Risks / Trade-offs
 
-- [Incomplete reset or a crashed test leaves hidden state] -> Reset and verify all stores at the start of every invocation; fail closed and provide project-scoped recovery.
-- [A warm backend holds stale DB connections, configuration, or code] -> Verify readiness and effective inputs, recreate when needed, and exercise an interrupted-run recovery test.
-- [A second process resets a live run] -> Exclusive process-lifetime locking and ownership checks before Docker mutations.
-- [Image/input fingerprint misses an untracked or ignored build input] -> Derive provenance from actual build/config inputs, test both tracked and untracked edits, and refuse uncertain reuse.
-- [Warm mode complicates the suite yet saves less than expected] -> Baseline first, retain the default path, and enforce the measured 30% median improvement before adopting it.
+- [Cached configuration disagrees with the live container] -> Confirm backend identity and health, and invalidate cached state when the container changes unexpectedly.
+- [A skipped restart leaks process-local test state] -> Audit affected fixtures and add focused consecutive-scenario tests with explicit cleanup.
+- [A scenario genuinely needs missing demo credentials] -> Recreate only on that configuration transition and verify the restored state afterward.
+- [Persistent data causes order dependence] -> Preserve existing unique fixtures and cleanup; do not claim a database/workspace reset that this change does not implement.
+- [No measurable improvement or a flaky suite] -> Record actual results and do not claim a performance or reliability win without matched green runs.
 
 ## Migration Plan
 
-1. Baseline cold and repeat full-suite timings without changing the default runner.
-2. Add focused lifecycle tests and opt-in warm mode; verify an interrupted run, stale inputs, concurrent use, failed reset, and protected non-acceptance projects.
-3. Run full effective and source-of-truth suites, repeat warm/full runs, and publish timing results. If the threshold or reliability gate fails, leave default/CI unchanged and do not recommend warm mode.
-4. Roll back by stopping only the verified acceptance warm project and returning to the existing default command.
+1. Establish matched fresh-run timing and recreation-count baselines; identify which scenarios call the configuration helper and rely on process-local resets.
+2. Add focused tests, implement configuration-aware backend recreation and any necessary acceptance-only state reset, then validate consecutive scenarios and genuine transitions.
+3. Run the effective suite and source-of-truth regression, compare multiple full-suite samples on the same scenario set, and update the acceptance runner documentation. Revert the optimization if it breaks isolation or reliability.
 
 ## Open Questions
 
-- The exact safe database reset and initial-data verification must account for current migrations, session pools, and background tasks; validate it against real acceptance data before implementing.
-- Confirm which mail and preview services are actually started by the acceptance profile so a missing service is checked as absent rather than mistakenly counted as a successful cleanup.
+- Which process-local state beyond fake LLM replies and mutable turn settings was being cleared by unconditional backend recreations? Resolve with focused tests before skipping those restarts.
