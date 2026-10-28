@@ -1,72 +1,41 @@
 # Acceptance stack reuse
 
-The local opt-in workflow retains a dedicated acceptance application while each test invocation starts from known-clean state. The default and CI workflows remain isolated.
-
 ## ADDED Requirements
 
-### Requirement: Warm acceptance runs start clean
-An opt-in local warm acceptance run MUST reuse only its dedicated acceptance stack when its inputs are current, and MUST reset and verify database records, development workspaces, captured mail, and preview workloads before running any scenario. It MUST give each scenario a fresh browser context and MUST NOT depend on data left by other scenarios.
+### Requirement: Unchanged acceptance configuration reuses the backend within a run
+The acceptance runner MUST NOT recreate its backend when a scenario requests the demo-repository configuration already active in that backend. It MUST preserve scenario-specific cleanup and fresh browser contexts without relying on a redundant restart to clear process-local test state.
 
-#### Scenario: Repeated full run reuses a clean stack
+#### Scenario: Consecutive scenarios request the same repository configuration
 
 ```gherkin
-Given an opt-in warm acceptance stack completed a test run
-And that run left acceptance data, a development workspace, captured mail, and a preview workload
-When the next full acceptance run starts without source or configuration changes
-Then the same backend is reused
-And database records, development workspaces, captured mail, and preview workloads from the earlier run are absent before scenarios execute
-And the initial acceptance administrator is available
+Given an acceptance run has a backend with the demo repository configured
+When successive scenarios request that same repository configuration
+Then the backend is not recreated between those requests
+And each scenario retains its fresh browser context and independent test state
 ```
 
-#### Scenario: A filtered warm run starts clean
+### Requirement: Changed acceptance configuration is applied
+When the requested demo-repository configuration differs from the configuration active in the backend, the acceptance runner MUST apply the change before the requesting scenario executes. It MUST NOT report an unchanged configuration as a reason to use stale or unverified backend state.
+
+#### Scenario: Repository configuration changes and is restored
 
 ```gherkin
-Given an opt-in warm acceptance stack completed a test run with persisted state
-When a filtered acceptance run starts on that stack
-Then persisted state from the earlier run is absent before its scenario executes
-And the scenario receives a fresh browser context
+Given an acceptance run has a backend with the demo repository configured
+When a scenario requests an unconfigured demo repository
+Then that scenario uses a backend with the demo repository unconfigured
+When a later scenario requests the configured demo repository
+Then the later scenario uses a backend with the demo repository configured
+And another request for that configuration does not recreate it
 ```
 
-#### Scenario: Failed reset prevents execution
+### Requirement: Fresh-run lifecycle remains unchanged
+The default acceptance runner and CI MUST continue using a fresh project-scoped stack for each full-suite run, and MUST tear down only that run's containers, networks, and volumes after execution, including a failed run. Avoiding redundant backend recreation within a run MUST NOT retain the stack across runs or reset unrelated projects.
+
+#### Scenario: A completed run does not leave a reusable stack
 
 ```gherkin
-Given an opt-in warm acceptance stack has state that cannot be reset or verified
-When an acceptance run starts on that stack
-Then no scenario executes
-And the runner reports the failed reset and how to recover with a fresh acceptance stack
-```
-
-### Requirement: Warm reuse respects freshness and exclusive ownership
-The warm runner MUST detect changes to relevant application build inputs and acceptance configuration, including uncommitted changes, and rebuild and restart its acceptance stack before testing changed code. It MUST NOT allow concurrent invocations to share one warm stack or modify any non-acceptance Compose project.
-
-#### Scenario: Relevant changes restart the warm backend
-
-```gherkin
-Given an opt-in warm acceptance stack completed a test run
-When backend, frontend, or acceptance configuration inputs change locally
-And another acceptance run starts
-Then the acceptance stack is rebuilt and restarted with the changed inputs
-And its persistent state is verified clean before scenarios execute
-```
-
-#### Scenario: Simultaneous invocation is rejected
-
-```gherkin
-Given an acceptance run owns the opt-in warm stack
-When another run tries to use the same warm stack
-Then the second run fails with a stack-in-use error
-And the first run's state is not reset or stopped
-```
-
-### Requirement: Default acceptance runs remain isolated
-The default acceptance runner and CI MUST continue using a fresh project-scoped stack for each run and MUST tear down only that run's containers, networks, and volumes after execution, including a failed run.
-
-#### Scenario: Default run does not reuse warm state
-
-```gherkin
-Given an opt-in warm acceptance stack exists
-When the default acceptance suite runs
-Then it starts in a separate fresh acceptance project
-And it tears down only its own project after execution
-And the opt-in warm acceptance stack remains available
+Given the default acceptance suite starts a fresh project-scoped stack
+When its scenarios finish
+Then only that run's project is torn down
+And a subsequent full-suite run starts a separate fresh project
 ```
