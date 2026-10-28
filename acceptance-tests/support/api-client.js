@@ -339,6 +339,14 @@ class ApiClient {
     if (!response.ok()) throw new Error(`Unable to configure fake LLM: ${response.status()}`);
   }
 
+  async resetScenarioState() {
+    const api = await this.world.openApiContext();
+    const response = await api.post('/api/v1/testing/llm/reset');
+    if (!response.ok()) {
+      throw new Error(`Unable to reset acceptance scenario state: ${response.status()}`);
+    }
+  }
+
   async configureTurnLifecycle({ timeoutSeconds = 15, graceSeconds = 0.3 } = {}) {
     const api = await this.world.openApiContext();
     const response = await api.post('/api/v1/testing/llm/turns/control', {
