@@ -25,6 +25,6 @@
 ## 3. Verification
 
 - [x] 3.1 Extract and lint the delta; dry-run effective composition to confirm no duplicate, archived, or superseded scenarios.
-- [ ] 3.2 Run focused lifecycle tests, the full effective acceptance suite after every code change, and the source-of-truth regression suite; require zero pending/undefined steps and an HTML report.
-- [ ] 3.3 Verify configured/unconfigured transitions, consecutive unchanged requests, and failure recovery without changing a normal development Compose project.
-- [ ] 3.4 Repeat the same fresh full-suite profile used for the baseline several times; record wall-time medians and backend recreation counts, and report the observed difference without a percentage gate or an unverified performance claim.
+- [x] 3.2 Run focused lifecycle tests, the full effective acceptance suite after every code change, and the source-of-truth regression suite; require zero pending/undefined steps and an HTML report.
+- [x] 3.3 Verify configured/unconfigured transitions, consecutive unchanged requests, and failure recovery without changing a normal development Compose project.
+- [x] 3.4 Repeat the same fresh full-suite profile used for the baseline several times; record wall-time medians and backend recreation counts, and report the observed difference without a percentage gate or an unverified performance claim.
