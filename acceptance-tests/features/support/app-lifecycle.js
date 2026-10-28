@@ -1,4 +1,4 @@
-const { spawn } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const net = require('node:net');
 const path = require('node:path');
 
@@ -11,7 +11,13 @@ const composeFiles = [
 const state = {
   baseUrl: undefined,
   projectName: undefined,
+  backendId: undefined,
+  demoRepositoryAvailable: undefined,
+  backendRecreations: 0,
 };
+
+const demoRepository = 'https://example.com/acceptance/demo-repository.git';
+const demoToken = 'acceptance-token';
 
 function run(command, args, env) {
   return new Promise((resolve, reject) => {
@@ -24,6 +30,15 @@ function run(command, args, env) {
     child.once('exit', (code) => {
       if (code === 0) resolve();
       else reject(new Error(`${command} ${args.join(' ')} exited with code ${code}`));
+    });
+  });
+}
+
+function dockerOutput(args) {
+  return new Promise((resolve, reject) => {
+    execFile('docker', args, { cwd: repoRoot, env: state.env, timeout: 10_000 }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
     });
   });
 }
@@ -58,7 +73,9 @@ async function waitForApplication(baseUrl) {
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${baseUrl}/api/v1/utils/health-check/`);
+      const response = await fetch(`${baseUrl}/api/v1/utils/health-check/`, {
+        signal: AbortSignal.timeout(5_000),
+      });
       if (response.ok) return;
     } catch {
       // The container may still be starting.
@@ -66,6 +83,42 @@ async function waitForApplication(baseUrl) {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error(`Acceptance application did not become ready at ${baseUrl}`);
+}
+
+function setDemoRepository(available) {
+  state.env.DEMO_GITHUB_REPO = available ? demoRepository : '';
+  state.env.DEMO_GITHUB_TOKEN = available ? demoToken : 'incomplete-demo-token';
+}
+
+async function backendInfo() {
+  const id = await dockerOutput(composeArgs(state.projectName, 'ps', '-q', 'backend'));
+  if (!id.trim()) return null;
+  const stdout = await dockerOutput(['inspect', '--format', '{{json .}}', id.trim()]);
+  const container = JSON.parse(stdout);
+  const environment = Object.fromEntries(
+    container.Config.Env.map((entry) => {
+      const separator = entry.indexOf('=');
+      return [entry.slice(0, separator), entry.slice(separator + 1)];
+    }),
+  );
+  return {
+    id: container.Id,
+    healthy: container.State.Running && container.State.Health?.Status === 'healthy',
+    repo: environment.DEMO_GITHUB_REPO,
+    token: environment.DEMO_GITHUB_TOKEN,
+  };
+}
+
+async function verifyBackend(available) {
+  const backend = await backendInfo();
+  if (!backend?.healthy ||
+      backend.repo !== state.env.DEMO_GITHUB_REPO ||
+      backend.token !== state.env.DEMO_GITHUB_TOKEN) {
+    throw new Error('Acceptance backend is not healthy with the requested demo repository configuration');
+  }
+  await waitForApplication(state.baseUrl);
+  state.backendId = backend.id;
+  state.demoRepositoryAvailable = available;
 }
 
 async function startApplication() {
@@ -83,12 +136,16 @@ async function startApplication() {
     PREVIEW_ORIGIN: 'http://preview.localhost',
     EMAILS_FROM_EMAIL: 'test@example.com',
     OPENAI_API_KEY: 'acceptance-provider-key',
-    DEMO_GITHUB_TOKEN: 'acceptance-token',
+    DEMO_GITHUB_REPO: demoRepository,
+    DEMO_GITHUB_TOKEN: demoToken,
   };
 
   state.projectName = projectName;
   state.baseUrl = `http://127.0.0.1:${port}`;
   state.env = env;
+  state.backendId = undefined;
+  state.demoRepositoryAvailable = undefined;
+  state.backendRecreations = 0;
 
   await run('docker', composeArgs(projectName, 'up', '--build', '--detach', 'db'), env);
   await run(
@@ -110,6 +167,7 @@ async function startApplication() {
     env,
   );
   await waitForApplication(state.baseUrl);
+  await verifyBackend(true);
 }
 
 async function stopApplication() {
@@ -119,6 +177,8 @@ async function stopApplication() {
     composeArgs(state.projectName, 'down', '--volumes', '--remove-orphans'),
     state.env,
   );
+  state.backendId = undefined;
+  state.demoRepositoryAvailable = undefined;
 }
 
 async function showApplicationLogs() {
@@ -148,12 +208,24 @@ async function runBackendPython(code, ...args) {
 }
 
 async function configureDemoRepository(available) {
-  state.env.DEMO_GITHUB_REPO = available
-    ? 'https://example.com/acceptance/demo-repository.git'
-    : '';
-  state.env.DEMO_GITHUB_TOKEN = available
-    ? 'acceptance-token'
-    : 'incomplete-demo-token';
+  setDemoRepository(available);
+  const backend = await backendInfo();
+  if (state.demoRepositoryAvailable === available &&
+      backend?.id === state.backendId &&
+      backend.healthy &&
+      backend.repo === state.env.DEMO_GITHUB_REPO &&
+      backend.token === state.env.DEMO_GITHUB_TOKEN) {
+    try {
+      const response = await fetch(`${state.baseUrl}/api/v1/utils/health-check/`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (response.ok) return;
+    } catch {
+      // The owned backend is no longer reachable; recreate it below.
+    }
+  }
+  state.backendId = undefined;
+  state.demoRepositoryAvailable = undefined;
   await run(
     'docker',
     composeArgs(
@@ -166,10 +238,13 @@ async function configureDemoRepository(available) {
     ),
     state.env,
   );
-  await waitForApplication(state.baseUrl);
+  state.backendRecreations += 1;
+  console.log(`[acceptance-stack] backend recreation ${state.backendRecreations}`);
+  await verifyBackend(available);
 }
 
 module.exports = {
+  backendInfo,
   configureDemoRepository,
   runBackendPython,
   showApplicationLogs,

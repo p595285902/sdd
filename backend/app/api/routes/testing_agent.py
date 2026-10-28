@@ -85,6 +85,14 @@ def configure_fake_turn_settings(control: FakeTurnSettings) -> dict[str, float]:
     }
 
 
+@router.post("/reset")
+def reset_acceptance_state() -> dict[str, bool]:
+    fake_llm_state.configure([])
+    settings.DEVELOP_TURN_TIMEOUT_SECONDS = 15
+    settings.DEVELOP_TURN_PRESENCE_GRACE_SECONDS = 0.3
+    return {"reset": True}
+
+
 def _response_object(reply: FakeLlmReply, response_id: str) -> dict[str, Any]:
     output: list[dict[str, Any]]
     if reply.kind == "tool":

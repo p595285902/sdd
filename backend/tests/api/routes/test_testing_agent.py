@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.routes.testing_agent import router
+from app.core.config import settings
 
 
 def fake_llm_client() -> TestClient:
@@ -74,3 +75,28 @@ def test_fake_llm_scripts_provider_failure() -> None:
 
     assert response.status_code == 429
     assert response.json() == {"error": {"message": "limited"}}
+
+
+def test_reset_clears_fake_replies_requests_and_turn_settings() -> None:
+    with fake_llm_client() as client:
+        client.post(
+            "/testing/llm/control",
+            json={"replies": [{"kind": "text", "text": "old reply"}]},
+        )
+        client.post(
+            "/testing/llm/v1/responses",
+            json={"model": "acceptance-model", "input": []},
+        )
+        client.post(
+            "/testing/llm/turns/control",
+            json={"timeout_seconds": 1, "grace_seconds": 2},
+        )
+        assert client.post("/testing/llm/reset").json() == {"reset": True}
+        assert client.get("/testing/llm/requests").json() == {"data": []}
+        response = client.post(
+            "/testing/llm/v1/responses",
+            json={"model": "acceptance-model", "input": []},
+        )
+        assert response.status_code == 500
+        assert settings.DEVELOP_TURN_TIMEOUT_SECONDS == 15
+        assert settings.DEVELOP_TURN_PRESENCE_GRACE_SECONDS == 0.3
