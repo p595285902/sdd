@@ -10,6 +10,18 @@ context: |
      We use conventional commits
      Domain: e-commerce platform
 
+operations:
+     archive:
+          guidance:
+               - >-
+                    For acceptance-test-only changes (harness, runner, fixtures,
+                    or reporting; no product behavior changes), recommend
+                    "Archive without syncing": leave openspec/specs/ untouched
+                    and preserve deltas in the archive. Require a green effective
+                    suite and equivalent durable harness regression tests first.
+                    If sync is requested, clarify the conflict before proceeding.
+                    Mixed product/test changes follow normal spec syncing.
+
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
 # Example:
