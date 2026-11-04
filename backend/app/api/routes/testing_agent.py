@@ -8,10 +8,11 @@ from threading import Lock
 from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.services.acceptance_work import CompletionStreamingResponse, current_work
 
 router = APIRouter(prefix="/testing/llm", tags=["testing"])
 
@@ -55,6 +56,10 @@ class FakeLlmState:
             if self._last_reply is None:
                 raise HTTPException(status_code=500, detail="No fake LLM reply scripted")
             return self._last_reply
+
+    def baseline_verified(self) -> bool:
+        with self._lock:
+            return not self._replies and self._last_reply is None and not self._requests
 
     def requests(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -233,7 +238,12 @@ async def fake_responses(
     body = await request.json()
     reply = fake_llm_state.take({"authorization": authorization, "body": body})
     if reply.delay_seconds:
-        await asyncio.sleep(reply.delay_seconds)
+        work = current_work.get()
+        deadline = time.monotonic() + reply.delay_seconds
+        while time.monotonic() < deadline:
+            if work is not None and work.cancelled.is_set():
+                return JSONResponse(status_code=503, content={"error": {"message": "Acceptance provider request cancelled"}})
+            await asyncio.sleep(min(0.05, max(0, deadline - time.monotonic())))
     if reply.kind == "failure":
         return JSONResponse(
             status_code=reply.status_code,
@@ -246,10 +256,10 @@ async def fake_responses(
             yield b"data: {\"type\":\"response.created\"}\n\n"
             raise RuntimeError("Scripted provider disconnect")
 
-        return StreamingResponse(disconnect(), media_type="text/event-stream")
+        return CompletionStreamingResponse(disconnect(), media_type="text/event-stream")
     response = _response_object(reply, f"resp_{uuid.uuid4().hex}")
     if body.get("stream"):
-        return StreamingResponse(
+        return CompletionStreamingResponse(
             _response_events(response), media_type="text/event-stream"
         )
     return JSONResponse(content=response)

@@ -110,8 +110,18 @@ def setup_workspace(
     runner: CommandRunner,
 ) -> Path:
     target = prepare_workspace(root=root, chat_id=chat_id)
-    base_env = dict(os.environ)
+    from app.services.acceptance_reset import confined_environment
+    from app.services.acceptance_work import current_work
+
+    base_env = confined_environment(dict(os.environ))
     base_env.pop("DEMO_GITHUB_TOKEN", None)
+    work = current_work.get()
+
+    def check_cancelled() -> None:
+        if work is not None and work.cancelled.is_set():
+            raise WorkspaceSetupError("Development Workspace setup cancelled")
+
+    check_cancelled()
     try:
         with tempfile.TemporaryDirectory(prefix=".credential-", dir=root) as temp_dir:
             helper = Path(temp_dir) / "git-credential-develop"
@@ -137,12 +147,14 @@ def setup_workspace(
                 env=clone_env,
                 timeout=timeout,
             )
+        check_cancelled()
         runner.run(
             ("opencode", "init"),
             cwd=target,
             env=base_env,
             timeout=timeout,
         )
+        check_cancelled()
         runner.run(
             ("openspec", "init", "--tools", "opencode"),
             cwd=target,
@@ -152,4 +164,5 @@ def setup_workspace(
     except Exception as error:
         cleanup_workspace(root=root, chat_id=chat_id)
         raise WorkspaceSetupError("Development Workspace setup failed") from error
+    check_cancelled()
     return target

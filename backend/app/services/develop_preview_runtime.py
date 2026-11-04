@@ -63,6 +63,34 @@ class PreviewController:
             response.raise_for_status()
             return response.json()
 
+    def acceptance_state(self, *, timeout_seconds: float) -> dict:
+        return self._acceptance_request("GET", "/testing/acceptance/state", timeout_seconds=timeout_seconds)
+
+    def acceptance_control(self, action: str, *, run_id: str, reset_id: str, expected_generation: int, timeout_seconds: float, **extra: object) -> dict:
+        if action not in {"quiesce", "reset", "resume"}:
+            raise ValueError("Invalid acceptance controller operation")
+        return self._acceptance_request("POST", f"/testing/acceptance/{action}", timeout_seconds=timeout_seconds, body={
+            "run_id": run_id, "reset_id": reset_id, "expected_generation": expected_generation,
+            "timeout_seconds": min(timeout_seconds, 300), **extra,
+        })
+
+    def _acceptance_request(self, method: str, path: str, *, timeout_seconds: float, body: dict | None = None) -> dict:
+        from app.core.config import settings
+
+        if not (settings.DEVELOP_ACCEPTANCE_MODE and settings.DEVELOP_ACCEPTANCE_RESET_ENABLED and settings.ACCEPTANCE_RESET_TOKEN):
+            raise RuntimeError("Acceptance controller controls are disabled")
+        if timeout_seconds <= 0:
+            raise TimeoutError("Acceptance controller deadline exceeded")
+        headers = {"Authorization": "Bearer " + settings.ACCEPTANCE_RESET_TOKEN.get_secret_value(),
+                   "X-Acceptance-Run": settings.ACCEPTANCE_RUN_ID}
+        with httpx.Client(base_url=self.url, timeout=timeout_seconds) as client:
+            response = client.request(method, path, headers=headers, json=body)
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise RuntimeError("Invalid acceptance controller response")
+            return result
+
     def _request(self, method: str, path: str) -> dict[str, str]:
         timeout = 180 if method in ("POST", "PUT") and path.count("/") == 2 else 10
         with httpx.Client(base_url=self.url, timeout=timeout) as client:

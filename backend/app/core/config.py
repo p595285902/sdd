@@ -21,6 +21,7 @@ class Settings(BaseSettings):
         env_file="../.env",
         env_ignore_empty=True,
         extra="ignore",
+        hide_input_in_errors=True,
     )
     API_V1_STR: str = "/api/v1"
     DEVELOP_HISTORY_LIMIT: int = Field(default=20, ge=1, le=100)
@@ -51,6 +52,11 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: SecretStr | None = None
     OPENAI_BASE_URL: HttpUrl | None = None
     DEVELOP_ACCEPTANCE_MODE: bool = False
+    DEVELOP_ACCEPTANCE_RESET_ENABLED: bool = False
+    ACCEPTANCE_RUN_ID: str = ""
+    ACCEPTANCE_RESET_TOKEN: SecretStr | None = None
+    ACCEPTANCE_RESET_TIMEOUT_SECONDS: float = Field(default=60, gt=0, le=300)
+    ACCEPTANCE_AGENT_ROOT: Path = Path("/acceptance-agent-state")
     SECRET_KEY: str
     # 60 minutes * 24 hours * 8 days = 8 days
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
@@ -168,6 +174,26 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Acceptance mode requires a loopback OpenAI provider endpoint"
                 )
+
+        if self.DEVELOP_ACCEPTANCE_MODE and self.DEVELOP_ACCEPTANCE_RESET_ENABLED:
+            import re
+
+            from sqlalchemy.engine import make_url
+
+            token = self.ACCEPTANCE_RESET_TOKEN
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", self.ACCEPTANCE_RUN_ID):
+                raise ValueError("Acceptance reset requires a valid owned run identity")
+            if token is None or len(token.get_secret_value()) < 32 or token.get_secret_value() in {
+                self.SECRET_KEY, self.FIRST_SUPERUSER_PASSWORD,
+                self.OPENAI_API_KEY.get_secret_value() if self.OPENAI_API_KEY else "",
+                self.DEMO_GITHUB_TOKEN.get_secret_value() if self.DEMO_GITHUB_TOKEN else "",
+            }:
+                raise ValueError("Acceptance reset requires an independent high-entropy credential")
+            database = make_url(str(self.DATABASE_URL))
+            if database.host != "db" or database.port not in (None, 5432) or database.database != "app" or database.query:
+                raise ValueError("Acceptance reset requires the fixed Compose database")
+            if self.DEVELOP_WORKSPACE_ROOT != Path("/develop-workspaces") or self.ACCEPTANCE_AGENT_ROOT != Path("/acceptance-agent-state"):
+                raise ValueError("Acceptance reset requires fixed owned storage roots")
 
         return self
 

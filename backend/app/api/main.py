@@ -18,3 +18,8 @@ if settings.DEVELOP_ACCEPTANCE_MODE:
     from app.api.routes import testing_agent
 
     api_router.include_router(testing_agent.router)
+
+    if settings.DEVELOP_ACCEPTANCE_RESET_ENABLED:
+        from app.api.routes import testing_acceptance
+
+        api_router.include_router(testing_acceptance.router)

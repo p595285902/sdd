@@ -1,5 +1,5 @@
 const { randomUUID } = require('node:crypto');
-const { runBackendPython } = require('../features/support/app-lifecycle.js');
+const { runBackendPython, resetScenarioState } = require('../features/support/app-lifecycle.js');
 
 const seedMessagesScript = `
 import sys
@@ -340,11 +340,9 @@ class ApiClient {
   }
 
   async resetScenarioState() {
-    const api = await this.world.openApiContext();
-    const response = await api.post('/api/v1/testing/llm/reset');
-    if (!response.ok()) {
-      throw new Error(`Unable to reset acceptance scenario state: ${response.status()}`);
-    }
+    const acknowledgement = await resetScenarioState();
+    this.superuserToken = undefined;
+    return acknowledgement;
   }
 
   async configureTurnLifecycle({ timeoutSeconds = 15, graceSeconds = 0.3 } = {}) {

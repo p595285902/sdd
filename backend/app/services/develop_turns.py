@@ -62,6 +62,7 @@ class TurnSession:
         self._stop_reason: TurnTerminalState | None = None
         self._grace_timer: threading.Timer | None = None
         self._timeout_timer: threading.Timer | None = None
+        self._timers: list[threading.Timer] = []
 
     @property
     def terminal_state(self) -> TurnTerminalState | None:
@@ -132,6 +133,7 @@ class TurnSession:
                 self.request_stop,
                 kwargs={"reason": TurnTerminalState.stopped},
             )
+            self._timers.append(self._grace_timer)
             self._grace_timer.daemon = True
             self._grace_timer.start()
 
@@ -144,6 +146,7 @@ class TurnSession:
                 self.request_stop,
                 kwargs={"reason": TurnTerminalState.timed_out},
             )
+            self._timers.append(self._timeout_timer)
             self._timeout_timer.daemon = True
             self._timeout_timer.start()
 
@@ -190,6 +193,7 @@ class DevelopTurnManager:
         self._lock = threading.RLock()
         self._active_by_chat: dict[uuid.UUID, TurnSession] = {}
         self._active_by_user: dict[uuid.UUID, int] = {}
+        self._completed: list[TurnSession] = []
 
     def start_turn(
         self,
@@ -242,6 +246,8 @@ class DevelopTurnManager:
             if self._active_by_chat.get(session.chat_id) is not session:
                 return False
             session.complete(state, data)
+            self._completed = [finished for finished in self._completed if any(timer.is_alive() for timer in finished._timers)]
+            self._completed.append(session)
             del self._active_by_chat[session.chat_id]
             active_count = self._active_by_user.get(session.user_id, 0)
             if active_count <= session.weight:
@@ -264,6 +270,32 @@ class DevelopTurnManager:
     def stop_and_wait(self, chat_id: uuid.UUID, *, timeout: float) -> bool:
         session = self.request_stop(chat_id)
         return session is None or session.wait_terminal(timeout)
+
+    def cancel_all(self) -> None:
+        with self._lock:
+            for session in self._active_by_chat.values():
+                session.request_stop(reason=TurnTerminalState.stopped)
+
+    def drain(self, deadline: float) -> None:
+        with self._lock:
+            active = list(self._active_by_chat.values())
+            completed = list(self._completed)
+        for session in active:
+            if not session.wait_terminal(max(0, deadline - monotonic())):
+                raise TimeoutError("Agent Turn completion did not drain")
+        for session in active + completed:
+            with session._condition:
+                timers = list(session._timers)
+                for timer in timers:
+                    timer.cancel()
+            for timer in timers:
+                timer.join(max(0, deadline - monotonic()))
+                if timer.is_alive():
+                    raise TimeoutError("Agent Turn timer did not join")
+        with self._lock:
+            if self._active_by_chat or self._active_by_user:
+                raise RuntimeError("Agent Turn capacity has not drained")
+            self._completed.clear()
 
     def attach(
         self, chat_id: uuid.UUID, subscriber_id: str

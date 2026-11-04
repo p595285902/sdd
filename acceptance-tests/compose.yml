@@ -1,3 +1,6 @@
+volumes:
+  sdd-acceptance-agent-state:
+
 services:
   db:
     ports: []
@@ -5,6 +8,11 @@ services:
   preview-controller:
     environment:
       PREVIEW_DIAGNOSTICS: "1"
+      DEVELOP_ACCEPTANCE_MODE: "${DEVELOP_ACCEPTANCE_MODE-true}"
+      DEVELOP_ACCEPTANCE_RESET_ENABLED: "${DEVELOP_ACCEPTANCE_RESET_ENABLED-false}"
+      ACCEPTANCE_RUN_ID: "${ACCEPTANCE_RUN_ID-}"
+      ACCEPTANCE_RESET_TOKEN: "${ACCEPTANCE_RESET_TOKEN-}"
+      ACCEPTANCE_RESET_TIMEOUT_SECONDS: "${ACCEPTANCE_RESET_TIMEOUT_SECONDS-60}"
 
   backend:
     command: ["fastapi", "run", "--workers", "1"]
@@ -12,8 +20,15 @@ services:
       - "127.0.0.1:${ACCEPTANCE_PORT:?Variable not set}:8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/utils/health-check/"]
+    volumes:
+      - sdd-acceptance-agent-state:/acceptance-agent-state
     environment:
-      DEVELOP_ACCEPTANCE_MODE: "true"
+      DEVELOP_ACCEPTANCE_MODE: "${DEVELOP_ACCEPTANCE_MODE-true}"
+      DEVELOP_ACCEPTANCE_RESET_ENABLED: "${DEVELOP_ACCEPTANCE_RESET_ENABLED-false}"
+      ACCEPTANCE_RUN_ID: "${ACCEPTANCE_RUN_ID-}"
+      ACCEPTANCE_RESET_TOKEN: "${ACCEPTANCE_RESET_TOKEN-}"
+      ACCEPTANCE_RESET_TIMEOUT_SECONDS: "${ACCEPTANCE_RESET_TIMEOUT_SECONDS-60}"
+      ACCEPTANCE_AGENT_ROOT: "/acceptance-agent-state"
       DEVELOP_AGENT_TIMEOUT_SECONDS: "15"
       DEVELOP_TURN_TIMEOUT_SECONDS: "15"
       DEVELOP_TURN_PRESENCE_GRACE_SECONDS: "0.3"

@@ -8,6 +8,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from http.cookies import CookieError, SimpleCookie
 from typing import Any
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
@@ -20,11 +21,12 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, update
 from sqlmodel import Session, col, func, select
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import CurrentUser, SessionDep
 from app.core.config import settings
-from app.core.security import ALGORITHM
 from app.core.db import engine
+from app.core.security import ALGORITHM
 from app.models import (
     DevelopmentChat,
     DevelopmentChatCreate,
@@ -42,6 +44,12 @@ from app.models import (
     Message,
     get_datetime_utc,
 )
+from app.services.acceptance_reset import (
+    acceptance_reset,
+    effective_repository,
+    reset_enabled,
+)
+from app.services.acceptance_work import CompletionStreamingResponse, current_work
 from app.services.develop_agent import (
     AgentCommandCancelled,
     AgentCommandError,
@@ -258,7 +266,8 @@ def _get_proposal(
 
 
 def _repository_setup_available() -> bool:
-    return bool(settings.DEMO_GITHUB_REPO and settings.DEMO_GITHUB_TOKEN)
+    repository, token = effective_repository()
+    return bool(repository and token)
 
 
 def _workspace_status(chat: DevelopmentChat) -> DevelopmentWorkspacePublic:
@@ -288,9 +297,12 @@ def _stream_turn(
             last_sequence = event.sequence
             yield _serialize_sse_event(event)
         while turn.terminal_state is None:
+            work = current_work.get()
+            if work is not None and work.cancelled.is_set():
+                break
             events = turn.wait_for_events(
                 after_sequence=last_sequence,
-                timeout=settings.DEVELOP_SSE_HEARTBEAT_SECONDS,
+                timeout=min(settings.DEVELOP_SSE_HEARTBEAT_SECONDS, 0.1) if reset_enabled() else settings.DEVELOP_SSE_HEARTBEAT_SECONDS,
             )
             if not events:
                 yield ": heartbeat\n\n"
@@ -312,11 +324,32 @@ def _stream_response(
     subscriber_id: str,
     buffered_events: tuple[TurnEvent, ...],
 ) -> StreamingResponse:
-    return StreamingResponse(
+    response_class = CompletionStreamingResponse if reset_enabled() else StreamingResponse
+    return response_class(
         _stream_turn(turn, subscriber_id, buffered_events),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )
+
+
+def _start_turn_worker(target: Any, **kwargs: Any) -> None:
+    if not reset_enabled():
+        threading.Thread(target=target, kwargs=kwargs, daemon=True).start()
+        return
+
+    def complete(**values: Any) -> None:
+        turn = values["turn"]
+        work = current_work.get()
+        if work is not None and work.cancelled.is_set():
+            turn.request_stop(reason=TurnTerminalState.stopped)
+        try:
+            target(**values)
+        finally:
+            # A failure before the agent's own handler must not strand capacity/streams.
+            if turn.terminal_state is None:
+                develop_turn_manager.finish_turn(turn, TurnTerminalState.failed, "Agent Turn failed")
+
+    acceptance_reset.barrier.start_thread(complete, kwargs)
 
 
 def _emit_agent_event(turn: TurnSession, event: AgentEvent) -> None:
@@ -602,8 +635,7 @@ def setup_development_workspace(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
 ) -> Any:
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
-    repository_url = settings.DEMO_GITHUB_REPO
-    repository_token = settings.DEMO_GITHUB_TOKEN
+    repository_url, repository_token = effective_repository()
     if not repository_url or not repository_token:
         raise HTTPException(
             status_code=503,
@@ -767,7 +799,7 @@ async def exchange_browser_session(
     if service is not None:
         if service[0] != chat_id:
             raise HTTPException(status_code=404, detail="Not found")
-        ready = _preview_status(chat_id)
+        ready = await run_in_threadpool(_preview_status, chat_id) if reset_enabled() else _preview_status(chat_id)
         if service[1] not in (ready.get("initial_port"), ready.get("website_port"), ready.get("api_port")):
             raise HTTPException(status_code=404, detail="Not found")
     path = "/" if service is not None else f"{settings.API_V1_STR}/develop/chats/preview-browser/{chat_id}/"
@@ -850,9 +882,9 @@ async def browser_preview_resource(
     if len(forwarded_cookie) > 8192:
         raise HTTPException(status_code=400, detail="Preview cookie is too large")
     try:
-        result = preview_controller.fetch(chat_id, "/" + asset_path, request.url.query, port,
-                                          body, request.headers.get("content-type", "") if body is not None else "",
-                                          forwarded_cookie)
+        fetch_preview = partial(preview_controller.fetch, chat_id, "/" + asset_path, request.url.query, port, body,
+                                request.headers.get("content-type", "") if body is not None else "", forwarded_cookie)
+        result = await run_in_threadpool(fetch_preview) if reset_enabled() else fetch_preview()
     except (httpx.HTTPError, FileNotFoundError, RuntimeError, ValueError):
         raise HTTPException(status_code=404, detail="Not found") from None
     headers = {
@@ -870,7 +902,7 @@ async def browser_preview_resource(
                 redirect_port = str(location.port or 80)
             except ValueError:
                 raise HTTPException(status_code=404, detail="Not found") from None
-            ready = _preview_status(chat_id)
+            ready = await run_in_threadpool(_preview_status, chat_id) if reset_enabled() else _preview_status(chat_id)
             if redirect_port not in (ready.get("initial_port"), ready.get("website_port"), ready.get("api_port")):
                 raise HTTPException(status_code=404, detail="Not found")
             redirect_path = location.path
@@ -961,12 +993,19 @@ async def browser_preview_socket(
                         await websocket.send_text(message)
 
             tasks = [asyncio.create_task(to_upstream()), asyncio.create_task(to_browser())]
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            for task in done:
-                task.result()
+            try:
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
+            finally:
+                import anyio
+
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                with anyio.CancelScope(shield=True):
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await upstream.close()
     except (HTTPException, ValueError, OSError, websockets.WebSocketException) as error:
         logger.warning("Preview WebSocket rejected: %s", error)
         await websocket.close(code=1008)
@@ -1334,12 +1373,7 @@ def approve_development_proposal(
     turn.emit("status", "Apply Agent Turn started")
     subscriber_id = uuid.uuid4().hex
     buffered_events = turn.attach(subscriber_id)
-    worker = threading.Thread(
-        target=_run_streamed_apply,
-        kwargs={"chat_id": chat.id, "turn": turn},
-        daemon=True,
-    )
-    worker.start()
+    _start_turn_worker(_run_streamed_apply, chat_id=chat.id, turn=turn)
     return _stream_response(turn, subscriber_id, buffered_events)
 
 
@@ -1453,12 +1487,7 @@ def stream_development_chat_exploration(
     turn.emit("status", "Agent Turn started")
     subscriber_id = uuid.uuid4().hex
     buffered_events = turn.attach(subscriber_id)
-    worker = threading.Thread(
-        target=_run_streamed_exploration,
-        kwargs={"chat_id": chat.id, "message": message_in.content, "turn": turn},
-        daemon=True,
-    )
-    worker.start()
+    _start_turn_worker(_run_streamed_exploration, chat_id=chat.id, message=message_in.content, turn=turn)
     return _stream_response(turn, subscriber_id, buffered_events)
 
 
