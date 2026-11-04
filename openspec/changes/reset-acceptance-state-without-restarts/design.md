@@ -13,7 +13,7 @@ Observed implementation:
 - Agent execution inherits HOME/XDG storage. Workspace deletion alone does not prove persisted OpenCode state was cleared. Existing testing endpoints are mode-gated but unauthenticated; the new destructive controls require independent run credentials.
 - The existing preview-input reuse proposal concerns verified immutable preparation, not live workload or stack retention. The Git-observation proposal remains separate.
 
-No checked-in `.github/workflows/` directory was found. Repository acceptance commands and documentation exist; external CI must use the complete gate defined here rather than assuming a workflow file already wires it in.
+No checked-in `.github/workflows/` directory was found. The user confirmed on 2026-11-04 that no CI exists. Repository acceptance commands and documentation are the integration deliverable for this change; creating CI is out of scope and no deployed CI coverage is claimed. Any future acceptance-consuming CI job must use the complete gate defined here.
 
 ## Goals / Non-Goals
 
@@ -132,5 +132,5 @@ Report matched normal-suite and complete-gate wall time separately, using freshl
 ## Open Questions
 
 - Which HOME/XDG locations does the installed OpenCode CLI actually write, and does it honor the proposed acceptance-only overrides? Verify by an isolated turn/session test; if storage cannot be confined, reset cannot claim a verified agent baseline.
-- The external CI integration location is not present in this checkout. Repository complete-gate commands and documentation must be supplied; confirm the consuming CI job before considering the separate lifecycle gate deployed.
+- CI integration is resolved for this change: the user confirmed no CI exists. Consuming-job integration is not applicable, and local complete-gate verification does not imply deployed CI coverage. If CI is introduced later, wire the complete-gate command and verify both groups are required before claiming deployed coverage.
 - Reset deadline/performance tuning requires measured worst-case drain and cleanup times. The finite deadline and fail-closed behavior are decided; tuning must not remove required work or identity/isolation checks.
