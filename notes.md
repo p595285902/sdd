@@ -26,3 +26,47 @@ Details can be found here: https://opencode.ai/docs/rules/
 - artifact templates for the schema
 - artifact files (if they were dependencies). IE Tasks depends on design and spec
 - relevant repo files
+
+Issues:
+## changes done for acceptance tests should have exceptions
+- because each change require a change spec this means same for acceptance tests changes
+- this created unneccesaary tests 
+- do we keep the flow and remove/skip the test related specs after?
+- Do we need the spec to change test related code? If its a long task spec should be better as it helps to verify and make sure stuff are working as intended. So probably yes
+- Okay then we add logic to skip them after the code change is done. Do it during openspec archving? Or just remove them ( skip looks bad)
+
+
+lifecycle-validation
+`After` hook
+    - move all the cleanup related to `Before` hook
+
+
+Not safely by simply deleting the current hook. It does useful work that reset does not replace:
+
+- Prints application logs after failures.
+- Waits for outstanding reset-test fixture work and cleans up fixture-owned resources.
+- Stops tracked preview workloads.
+- Closes browser contexts and disposes API contexts.
+- Records the scenario’s completion.
+
+
+A particularly important detail: Cucumber creates a fresh World for each scenario. The next scenario’s Before does not own the previous World’s API-context list, so its replaceContexts() is not a substitute for disposing the previous scenario’s clients.
+
+Does `Before` needs to know the previous World's API-context list? It simply wipeout everything. Prove me wrong.
+
+
+resetting the server does not dispose client resources running in the test process
+- 
+
+When cleanup silently leaves something behind
+- in what cases it will do that? and how can you prevent it from happening so a success cleanup means everything is cleaned up
+
+
+whole-reset overhead was 3m26s
+reset checks takes around 25 secs total
+
+Added:
+    docs(openspec): scope acceptance-only archive guidance
+        -archive without sync when doing changes for acceptance-only 
+To add:
+- a final cleanup after all the tests finishes
