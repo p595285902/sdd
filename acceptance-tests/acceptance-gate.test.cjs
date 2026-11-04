@@ -7,6 +7,7 @@ const { randomUUID } = require('node:crypto');
 const { test } = require('node:test');
 const cheerio = require('cheerio');
 const { auditGroup, parseArguments, runGate } = require('./acceptance-gate.cjs');
+const { AcceptanceGatePage } = require('./support/pages/acceptance-gate-page.js');
 const root = __dirname;
 function scenarioReport(entries, status = 'passed') {
   return entries.map(entry => ({ uri: entry.uri, elements: [{ type: 'scenario', line: entry.line, name: entry.name,
@@ -106,4 +107,34 @@ test('source-only uses fresh source inventory and unselected empty groups reject
   const source = path.join(options.specRoot, 'specs/acceptance-stack-reuse/spec.md');
   fs.writeFileSync(source, fs.readFileSync(source, 'utf8').split('### Requirement: Fresh-run lifecycle remains unchanged')[0]);
   await assert.rejects(runGate({ ...options, group: 'lifecycle' }, async () => { throw new Error('Must not execute empty group'); }), /No acceptance scenario/);
+});
+test('isolated command fixtures retain bindings without historical repository specs', { timeout: 60_000 }, async t => {
+  const page = new AcceptanceGatePage({});
+  t.after(() => page.dispose());
+  await page.composeFixture();
+  const variants = [
+    [page.delta, page.source],
+    [page.delta.replace('Then the backend is not recreated between those requests',
+      'Then that scenario uses a backend with the demo repository unconfigured'), page.source],
+    [page.delta, page.source.replace("Then only that run's project is torn down",
+      'Then those invocations use distinct project-scoped stacks')],
+    [page.delta.replace('When successive scenarios request that same repository configuration',
+      'When the isolated command fixture arms a bounded filesystem cleanup fault'), page.source],
+  ];
+  for (const [delta, source] of variants) {
+    page.write('changes/fixture-change/specs/acceptance-stack-reuse/spec.md', delta);
+    page.write('specs/acceptance-stack-reuse/spec.md', source);
+    const execution = await page.execute({ dryRun: true });
+    assert.equal(execution.code, 0, execution.output);
+    assert.equal(execution.summary.status, 'dry-run');
+    assert.deepEqual(execution.summary.groups.map(group => group.group), ['normal', 'lifecycle']);
+    const scenarios = execution.features.flatMap(feature => feature.elements || [])
+      .filter(element => element.type === 'scenario');
+    assert.equal(scenarios.length, 2);
+    for (const scenario of scenarios) {
+      assert.ok(scenario.steps.length);
+      for (const step of scenario.steps) assert.equal(step.result.status, 'skipped',
+        `Command fixture has an undefined or ambiguous step: ${step.name}`);
+    }
+  }
 });

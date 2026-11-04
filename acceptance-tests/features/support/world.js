@@ -50,7 +50,6 @@ class AcceptanceWorld extends World {
 
   async dispose() {
     try {
-      await this.resetPage.dispose();
       if (!state.fatal) await this.previewWorkloadPage.stopAll();
     } finally {
       await this.disposeContexts();

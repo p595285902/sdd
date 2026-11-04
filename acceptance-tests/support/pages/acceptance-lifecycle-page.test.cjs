@@ -6,13 +6,9 @@ const { PassThrough } = require('node:stream');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const vm = require('node:vm');
 const test = require('node:test');
 const { AcceptanceLifecyclePage, ChildInvocation, redact } = require('./acceptance-lifecycle-page.js');
 const { state } = require('../../features/support/app-lifecycle.js');
-const { extractFile } = require('../../extract-gherkin.cjs');
-const { generateMessages } = require('@cucumber/gherkin');
-const { IdGenerator, SourceMediaType } = require('@cucumber/messages');
 const repoRoot = path.resolve(__dirname, '../../..');
 
 function fakeForkFactory(options = {}) {
@@ -289,41 +285,7 @@ test('cleanup assertions require all real partial variants and their exact faile
   assert.throws(() => page.cleanupFailed());
 });
 
-function scenarioSteps(spec) {
-  const extracted = extractFile(spec);
-  const source = typeof extracted === 'string' ? extracted : extracted.content;
-  const messages = generateMessages(source, spec, SourceMediaType.TEXT_X_CUCUMBER_GHERKIN_PLAIN,
-    { includePickles: true, newId: IdGenerator.incrementing() });
-  return messages.filter(message => message.pickle).map(({ pickle }) => ({ name: pickle.name, steps: pickle.steps.map(step => step.text) }));
-}
-
-test('all six lifecycle delta cases and four legacy texts have isolated intent-only bindings', () => {
-  const bindings = new Map();
-  const register = (text, implementation) => {
-    assert.equal(typeof text, 'string', 'Step definitions must use intent text, not regular expressions');
-    assert.equal(bindings.has(text), false, 'Duplicate lifecycle step binding');
-    assert.match(implementation.toString(), /this\.lifecyclePage\./);
-    assert.doesNotMatch(implementation.toString(), /https?:|fetch\(|selector|RegExp/);
-    bindings.set(text, implementation);
-  };
-  vm.runInNewContext(fs.readFileSync(path.join(repoRoot, 'acceptance-tests/step-definitions/acceptance-lifecycle.steps.js'), 'utf8'), {
-    require: name => {
-      assert.equal(name, '@cucumber/cucumber');
-      return { Given: register, When: register, Then: register };
-    },
-  });
-  const selectedNames = new Set(['A completed run does not leave a reusable stack',
-    'A failed invocation removes only its owned stack', 'Controlled cancellation removes the owned stack',
-    'Reset controls are unavailable outside acceptance mode', 'A reset deadline aborts the invocation',
-    'Cleanup failure cannot produce a successful reset']);
-  const delta = ['acceptance-stack-reuse', 'acceptance-state-reset'].flatMap(capability => scenarioSteps(path.join(repoRoot,
-    'openspec/changes/reset-acceptance-state-without-restarts/specs', capability, 'spec.md'))).filter(scenario => selectedNames.has(scenario.name));
-  assert.equal(delta.length, 6);
-  for (const scenario of delta) for (const text of scenario.steps) assert.ok(bindings.has(text), `Unbound lifecycle intent: ${text}`);
-  const legacy = scenarioSteps(path.join(repoRoot, 'openspec/specs/acceptance-stack-reuse/spec.md'))
-    .find(scenario => scenario.name === 'A completed run does not leave a reusable stack');
-  assert.equal(legacy.steps.length, 4);
-  for (const text of legacy.steps) assert.ok(bindings.has(text), `Unbound legacy intent: ${text}`);
+test('isolated lifecycle hooks never start a normal parent stack', () => {
   const hooks = fs.readFileSync(path.join(repoRoot, 'acceptance-tests/features/lifecycle/hooks.js'), 'utf8');
   assert.doesNotMatch(hooks, /BeforeAll\(|chromium|startApplication\(/);
 });

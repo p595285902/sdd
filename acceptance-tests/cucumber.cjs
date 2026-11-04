@@ -21,12 +21,12 @@ if (process.env.ACCEPTANCE_MANIFEST_PATH) {
 }
 
 const normalSteps = fs.readdirSync(path.join(__dirname, 'step-definitions'))
-  .filter(file => file.endsWith('.steps.js') && !['acceptance-lifecycle.steps.js', 'acceptance-gate.steps.js'].includes(file))
+  .filter(file => file.endsWith('.steps.js') && file !== 'acceptance-lifecycle.steps.js')
   .map(file => `step-definitions/${file}`);
 function profile(inventory, group) {
   return { paths: groupPaths(inventory.entries, group), parallel: 0, retry: 0, failFast: true,
     import: group === 'normal' ? ['support/world.js', 'support/hooks.js', ...normalSteps]
-      : ['features/lifecycle/world.js', 'features/lifecycle/hooks.js', 'step-definitions/acceptance-lifecycle.steps.js', 'step-definitions/acceptance-gate.steps.js'],
+      : ['features/lifecycle/world.js', 'features/lifecycle/hooks.js', 'step-definitions/acceptance-lifecycle.steps.js'],
     format: ['progress-bar', ['html', `reports/cucumber-${group}.html`]] };
 }
 
