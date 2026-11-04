@@ -1,19 +1,29 @@
 # Acceptance suite performance POCs
 
+**Latest current complete-gate POC (2026-11-03):** acceptance-only health-check
+cadence and controller shutdown overrides passed **110 scenarios / 445 visible
+steps / 665 steps including local hooks** in **1270.44 seconds**, versus a fresh
+matched **1651.70-second** control: **381.27 seconds saved (23.1%)**, entirely
+serially. Both required groups and all nested lifecycle/command checks ran.
+The normal group was slower, not faster; the net improvement came from lifecycle
+validation. See the [current complete-gate trial](#2026-11-03-current-complete-gate-serial-lifecycle-poc).
+
 The original sections below contain local slice measurements from 2026-10-30,
 not full-suite benchmarks. The 2026-11-02 follow-up records a fresh full
-source-of-truth regression baseline and additional experiments. No application
-or checked-in runner code was changed for these experiments. Each executable
-acceptance trial started fresh, project-scoped Compose resources and checked
-scenario and step results.
+source-of-truth regression baseline and additional experiments. The 2026-11-03
+trial uses the newer complete effective gate, including the active state-reset
+delta. No application or checked-in runner code was changed for these
+experiments. Each executable acceptance trial started fresh, project-scoped
+Compose resources and checked scenario and step results.
 
-**Latest serial full-suite POC:** warm forked Python fixtures, explicit fake
+**Earlier serial source-only POC:** warm forked Python fixtures, explicit fake
 provider synchronization/phase-specific replies, and bounded archive batching
 passed **91 scenarios / 534 reported steps** in **310.12 seconds**, versus a
 matched **444.72-second** faster-lifecycle serial control: **134.60 seconds
 saved (30.3%)**, with no scenario concurrency. The warm-fixture-only trial took
 361.57 seconds (18.7% faster). See the
 [new serial POCs](#2026-11-02-new-serial-pocs-no-scenario-concurrency).
+These historical runs are not matched comparisons with today's 110-scenario gate.
 
 **Earlier concurrent full-suite POC:** the 2026-11-02 source-of-truth regression profile
 passed the same **91 scenarios / 534 reported steps** in **246.01 seconds**,
@@ -22,6 +32,156 @@ two isolated processes, faster acceptance-stack lifecycle settings, and
 updated timing-based shard assignments. It does not change the default runner.
 See the [rebalanced full regression trial](#2026-11-02-rebalanced-full-regression-trial)
 for scope, evidence, and limitations.
+
+## 2026-11-03: current complete gate, serial lifecycle POC
+
+### Workload and result
+
+Both fresh runs used clean revision `e8b7eeb5767ab632e7ee6d21c22007a8d0c2c99e`
+and the real **complete effective acceptance command**, not a source-only or
+normal-only selection. The existing active state-reset delta's measurement task
+3.6 drives this validation experiment; none of its reset checks was bypassed.
+Docker Engine was 29.5.3 with two CPUs and approximately 5.78 GiB RAM. The control
+finished and tore down before the treatment started. No scenario, validation
+invocation, or benchmark trial ran in parallel; no automatic retries were added.
+
+| Complete effective gate | Control (s) | Treatment (s) | Observed change |
+| --- | ---: | ---: | ---: |
+| Normal: 102 scenarios | 812.50 | 855.32 | 42.82 s slower (+5.3%) |
+| Lifecycle/command validation: 8 scenarios | 839.08 | 414.98 | 424.09 s faster (-50.5%) |
+| **Full gate: 110 scenarios** | **1651.70** | **1270.44** | **381.27 s faster (-23.1%)** |
+
+The full command fell from **27m32s to 21m10s**, approximately **1.30x** speedup.
+An independent post-run audit matched the freshly discovered stable scenario IDs,
+step text and group assignments, not just counts: **110 scenarios, 445 visible
+Gherkin steps, 665 steps including local Before/After hooks**, all passed. Both
+group HTML reports and complete combined reports were retained. Intentionally
+failing nested command fixtures still tested failure propagation; they are not
+reported as green nested commands or substituted for the full repository gate.
+
+### Only six acceptance lifecycle settings changed
+
+A temporary, project-scoped Docker CLI wrapper inserted a Compose override after
+the repository's exact `acceptance-tests/compose.yml` path. It activated only for
+`compose` calls with an owned `sdd-acceptance-*` project. It did not log command
+arguments or environment. Normal, direct lifecycle children, and nested complete
+command fixtures all received the same override:
+
+```yaml
+services:
+  db:
+    healthcheck:
+      interval: 1s
+      start_interval: 1s
+      retries: 50
+  backend:
+    healthcheck:
+      interval: 1s
+      retries: 50
+  preview-controller:
+    stop_signal: SIGINT
+```
+
+The original successful health predicates, per-probe timeouts, database 30-second
+start period, migrations/builds, 120-second application-readiness deadline,
+Compose subprocess deadlines, ten-second final producer-stop timeout, and
+project-owned cleanup were retained. A Compose configuration comparison verified
+that **only these six fields differed**, and a non-acceptance project passed
+through unchanged without starting a stack. Fifty one-second failed probes retain
+the nominal allowance of five ten-second probes; this changes sampling/retry
+behavior and is not a proof that every failure pattern is equivalent.
+
+There was no fixture worker, provider-delay change, preview transport/cache
+change, reset fast path, stack persistence, health-check omission or skipped
+lifecycle coverage. Repository application, runner, Compose files and OpenSpec
+files remain unchanged; only this report is updated. A permanent implementation
+requires its own driving spec task and separate spec/code work.
+
+### Lifecycle evidence and the normal-group regression
+
+The audit recorded **23 distinct stack invocations in each run**, including nested
+command fixtures, and verified that no recorded exact-owned Compose/preview
+containers, networks or volumes remained. Normal execution retained one unchanged
+stack, all 112 reset calls, increasing reset generations and serial scenario
+boundaries. The pre-existing development mailpit remained running.
+
+| Recorded costs across all 23 invocations | Control (s) | Treatment (s) |
+| --- | ---: | ---: |
+| Startup total | 454.069 | 186.815 |
+| Final teardown total | 272.760 | 55.235 |
+| Normal stack startup | 20.427 | 9.109 |
+| Normal stack teardown | 12.107 | 2.389 |
+| Normal helper reset-call total (112 calls) | 206.105 | 233.957 |
+| Normal helper reset-call median | 1.748 | 2.018 |
+
+The treatment reduced repeated startup/shutdown costs, but normal reset calls and
+scenario execution were slower overall. These nested reset/scenario/server spans
+**overlap**: do not add them as disjoint whole-command costs. The pair does not
+isolate health cadence from shutdown signal, or establish why the normal group
+regressed. More frequent steady-state probes are a candidate to investigate on
+this two-CPU host, not a demonstrated cause. Do not claim a normal-suite speedup
+or promise that 23.1% will repeat on CI.
+
+A live Docker event observer captured controller shutdown. The initial post-run
+audit incorrectly filtered only by Compose service/project labels and flagged
+45 SIGKILL events from preview workloads/registry helpers that inherit controller
+image labels. That rejected audit was not an application/acceptance-test failure.
+After checking the identities, the corrected audit requires **recorded fresh
+stack-ready container IDs and exact controller names**. It independently verified
+all **23 actual controllers received SIGINT and exited 130**, with **zero
+controller SIGKILL events**. Preview workload stop behavior was not changed.
+The raw event evidence is retained, including the inherited-label workload events.
+
+### Evidence and reproduction
+
+Ignored reports under `acceptance-tests/reports/`:
+
+- `serial-poc-20261103-control-{summary,manifest,results}.json`, both group
+  JSON/HTML/event reports, and `serial-poc-20261103-control-audit.json`.
+- `serial-poc-20261103-fast-lifecycle-{summary,manifest,results}.json`, both group
+  JSON/HTML/event reports and the combined `-report.html`.
+- `serial-poc-20261103-fast-lifecycle-driver.{json,log}`,
+  `-docker-events.ndjson`, and `-override-projects.log`.
+- `serial-poc-20261103-comparison.json`: matched inventory, all group outcomes,
+  exact-owned resource audits, reset/lifecycle timings and controller identity audit.
+- `serial-poc-20261103-rejected-label-audit.json`: retained false-positive audit
+  details and the independently verified container-ID correction.
+
+Temporary sources are `/tmp/sdd-serial-full-poc-20261103/{fast-lifecycle.yml,
+run-treatment.cjs,compare.cjs,bin/docker}`. The original control output is
+`/tmp/sdd-serial-poc-20261103-control.log`. These external files are not installed
+in the default runner and `/tmp` is not durable. Both timed runs used
+process-scoped `caffeinate -i -s`; the treatment driver's maximum measured
+heartbeat lag was **9.14 ms**. The primary comparison uses the **same complete-gate
+clock** for both runs. Control npm launch versus treatment Node-driver launch
+and the post-run audits are excluded from that clock.
+
+With the temporary files still present and a clean matched checkout, use new
+report prefixes to avoid overwriting this evidence:
+
+```sh
+poc=/tmp/sdd-serial-full-poc-20261103
+real_docker="$(command -v docker)"
+stamp="$(date +%Y%m%d-%H%M%S)"
+control="serial-poc-$stamp-control"
+treatment="serial-poc-$stamp-fast-lifecycle"
+
+caffeinate -i -s npm --prefix acceptance-tests test -- --report-prefix "$control"
+# Start only after the control succeeds and completes owned teardown.
+POC_REAL_DOCKER="$real_docker" caffeinate -i -s \
+  node "$poc/run-treatment.cjs" "$PWD" "$treatment"
+POC_REAL_DOCKER="$real_docker" \
+  node "$poc/compare.cjs" "$PWD" "$control" "$treatment"
+```
+
+**Recommendation:** pursue spec-first acceptance-only readiness/shutdown tuning;
+this has a measured benefit for today's entire gate. Investigate steady-state
+probe overhead before adopting the exact POC settings, and consider proper
+controller SIGTERM handling as an alternative to SIGINT. Next serial candidates
+are batching fresh runner identity inspections while retaining every pre/post
+check, and batching trusted fixture file writes within a single setup operation.
+Neither has a new full-gate speedup measurement here. Repeat matched trials before
+claiming stable medians or CI reliability.
 
 ## Repeated backend lookup
 
