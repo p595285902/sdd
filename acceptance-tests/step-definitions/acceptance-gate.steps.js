@@ -1,0 +1,11 @@
+const { Given, When, Then } = require('@cucumber/cucumber');
+Given('separate command validation has freshly composed an isolated effective-spec inventory containing normal and lifecycle scenarios', async function () { await this.gatePage.composeFixture(); });
+When('the complete acceptance command executes that test inventory', async function () { await this.gatePage.runComplete(); });
+Then('every test-inventory scenario is assigned to and executed in exactly one reported group', async function () { await this.gatePage.expectExactGroups(); });
+Then('the normal suite finishes and tears down before separate lifecycle validation starts', async function () { await this.gatePage.expectOrderedTeardown(); });
+Then('the combined status fails if either group fails', async function () { await this.gatePage.expectFailurePropagation(); });
+Then('the HTML reporting identifies both groups without silently skipped coverage', async function () { await this.gatePage.expectHtml(); });
+Given('separate command validation has added an effective scenario to its isolated test inventory since the previous report', async function () { await this.gatePage.addNewScenario(); });
+When("the complete acceptance command freshly discovers that test inventory's validation groups", async function () { await this.gatePage.freshDiscovery(); });
+Then('the new scenario appears exactly once in the appropriate group', async function () { await this.gatePage.expectNewScenario(); });
+Then('historical reports do not determine the scenario inventory', async function () { await this.gatePage.expectIndependentDiscovery(); });

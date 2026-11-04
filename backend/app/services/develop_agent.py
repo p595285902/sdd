@@ -74,53 +74,66 @@ class AgentCommandRunner:
     ) -> AgentCommandResult:
         if timeout_seconds <= 0:
             raise ValueError("Agent command timeout must be positive")
-        process = subprocess.Popen(
-            list(command),
-            cwd=cwd,
-            env=dict(env),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
+        from app.services.acceptance_reset import acceptance_reset, reset_enabled
+        from app.services.acceptance_work import current_work
+
+        owned = acceptance_reset.barrier.admit("agent-process", parent=current_work.get()) if reset_enabled() else None
+        process: subprocess.Popen[str] | None = None
+        drainers: list[threading.Thread] = []
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
-        stdout_thread = self._start_drainer(
-            process.stdout,
-            stdout_lines,
-            on_line=(
-                None
-                if on_stdout_line is None
-                else lambda line: on_stdout_line(scrub_secrets(line, secrets))
-            ),
-        )
-        stderr_thread = self._start_drainer(process.stderr, stderr_lines)
-        deadline = time.monotonic() + timeout_seconds
         failure: type[AgentCommandError] | None = None
-
-        while process.poll() is None:
-            if cancel_event is not None and cancel_event.is_set():
+        try:
+            process = subprocess.Popen(
+                list(command), cwd=cwd, env=dict(env), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, start_new_session=True,
+            )
+            drainers.append(self._start_drainer(
+                process.stdout, stdout_lines,
+                on_line=None if on_stdout_line is None else lambda line: on_stdout_line(scrub_secrets(line, secrets)),
+            ))
+            drainers.append(self._start_drainer(process.stderr, stderr_lines))
+            deadline = time.monotonic() + timeout_seconds
+            while process.poll() is None:
+                if (cancel_event is not None and cancel_event.is_set()) or (owned is not None and owned.cancelled.is_set()):
+                    failure = AgentCommandCancelled
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    failure = AgentCommandTimeout
+                    break
+                try:
+                    process.wait(timeout=min(0.05, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
+            if failure is None and ((cancel_event is not None and cancel_event.is_set()) or (owned is not None and owned.cancelled.is_set())):
                 failure = AgentCommandCancelled
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                failure = AgentCommandTimeout
-                break
-            try:
-                process.wait(timeout=min(0.05, remaining))
-            except subprocess.TimeoutExpired:
-                pass
-
-        if failure is None and cancel_event is not None and cancel_event.is_set():
-            failure = AgentCommandCancelled
-        if failure is not None:
-            self._terminate_process_group(process)
-        elif process.returncode != 0:
-            failure = AgentCommandError
-            self._terminate_process_group(process)
-
-        stdout_thread.join(timeout=self._termination_grace_seconds)
-        stderr_thread.join(timeout=self._termination_grace_seconds)
+            if failure is not None:
+                self._terminate_process_group(process)
+            elif process.returncode != 0:
+                failure = AgentCommandError
+                self._terminate_process_group(process)
+            if owned is None:
+                for drainer in drainers:
+                    drainer.join(timeout=self._termination_grace_seconds)
+        finally:
+            if owned is not None:
+                # The process lease is retained if termination cannot be proven.
+                # EOF consumers include live callbacks and their finally blocks.
+                termination_proven = process is None
+                try:
+                    if process is not None:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=self._termination_grace_seconds)
+                        termination_proven = True
+                    for drainer in drainers:
+                        drainer.join()
+                finally:
+                    if termination_proven and all(not drainer.is_alive() for drainer in drainers):
+                        acceptance_reset.barrier.finish(owned)
         scrubbed_stdout = tuple(
             scrub_secrets(line.rstrip("\n"), secrets) for line in stdout_lines
         )
@@ -365,7 +378,9 @@ def minimal_agent_environment(
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
     }
-    environment = {key: value for key, value in source.items() if key in allowed}
+    from app.services.acceptance_reset import confined_environment
+
+    environment = confined_environment({key: value for key, value in source.items() if key in allowed})
     environment["OPENAI_API_KEY"] = provider_key
     if provider_base_url:
         environment["OPENAI_BASE_URL"] = provider_base_url

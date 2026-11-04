@@ -3,8 +3,8 @@ from pathlib import Path
 import sentry_sdk
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
-from starlette.routing import Host
 from starlette.middleware.cors import CORSMiddleware
+from starlette.routing import Host
 
 from app.api.main import api_router
 from app.api.routes.develop import (
@@ -44,6 +44,12 @@ if settings.PREVIEW_ORIGIN is not None:
     preview_app.add_api_route("/{asset_path:path}", browser_service_resource, methods=["GET", "POST"])
     preview_app.add_api_websocket_route("/{asset_path:path}", browser_service_socket)
     app.router.routes.insert(0, Host(f"{{service}}.{settings.PREVIEW_ORIGIN.host}", app=preview_app))
+
+if settings.DEVELOP_ACCEPTANCE_MODE and settings.DEVELOP_ACCEPTANCE_RESET_ENABLED:
+    from app.services.acceptance_reset import acceptance_reset
+    from app.services.acceptance_work import AcceptanceAdmissionMiddleware
+
+    app.add_middleware(AcceptanceAdmissionMiddleware, barrier=acceptance_reset.barrier, prefix=settings.API_V1_STR)
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
 app.frontend("/", directory=FRONTEND_DIR)

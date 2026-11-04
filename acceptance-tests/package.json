@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test:watch": "PWDEBUG=1 cucumber-js",
-    "test": "cucumber-js",
+    "test:watch": "PWDEBUG=1 node acceptance-gate.cjs --group normal",
+    "test": "node acceptance-gate.cjs",
+    "test:normal": "node acceptance-gate.cjs --group normal",
+    "test:lifecycle": "node acceptance-gate.cjs --group lifecycle",
     "test:runtime": "node develop-runtime-check.cjs",
-    "test:specs": "cucumber-js -p specs",
+    "test:specs": "node acceptance-gate.cjs --source-only",
+    "test:specs:normal": "node acceptance-gate.cjs --source-only --group normal",
+    "test:specs:lifecycle": "node acceptance-gate.cjs --source-only --group lifecycle",
     "lint:specs": "node extract-gherkin.cjs && gherkin-lint .extracted"
   },
   "devDependencies": {

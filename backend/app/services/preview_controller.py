@@ -1,4 +1,5 @@
 import base64
+import hmac
 import http.client
 import io
 import json
@@ -11,9 +12,11 @@ import tarfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from app.services.preview_compose import (
     documented_compose,
@@ -35,9 +38,535 @@ activity_lock = threading.Lock()
 resource_lock = threading.RLock()
 
 
+class ResetControlError(RuntimeError):
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+reset_deadline = threading.local()
+
+
+def checked_docker_response(method: str, path: str) -> dict | list:
+    code, result = docker(method, path)
+    if code != 200:
+        raise RuntimeError("Unable to verify acceptance Docker ownership")
+    return result
+
+
+def checked_docker(method: str, path: str) -> dict:
+    result = checked_docker_response(method, path)
+    if not isinstance(result, dict):
+        raise RuntimeError("Acceptance Docker inspection is not an object")
+    return result
+
+
+def docker_entries(value: object) -> list[dict]:
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise RuntimeError("Acceptance Docker resource listing is malformed")
+    return value
+
+
+def checked_docker_list(method: str, path: str) -> list[dict]:
+    return docker_entries(checked_docker_response(method, path))
+
+
+def container_environment(container: dict) -> dict[str, str]:
+    return dict(value.split("=", 1) for value in container["Config"].get("Env", []) if "=" in value)
+
+
+def compose_owned(resource: dict, kind: str, name: str) -> None:
+    resource_labels = resource.get("Labels") or {}
+    if (resource_labels.get("com.docker.compose.project") != PROJECT
+            or resource_labels.get(f"com.docker.compose.{kind}") != name):
+        raise RuntimeError("Acceptance resource is not owned by this Compose project")
+
+
+COMPOSE_IMAGE_LABELS = {f"com.docker.compose.{key}" for key in ("project", "service", "version")}
+COMPOSE_INSTANCE_LABELS = {f"com.docker.compose.{key}" for key in ("config-hash", "container-number", "oneoff")}
+
+
+def compose_instance(resource_labels: dict) -> bool:
+    return all(resource_labels.get(key) for key in COMPOSE_INSTANCE_LABELS)
+
+
+def acceptance_ownership() -> dict:
+    """Attest actual Engine objects, not caller-selected scopes or names alone."""
+    filters = quote(json.dumps({"label": [f"com.docker.compose.project={PROJECT}"]}))
+    containers = checked_docker_list("GET", f"/containers/json?all=1&filters={filters}")
+    services = {}
+    for service in ("backend", "db", "preview-controller"):
+        # Compose build metadata is inherited by preview containers from IMAGE.
+        # Only instance markers identify Compose-managed service containers.
+        matches = [item for item in containers
+                   if (item.get("Labels") or {}).get("com.docker.compose.service") == service
+                   and any(key in (item.get("Labels") or {}) for key in COMPOSE_INSTANCE_LABELS)]
+        if len(matches) != 1:
+            raise RuntimeError("Acceptance main service ownership is ambiguous")
+        item = checked_docker("GET", f"/containers/{matches[0]['Id']}/json")
+        compose_owned({"Labels": item["Config"].get("Labels")}, "service", service)
+        instance_labels = item["Config"].get("Labels") or {}
+        if (not compose_instance(instance_labels)
+                or instance_labels["com.docker.compose.container-number"] != "1"
+                or instance_labels["com.docker.compose.oneoff"].lower() != "false"):
+            raise RuntimeError("Acceptance main service is not a verified Compose instance")
+        if (instance_labels.get("sdd.preview.chat-id")
+                or not item["State"].get("Running")
+                or item["State"].get("Health", {}).get("Status", "healthy") != "healthy"):
+            raise RuntimeError("Acceptance main service is not healthy and preserved")
+        services[service] = item
+    backend, database, controller = (services[name] for name in ("backend", "db", "preview-controller"))
+    if controller["Config"].get("Hostname") != socket.gethostname():
+        raise RuntimeError("Acceptance controller is not this process's Docker container")
+    backend_env = container_environment(backend)
+    controller_env = container_environment(controller)
+    for env in (backend_env, controller_env):
+        if (env.get("DEVELOP_ACCEPTANCE_RESET_ENABLED", "").lower() != "true"
+                or env.get("ACCEPTANCE_RUN_ID") != PROJECT
+                or not hmac.compare_digest(env.get("ACCEPTANCE_RESET_TOKEN", ""), acceptance_reset.token)):
+            raise RuntimeError("Acceptance service run credentials do not match")
+    if (backend_env.get("DEVELOP_ACCEPTANCE_MODE", "").lower() != "true"
+            or backend_env.get("DEVELOP_WORKSPACE_ROOT") != WORKSPACE_ROOT
+            or controller_env.get("PREVIEW_PROJECT") != PROJECT
+            or controller_env.get("PREVIEW_WORKSPACE_VOLUME") != VOLUME):
+        raise RuntimeError("Acceptance service configuration is not confined")
+    if any(backend.get("HostConfig", {}).get(key) for key in ("ExtraHosts", "Dns", "DnsSearch", "DnsOptions")):
+        raise RuntimeError("Acceptance database DNS must use the inspected Compose topology")
+    database_env = container_environment(database)
+    url = urlsplit(backend_env.get("DATABASE_URL", ""))
+    if (url.scheme != "postgresql" or url.hostname != "db" or url.port != 5432
+            or url.path != "/app" or url.query or url.fragment
+            or database_env.get("POSTGRES_DB") != "app"):
+        raise RuntimeError("Acceptance database configuration does not address the owned database")
+    if (unquote(url.username or "") != database_env.get("POSTGRES_USER", "postgres")
+            or not hmac.compare_digest(unquote(url.password or ""), database_env.get("POSTGRES_PASSWORD", ""))):
+        raise RuntimeError("Acceptance database credentials do not match the owned database")
+    if any(hmac.compare_digest(acceptance_reset.token, value) for value in (
+        backend_env.get("SECRET_KEY", ""), database_env.get("POSTGRES_PASSWORD", ""),
+        backend_env.get("FIRST_SUPERUSER_PASSWORD", ""), backend_env.get("DEMO_GITHUB_TOKEN", ""),
+    )):
+        raise RuntimeError("Acceptance reset credential is not independent")
+
+    def mount_volume(container: dict, destination: str, writable: bool, key: str | None = None) -> dict:
+        mounts = [mount for mount in container.get("Mounts", []) if mount.get("Destination") == destination]
+        if len(mounts) != 1 or mounts[0].get("Type") != "volume" or mounts[0].get("RW") is not writable:
+            raise RuntimeError("Acceptance storage is not an owned named volume")
+        name = mounts[0].get("Name", "")
+        volume = checked_docker("GET", f"/volumes/{quote(name, safe='')}")
+        volume_key = key or (volume.get("Labels") or {}).get("com.docker.compose.volume")
+        if not volume_key or name != f"{PROJECT}_{volume_key}":
+            raise RuntimeError("Acceptance named volume identity does not match Compose ownership")
+        compose_owned(volume, "volume", volume_key)
+        if volume.get("Driver") != "local" or volume.get("Options"):
+            raise RuntimeError("Acceptance storage must not redirect to external filesystem roots")
+        return {"destination": destination, "volume": name, "compose_project": PROJECT,
+                "created_at": volume.get("CreatedAt")}
+
+    workspace = mount_volume(backend, WORKSPACE_ROOT, True, "sdd-develop-workspaces")
+    controller_workspace = mount_volume(controller, WORKSPACE_ROOT, False, "sdd-develop-workspaces")
+    if workspace["volume"] != VOLUME or controller_workspace["volume"] != VOLUME:
+        raise RuntimeError("Acceptance workspace volume does not match the owned mounts")
+    agent = mount_volume(backend, "/acceptance-agent-state", True, "sdd-acceptance-agent-state")
+    data = mount_volume(database, "/var/lib/postgresql", True, "sdd-db-data")
+    networks = {}
+    for key in ("default", "preview-control"):
+        name = f"{PROJECT}_{key}"
+        network = checked_docker("GET", f"/networks/{quote(name, safe='')}")
+        compose_owned(network, "network", key)
+        if network.get("Name") != name or (key == "preview-control" and not network.get("Internal")):
+            raise RuntimeError("Acceptance control network is not confined")
+        networks[key] = network
+        for container_id in network.get("Containers", {}):
+            attached = checked_docker("GET", f"/containers/{container_id}/json")
+            attached_labels = attached["Config"].get("Labels") or {}
+            if (attached_labels.get("com.docker.compose.project") != PROJECT
+                    or not compose_instance(attached_labels) or attached_labels.get("sdd.preview.chat-id")):
+                raise RuntimeError("Unrelated or non-Compose container is attached to an acceptance network")
+            aliases = attached["NetworkSettings"]["Networks"][name].get("Aliases") or []
+            if "db" in aliases and attached["Id"] != database["Id"]:
+                raise RuntimeError("Acceptance database network alias is ambiguous")
+    for service, keys in (("backend", ("default", "preview-control")), ("db", ("default",)),
+                          ("preview-controller", ("preview-control",))):
+        attached = services[service]["NetworkSettings"]["Networks"]
+        if set(attached) != {networks[key]["Name"] for key in keys}:
+            raise RuntimeError("Acceptance service networks differ from the owned topology")
+        for key in keys:
+            network = networks[key]
+            if (attached[network["Name"]].get("NetworkID") != network["Id"]
+                    or services[service]["Id"] not in network.get("Containers", {})):
+                raise RuntimeError("Acceptance service is not attached to the inspected network")
+    if "db" not in (database["NetworkSettings"]["Networks"][networks["default"]["Name"]].get("Aliases") or []):
+        raise RuntimeError("Acceptance db host does not resolve to the owned db service")
+    if controller.get("HostConfig", {}).get("PortBindings") or any(
+        controller.get("NetworkSettings", {}).get("Ports", {}).values()
+    ):
+        raise RuntimeError("Acceptance controller controls must remain unpublished")
+    return {
+        "verified": True, "project": PROJECT,
+        "database": {"service": "db", "database": "app", "compose_project": PROJECT, "volume": data["volume"]},
+        "workspace": workspace, "agent": agent,
+        "services": {"backend": backend["Id"], "db": database["Id"], "preview_controller": controller["Id"]},
+        "identities": {name: {"id": item["Id"], "started_at": item["State"].get("StartedAt"),
+                              "restart_count": item.get("RestartCount", 0)} for name, item in services.items()},
+        "networks": {key: {"id": item["Id"], "name": item["Name"]} for key, item in networks.items()},
+        "runtime_image": {"id": controller["Image"], "build_labels": {
+            key: value for key, value in (controller["Config"].get("Labels") or {}).items()
+            if key in COMPOSE_IMAGE_LABELS}},
+    }
+
+
+def scenario_resources(ownership: dict) -> dict[str, list[dict]]:
+    """Discover orphans from Engine labels, never from chat rows or routing maps."""
+    filters = quote(json.dumps({"label": [f"sdd.preview.project={PROJECT}"]}))
+    resources = {}
+    for kind, path in (("containers", f"/containers/json?all=1&filters={filters}"),
+                       ("networks", f"/networks?filters={filters}"),
+                       ("volumes", f"/volumes?filters={filters}"),
+                       ("images", f"/images/json?all=1&filters={filters}")):
+        if kind == "volumes":
+            result = checked_docker("GET", path)
+            entries = docker_entries(result.get("Volumes") if result.get("Volumes") is not None else [])
+        else:
+            entries = checked_docker_list("GET", path)
+        resources[kind] = []
+        for summary in entries:
+            identifier = summary["Name"] if kind == "volumes" else summary["Id"]
+            path = f"/{kind}/{quote(identifier, safe='')}" + ("/json" if kind in ("containers", "images") else "")
+            entry = checked_docker("GET", path)
+            resource_labels = (entry.get("Config", {}).get("Labels") if kind in ("containers", "images") else entry.get("Labels")) or {}
+            if resource_labels.get("sdd.preview.project") != PROJECT:
+                raise RuntimeError("Preview resource discovery ownership changed")
+            chat = resource_labels.get("sdd.preview.chat-id")
+            if kind == "networks" and not chat and entry.get("Name") == outbound_network():
+                if any(key.startswith("com.docker.compose.") for key in resource_labels) or entry.get("Internal"):
+                    raise RuntimeError("Shared preview egress ownership is ambiguous")
+                continue  # The one explicitly preserved project-shared egress resource.
+            try:
+                if str(uuid.UUID(chat)) != chat:
+                    raise ValueError
+            except (ValueError, TypeError, AttributeError):
+                raise RuntimeError("Preview resource has no canonical scenario ownership") from None
+            compose_labels = {key: value for key, value in resource_labels.items()
+                              if key.startswith("com.docker.compose.")}
+            if compose_labels:
+                # Only the exact build metadata inherited from our pinned runtime
+                # may remain. Instance/config/network/volume labels always refuse
+                # deletion, even when a caller also supplies a valid chat UUID.
+                if (kind not in ("containers", "images")
+                        or compose_labels != ownership["runtime_image"]["build_labels"]
+                        or (kind == "containers" and entry.get("Image") != ownership["runtime_image"]["id"])):
+                    raise RuntimeError("Refusing to remove Compose-owned preview resources")
+            if kind != "images":
+                name = entry.get("Name", "").lstrip("/")
+                prefix = container_name(uuid.UUID(chat))
+                if name != prefix and not name.startswith(prefix + "-"):
+                    raise RuntimeError("Scenario resource is outside the owned preview namespace")
+            if kind == "containers":
+                for mount in entry.get("Mounts", []):
+                    if mount.get("Name") in (ownership["workspace"]["volume"], ownership["agent"]["volume"],
+                                              ownership["database"]["volume"]):
+                        if (mount.get("Name") != ownership["workspace"]["volume"]
+                                or mount.get("Destination") != "/checkout" or mount.get("RW") is not False):
+                            raise RuntimeError("Refusing to remove a workload with long-lived writable storage")
+            if identifier == ownership["runtime_image"]["id"] or identifier in ownership["services"].values() or identifier in (
+                ownership["workspace"]["volume"], ownership["agent"]["volume"], ownership["database"]["volume"],
+            ) or identifier in {item["id"] for item in ownership["networks"].values()}:
+                raise RuntimeError("Refusing to remove a long-lived acceptance resource")
+            if kind == "images" and any(
+                tag != "<none>:<none>" and not tag.startswith(f"{PROJECT}-preview-{chat}-")
+                for tag in entry.get("RepoTags") or []
+            ):
+                raise RuntimeError("Scenario image has a shared or unrelated tag")
+            resources[kind].append(entry)
+    owned_containers = {item["Id"] for item in resources["containers"]}
+    for network in resources["networks"]:
+        if not network.get("Internal") or not set(network.get("Containers", {})).issubset(owned_containers):
+            raise RuntimeError("Scenario network is shared with an unowned workload")
+    return resources
+
+
+class AcceptanceReset:
+    def __init__(self) -> None:
+        self.enabled = os.environ.get("DEVELOP_ACCEPTANCE_RESET_ENABLED", "false").lower() == "true"
+        self.run_id = os.environ.get("ACCEPTANCE_RUN_ID", "")
+        self.token = os.environ.get("ACCEPTANCE_RESET_TOKEN", "")
+        self.timeout = float(os.environ.get("ACCEPTANCE_RESET_TIMEOUT_SECONDS", "60"))
+        self.boot_id = str(uuid.uuid4())
+        self.condition = threading.Condition()
+        self.operation_lock = threading.Lock()
+        self.cancel = threading.Event()
+        self.active = {"handler": 0, "maintenance": 0, "control": 0}
+        self.generation = 0
+        self.phase = "admitting"
+        self.baseline_verified = False
+        self.dirty = True
+        self.work_serial = 0
+        self.completed_serial = -1
+        self.reset_id = None
+        self.used_ids: set[str] = set()
+        self.expected_generation = None
+        self.operation_kind = "reset"
+        self.deadline = None
+        self.ownership = None
+
+    def authenticate(self, headers) -> None:
+        if not self.enabled:
+            raise ResetControlError(404, "Not found")
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", self.token)
+                or len(set(self.token)) < 8 or self.run_id != PROJECT
+                or not 0 < self.timeout <= 60):
+            raise ResetControlError(503, "Acceptance reset configuration is invalid")
+        if (not hmac.compare_digest(headers.get("Authorization", "").encode(), f"Bearer {self.token}".encode())
+                or not hmac.compare_digest(headers.get("X-Acceptance-Run", "").encode(), self.run_id.encode())):
+            raise ResetControlError(403, "Acceptance reset authentication rejected")
+
+    @contextmanager
+    def work(self, kind: str):
+        if not self.enabled:
+            yield
+            return
+        with self.condition:
+            if self.phase not in ("admitting", "ready"):
+                raise ResetControlError(503, "Acceptance workload admissions are closed")
+            self.active[kind] += 1
+            if kind == "handler":
+                self.work_serial += 1
+                self.dirty = True
+                self.baseline_verified = False
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.active[kind] -= 1
+                self.condition.notify_all()
+
+    def state(self) -> dict:
+        with self.condition:
+            return {"run_id": self.run_id, "generation": self.generation, "phase": self.phase,
+                    "boot_id": self.boot_id, "baseline_verified": self.baseline_verified,
+                    "active_work": sum(self.active.values()), "ownership": self.ownership or {"verified": False},
+                    "reset_id": self.reset_id, "expected_generation": self.expected_generation,
+                    "operation": self.operation_kind, "dirty": self.dirty}
+
+    def bounded(self, callback, deadline: float):
+        """Return by the total deadline even if an Engine read cannot be interrupted.
+
+        A timed-out worker stays tracked and admissions stay failed/closed. It can
+        never publish success or overlap a later generation.
+        """
+        done = threading.Event()
+        result = []
+        with self.condition:
+            self.active["control"] += 1
+        def run():
+            reset_deadline.value = deadline
+            try:
+                result.append((True, callback()))
+            except Exception as error:
+                result.append((False, error))
+            finally:
+                with self.condition:
+                    self.active["control"] -= 1
+                    self.condition.notify_all()
+                done.set()
+        threading.Thread(target=run, daemon=True).start()
+        if not done.wait(max(0, deadline - time.monotonic())):
+            raise RuntimeError("Acceptance reset deadline exceeded")
+        if not result[0][0]:
+            raise result[0][1]
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Acceptance reset deadline exceeded")
+        return result[0][1]
+
+    def verify_ownership(self, deadline: float) -> dict:
+        verified = self.bounded(acceptance_ownership, deadline)
+        with self.condition:
+            if self.ownership is not None and self.ownership != verified:
+                raise RuntimeError("Acceptance long-lived resource identities changed")
+            self.ownership = verified
+        return verified
+
+    def fail(self) -> None:
+        with self.condition:
+            self.phase = "failed"
+            self.baseline_verified = False
+            self.cancel.set()
+            self.condition.notify_all()
+
+    def diagnostic_state(self) -> dict:
+        try:
+            self.verify_ownership(time.monotonic() + self.timeout)
+        except Exception:
+            self.fail()
+            raise ResetControlError(503, "Acceptance ownership verification failed") from None
+        return self.state()
+
+    def validate_request(self, action: str, payload: dict) -> None:
+        keys = {"run_id", "reset_id", "expected_generation", "timeout_seconds"}
+        optional = {"operation"} if action == "quiesce" else set()
+        if action == "resume":
+            keys |= {"generation", "baseline_verified"}
+        if not isinstance(payload, dict) or not keys.issubset(payload) or set(payload) - keys - optional:
+            raise ResetControlError(400, "Invalid acceptance control request")
+        if payload["run_id"] != self.run_id:
+            raise ResetControlError(409, "Acceptance run identity mismatch")
+        if (not isinstance(payload["reset_id"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", payload["reset_id"])
+                or type(payload["expected_generation"]) is not int or payload["expected_generation"] < 0
+                or type(payload["timeout_seconds"]) not in (int, float)
+                or not 0 < payload["timeout_seconds"] <= self.timeout
+                or payload.get("operation", "reset") not in ("reset", "configuration")):
+            raise ResetControlError(400, "Invalid acceptance control request")
+        if action == "resume" and (type(payload["generation"]) is not int or payload["baseline_verified"] is not True):
+            raise ResetControlError(400, "Verified backend baseline is required")
+
+    def control(self, action: str, payload: dict) -> dict:
+        self.validate_request(action, payload)
+        if not self.operation_lock.acquire(blocking=False):
+            raise ResetControlError(409, "Acceptance control operation already in progress")
+        try:
+            with self.condition:
+                same = payload["reset_id"] == self.reset_id and payload["expected_generation"] == self.expected_generation
+                if self.phase == "failed":
+                    raise ResetControlError(503, "Acceptance reset is failed and closed")
+                if action == "resume" and same:
+                    expected_generation = self.expected_generation
+                    if expected_generation is None:
+                        raise ResetControlError(409, "Acceptance generation is not initialized")
+                    wanted = expected_generation + (self.operation_kind == "reset")
+                    if payload["generation"] != wanted:
+                        raise ResetControlError(409, "Acceptance generation mismatch")
+                if same and self.phase == "ready":
+                    if self.completed_serial != self.work_serial:
+                        raise ResetControlError(409, "Stale acceptance control retry")
+                    if action == "quiesce" and payload.get("operation", "reset") != self.operation_kind:
+                        raise ResetControlError(409, "Acceptance operation mismatch")
+                    if action == "reset" and self.operation_kind != "reset":
+                        raise ResetControlError(409, "Configuration cannot clean scenario state")
+                    return self.state()
+                if action == "quiesce":
+                    if same:
+                        if payload.get("operation", "reset") != self.operation_kind:
+                            raise ResetControlError(409, "Acceptance operation mismatch")
+                        return self.state()
+                    if (self.phase not in ("admitting", "ready") or payload["expected_generation"] != self.generation
+                            or payload["reset_id"] in self.used_ids or len(self.used_ids) >= 1024):
+                        raise ResetControlError(409, "Acceptance generation or reset conflict")
+                    self.reset_id = payload["reset_id"]
+                    self.used_ids.add(self.reset_id)
+                    self.expected_generation = payload["expected_generation"]
+                    self.operation_kind = payload.get("operation", "reset")
+                    self.deadline = time.monotonic() + payload["timeout_seconds"]
+                    self.phase = "quiescing"
+                    self.baseline_verified = False
+                    self.cancel.set()
+                elif not same:
+                    raise ResetControlError(409, "Acceptance generation or reset conflict")
+                elif action == "reset" and (self.operation_kind != "reset" or self.phase not in ("quiesced", "preview_reset")):
+                    raise ResetControlError(409, "Acceptance reset requires reset quiescence")
+                elif action == "resume" and self.phase != ("preview_reset" if self.operation_kind == "reset" else "quiesced"):
+                    raise ResetControlError(409, "Acceptance resume requires completed verification")
+                if action == "reset" and self.phase == "preview_reset":
+                    return self.state()
+                operation_deadline, operation_id = self.deadline, self.reset_id
+                if operation_deadline is None or operation_id is None:
+                    self.fail()
+                    raise ResetControlError(503, "Acceptance operation is not initialized; admissions remain closed")
+                deadline = min(operation_deadline, time.monotonic() + payload["timeout_seconds"])
+            try:
+                ownership = self.verify_ownership(deadline)
+                if action == "quiesce":
+                    with self.condition:
+                        while self.active["handler"] or self.active["maintenance"]:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise RuntimeError("Acceptance drain deadline exceeded")
+                            self.condition.wait(remaining)
+                        if self.phase == "failed":
+                            raise RuntimeError("Acceptance ownership verification failed")
+                        self.phase = "quiesced"
+                elif action == "reset":
+                    with self.condition:
+                        self.phase = "cleaning_previews"
+                    self.bounded(lambda: self.clean(ownership), deadline)
+                    self.verify_ownership(deadline)
+                    with self.condition:
+                        if self.phase == "failed":
+                            raise RuntimeError("Acceptance ownership verification failed")
+                        self.phase = "preview_reset"
+                else:
+                    if self.operation_kind == "reset":
+                        resources = self.bounded(lambda: scenario_resources(ownership), deadline)
+                        if any(resources.values()):
+                            raise RuntimeError("Acceptance preview baseline is not empty")
+                        with activity_lock:
+                            if activity or ready_services or failed_services:
+                                raise RuntimeError("Acceptance controller maps are not empty")
+                    with self.condition:
+                        if (self.phase == "failed" or time.monotonic() >= deadline
+                                or self.active["handler"] or self.active["maintenance"]):
+                            raise RuntimeError("Acceptance resume is not quiescent")
+                        if payload["generation"] != self.generation:
+                            self.used_ids = {operation_id}
+                        self.generation = payload["generation"]
+                        self.phase = "ready"
+                        self.baseline_verified = self.operation_kind == "reset"
+                        self.dirty = not self.baseline_verified
+                        self.completed_serial = self.work_serial
+                        self.cancel.clear()
+            except Exception:
+                self.fail()
+                raise ResetControlError(503, f"Acceptance {action} failed; admissions remain closed") from None
+            return self.state()
+        finally:
+            self.operation_lock.release()
+
+    def clean(self, ownership: dict) -> None:
+        resources = scenario_resources(ownership)  # Validate the entire deletion scope first.
+        for kind in ("containers", "networks", "volumes", "images"):
+            for item in resources[kind]:
+                if time.monotonic() >= reset_deadline.value:
+                    raise RuntimeError("Acceptance cleanup deadline exceeded")
+                identifier = item["Name"] if kind == "volumes" else item["Id"]
+                path = f"/{kind}/{quote(identifier, safe='')}"
+                if kind == "images":
+                    # Remove only attested chat tags; deleting a multiply tagged
+                    # image ID would require unsafe force or otherwise fail.
+                    for tag in item.get("RepoTags") or []:
+                        if tag != "<none>:<none>":
+                            remove_resource(f"/images/{quote(tag, safe='')}")
+                    remove_resource(path)
+                else:
+                    remove_resource(path + "?force=true" if kind == "containers" else path)
+        if any(scenario_resources(ownership).values()):
+            raise RuntimeError("Acceptance scenario resources remain")
+        with self.condition:
+            if (self.phase != "cleaning_previews" or time.monotonic() >= reset_deadline.value
+                    or self.active["handler"] or self.active["maintenance"]):
+                raise RuntimeError("Acceptance map cleanup is not quiescent")
+            with activity_lock:
+                activity.clear()
+                ready_services.clear()
+                failed_services.clear()
+
+
+acceptance_reset = AcceptanceReset()
+
+
+def tracked_maintenance(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with acceptance_reset.work("maintenance"):
+            return function(*args, **kwargs)
+    return wrapped
+
+
 class DockerConnection(http.client.HTTPConnection):
     def __init__(self) -> None:
-        super().__init__("localhost", timeout=10)
+        deadline = getattr(reset_deadline, "value", None)
+        remaining = 10 if deadline is None else min(10, deadline - time.monotonic())
+        if remaining <= 0:
+            raise RuntimeError("Acceptance Docker operation deadline exceeded")
+        super().__init__("localhost", timeout=remaining)
 
     def connect(self) -> None:
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -923,7 +1452,10 @@ def browser_socket(handler: BaseHTTPRequestHandler, chat_id: uuid.UUID, path: st
         handler.connection.settimeout(None)
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
-            readable, _, _ = select.select([handler.connection, upstream_socket], [], [], 10)
+            if acceptance_reset.enabled and acceptance_reset.cancel.is_set():
+                return
+            readable, _, _ = select.select([handler.connection, upstream_socket], [], [],
+                                           0.1 if acceptance_reset.enabled else 10)
             for source in readable:
                 data = source.recv(65536)
                 if not data:
@@ -933,6 +1465,7 @@ def browser_socket(handler: BaseHTTPRequestHandler, chat_id: uuid.UUID, path: st
         connection.close()
 
 
+@tracked_maintenance
 def sweep(now: float | None = None) -> None:
     now = time.time() if now is None else now
     code, containers = docker(
@@ -973,7 +1506,7 @@ def sweep_forever() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def respond(self, code: int, payload: dict[str, str]) -> None:
+    def respond(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -981,7 +1514,58 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def handle_acceptance_control(self) -> None:
+        actions = {"/testing/acceptance/" + action: action for action in ("state", "quiesce", "reset", "resume")}
+        action = actions.get(self.path)
+        if action is None or self.command != ("GET" if action == "state" else "POST"):
+            self.respond(404, {"error": "Not found"})
+            return
+        try:
+            acceptance_reset.authenticate(self.headers)  # Before reading input or changing admissions.
+            length = int(self.headers.get("Content-Length", "0"))
+            if action == "state":
+                if length != 0:
+                    raise ResetControlError(400, "Invalid acceptance control request")
+                result = acceptance_reset.diagnostic_state()
+            else:
+                if not 0 < length <= 4096 or self.headers.get("Transfer-Encoding"):
+                    raise ResetControlError(400, "Invalid acceptance control request")
+                self.connection.settimeout(10)
+                def unique_object(pairs):
+                    value = {}
+                    for key, item in pairs:
+                        if key in value:
+                            raise ValueError("Duplicate request key")
+                        value[key] = item
+                    return value
+                payload = json.loads(self.rfile.read(length), object_pairs_hook=unique_object)
+                result = acceptance_reset.control(action, payload)
+            self.respond(200, result)
+        except ResetControlError as error:
+            self.respond(error.code, {"error": str(error), "phase": acceptance_reset.phase})
+        except (ValueError, TypeError, TimeoutError):
+            self.respond(400, {"error": "Invalid acceptance control request"})
+
     def handle_workload(self) -> None:
+        if self.path.startswith("/testing/acceptance/"):
+            self.handle_acceptance_control()
+            return
+        if self.command == "GET" and self.path == "/health":
+            self.respond(200, {"status": "ok"})
+            return
+        # Status is an Engine read; browser GET/upgrade executes inside a workload
+        # and therefore joins the same barrier as every mutating HTTP handler.
+        diagnostic = self.command == "GET" and bool(re.fullmatch(r"/workloads/[0-9a-f-]{36}", self.path))
+        try:
+            if diagnostic:
+                self._handle_workload()
+            else:
+                with acceptance_reset.work("handler"):
+                    self._handle_workload()
+        except ResetControlError as error:
+            self.respond(error.code, {"error": str(error)})
+
+    def _handle_workload(self) -> None:
         if self.command in ("GET", "POST") and "/browser?" in self.path:
             parts = self.path.split("?", 1)[0].split("/")
             try:
