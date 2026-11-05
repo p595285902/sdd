@@ -1,5 +1,8 @@
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { randomUUID } = require('node:crypto');
 const { runBackendPython, resetScenarioState } = require('../features/support/app-lifecycle.js');
+
+const workspaceFileBatches = new AsyncLocalStorage();
 
 const seedMessagesScript = `
 import sys
@@ -74,6 +77,20 @@ workspace = Path(settings.DEVELOP_WORKSPACE_ROOT) / str(uuid.UUID(sys.argv[1]))
 target = workspace / sys.argv[2]
 target.parent.mkdir(parents=True, exist_ok=True)
 target.write_text(sys.argv[3])
+`;
+
+const editWorkspaceFilesScript = `
+import json
+import sys
+import uuid
+from pathlib import Path
+from app.core.config import settings
+
+workspace = Path(settings.DEVELOP_WORKSPACE_ROOT) / str(uuid.UUID(sys.argv[1]))
+for name, content in json.loads(sys.argv[2]):
+    target = workspace / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
 `;
 
 const assertWorkspaceMarkerScript = `
@@ -407,7 +424,35 @@ class ApiClient {
     await runBackendPython(markWorkspaceScript, chatId, marker);
   }
 
+  // Only wrap write-only fixture preparation: files become visible after this
+  // call resolves, never across an application request or observation boundary.
+  async withWorkspaceFileBatch(chatId, prepare) {
+    const existing = workspaceFileBatches.getStore();
+    if (existing?.client === this && existing.chatId === chatId) {
+      if (existing.closed) throw new Error('Workspace file batch is closed');
+      return prepare();
+    }
+    const batch = { client: this, chatId, files: [], closed: false };
+    let result;
+    try {
+      result = await workspaceFileBatches.run(batch, prepare);
+    } finally {
+      // Reject detached writes rather than silently losing them after flush.
+      batch.closed = true;
+    }
+    if (batch.files.length) {
+      await runBackendPython(editWorkspaceFilesScript, chatId, JSON.stringify(batch.files));
+    }
+    return result;
+  }
+
   async editWorkspaceFile(chatId, name, content) {
+    const batch = workspaceFileBatches.getStore();
+    if (batch?.client === this && batch.chatId === chatId) {
+      if (batch.closed) throw new Error('Workspace file batch is closed');
+      batch.files.push([name, content]);
+      return;
+    }
     await runBackendPython(editWorkspaceFileScript, chatId, name, content);
   }
 
