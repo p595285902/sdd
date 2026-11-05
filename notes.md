@@ -70,3 +70,5 @@ Added:
         -archive without sync when doing changes for acceptance-only 
 To add:
 - a final cleanup after all the tests finishes
+
+-/api/hello from ClaudeCode is to warm up before the real LLM calls. (helps to warm up DNS resolution, TCP, TLS, and the connection pool.)
