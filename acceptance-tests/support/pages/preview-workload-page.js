@@ -58,27 +58,29 @@ class PreviewWorkloadPage {
   }
 
   async prepareInstructions(chatId, kind) {
-    const readmes = {
-      website: 'Run npm install in site, then npm run start in site on port 8765. Run python -m http.server 8766 in api on port 8766.',
-      compose: 'Start the website and API with docker compose up.',
-      missing: 'Project overview without startup commands.',
-      timeout: 'Run npm install in site, npm run start in site on port 8765 and python -m http.server 8766 in api on port 8766.',
-    };
-    await this.world.apiClient.editWorkspaceFile(chatId, 'README.md', readmes[kind]);
-    if (kind === 'compose' || kind === 'missing') return;
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/package.json', JSON.stringify({
-      scripts: { start: 'node server.js' }, dependencies: { 'is-number': '7.0.0' },
-    }));
-    const source = kind === 'timeout'
-      ? 'setInterval(() => {}, 1000)'
-      : `const http = require('node:http'); const isNumber = require('is-number');
+    return this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
+      const readmes = {
+        website: 'Run npm install in site, then npm run start in site on port 8765. Run python -m http.server 8766 in api on port 8766.',
+        compose: 'Start the website and API with docker compose up.',
+        missing: 'Project overview without startup commands.',
+        timeout: 'Run npm install in site, npm run start in site on port 8765 and python -m http.server 8766 in api on port 8766.',
+      };
+      await this.world.apiClient.editWorkspaceFile(chatId, 'README.md', readmes[kind]);
+      if (kind === 'compose' || kind === 'missing') return;
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/package.json', JSON.stringify({
+        scripts: { start: 'node server.js' }, dependencies: { 'is-number': '7.0.0' },
+      }));
+      const source = kind === 'timeout'
+        ? 'setInterval(() => {}, 1000)'
+        : `const http = require('node:http'); const isNumber = require('is-number');
 http.createServer((request, response) => {
   http.get('http://127.0.0.1:8766/', (api) => {
     api.resume(); api.on('end', () => response.end('API reachable ' + isNumber(42)));
   }).on('error', () => { response.statusCode = 502; response.end('API unavailable'); });
 }).listen(8765, '127.0.0.1');`;
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.js', source);
-    await this.world.apiClient.editWorkspaceFile(chatId, 'api/index.html', 'API response');
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.js', source);
+      await this.world.apiClient.editWorkspaceFile(chatId, 'api/index.html', 'API response');
+    });
   }
 
   async selectInstructions(plan) {
@@ -94,10 +96,11 @@ http.createServer((request, response) => {
   }
 
   async prepareCompose(chatId) {
-    const image = 'python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88';
-    await this.world.apiClient.editWorkspaceFile(chatId, 'README.md',
-      'Run `docker compose -f compose.yml up website api` to start the website and API.');
-    await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
+    return this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
+      const image = 'python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88';
+      await this.world.apiClient.editWorkspaceFile(chatId, 'README.md',
+        'Run `docker compose -f compose.yml up website api` to start the website and API.');
+      await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
   website:
     build:
       context: site
@@ -113,11 +116,11 @@ http.createServer((request, response) => {
     command: ["python", "-m", "http.server", "8766", "--bind", "0.0.0.0"]
     expose: [8766]
 `);
-    const dockerfile = `FROM ${image}\nCOPY . /workspace\nWORKDIR /workspace\nUSER 65534\n`;
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/Dockerfile', dockerfile);
-    await this.world.apiClient.editWorkspaceFile(chatId, 'api/Dockerfile', dockerfile);
-    await this.world.apiClient.editWorkspaceFile(chatId, 'api/index.html', 'API reachable');
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
+      const dockerfile = `FROM ${image}\nCOPY . /workspace\nWORKDIR /workspace\nUSER 65534\n`;
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/Dockerfile', dockerfile);
+      await this.world.apiClient.editWorkspaceFile(chatId, 'api/Dockerfile', dockerfile);
+      await this.world.apiClient.editWorkspaceFile(chatId, 'api/index.html', 'API reachable');
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import urlopen
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -128,15 +131,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(result)
 HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
 `);
+    });
   }
 
   async prepareRoutingCompose(chatId, content) {
-    await this.prepareCompose(chatId);
-    await this.world.apiClient.editWorkspaceFile(chatId, 'api/docs/index.html',
-      `<html><script src="/swagger-ui.js"></script><a href="/openapi.json">Swagger ${content}</a></html>`);
-    await this.world.apiClient.editWorkspaceFile(chatId, 'api/openapi.json', JSON.stringify({ openapi: '3.1.0', info: { title: content } }));
-    await this.world.apiClient.editWorkspaceFile(chatId, 'api/swagger-ui.js', 'window.swaggerReady = true;');
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
+    return this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
+      await this.prepareCompose(chatId);
+      await this.world.apiClient.editWorkspaceFile(chatId, 'api/docs/index.html',
+        `<html><script src="/swagger-ui.js"></script><a href="/openapi.json">Swagger ${content}</a></html>`);
+      await this.world.apiClient.editWorkspaceFile(chatId, 'api/openapi.json', JSON.stringify({ openapi: '3.1.0', info: { title: content } }));
+      await this.world.apiClient.editWorkspaceFile(chatId, 'api/swagger-ui.js', 'window.swaggerReady = true;');
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if 'preview_session=' in self.headers.get('Cookie', '') or 'preview_session_' in self.headers.get('Cookie', ''):
@@ -215,6 +220,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b'Form alice ' + body)
 HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
 `);
+    });
   }
 
   browserRoute(chatId, port, path = '') {
@@ -304,9 +310,10 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
   }
 
   async prepareDependencyCompose(chatId) {
-    await this.world.apiClient.editWorkspaceFile(chatId, 'README.md',
-      'Run `docker compose -f compose.yml up website` to start the website.');
-    await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
+    return this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
+      await this.world.apiClient.editWorkspaceFile(chatId, 'README.md',
+        'Run `docker compose -f compose.yml up website` to start the website.');
+      await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
   website:
     build:
       context: site
@@ -314,10 +321,10 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
     command: ["python", "server.py"]
     expose: [8765]
 `);
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/requirements.txt', 'six==1.17.0\n');
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/Dockerfile',
-      'FROM python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88\nCOPY . /workspace\nWORKDIR /workspace\nRUN pip install --no-cache-dir -r requirements.txt\nUSER 65534\n');
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/requirements.txt', 'six==1.17.0\n');
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/Dockerfile',
+        'FROM python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88\nCOPY . /workspace\nWORKDIR /workspace\nRUN pip install --no-cache-dir -r requirements.txt\nUSER 65534\n');
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.py', `from http.server import BaseHTTPRequestHandler, HTTPServer
 import six
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -326,25 +333,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b'dependency ready' if six.PY3 else b'dependency missing')
 HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
 `);
+    });
   }
 
   async prepareNpmDependencyCompose(chatId) {
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/package.json',
-      JSON.stringify({ name: 'preview-site', version: '1.0.0', dependencies: { 'is-number': '7.0.0' } }));
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/package-lock.json', JSON.stringify({
-      name: 'preview-site', version: '1.0.0', lockfileVersion: 3, requires: true,
-      packages: {
-        '': { name: 'preview-site', version: '1.0.0', dependencies: { 'is-number': '7.0.0' } },
-        'node_modules/is-number': {
-          version: '7.0.0',
-          resolved: 'https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz',
-          integrity: 'sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==',
+    return this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/package.json',
+        JSON.stringify({ name: 'preview-site', version: '1.0.0', dependencies: { 'is-number': '7.0.0' } }));
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/package-lock.json', JSON.stringify({
+        name: 'preview-site', version: '1.0.0', lockfileVersion: 3, requires: true,
+        packages: {
+          '': { name: 'preview-site', version: '1.0.0', dependencies: { 'is-number': '7.0.0' } },
+          'node_modules/is-number': {
+            version: '7.0.0',
+            resolved: 'https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz',
+            integrity: 'sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==',
+          },
         },
-      },
-    }));
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/Dockerfile',
-      'FROM node:24.15-bookworm-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d\nCOPY . /workspace\nWORKDIR /workspace\nRUN npm ci --ignore-scripts\nUSER 65534\n');
-    await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
+      }));
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/Dockerfile',
+        'FROM node:24.15-bookworm-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d\nCOPY . /workspace\nWORKDIR /workspace\nRUN npm ci --ignore-scripts\nUSER 65534\n');
+      await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
   website:
     build:
       context: site
@@ -352,18 +361,21 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
     command: ["node", "server.js"]
     expose: [8765]
 `);
-    await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.js', `const http = require('node:http');
+      await this.world.apiClient.editWorkspaceFile(chatId, 'site/server.js', `const http = require('node:http');
 const isNumber = require('is-number');
 http.createServer((request, response) => response.end(isNumber(42) ? 'dependency ready' : 'dependency missing')).listen(8765, '0.0.0.0');
 `);
+    });
   }
 
   async prepareComposeDependencies(chatId) {
-    const dockerfile = 'FROM python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88\nCOPY . /workspace\nWORKDIR /workspace\nRUN pip install --no-cache-dir -r requirements.txt\nUSER 65534\n';
-    for (const directory of ['site', 'api']) {
-      await this.world.apiClient.editWorkspaceFile(chatId, `${directory}/requirements.txt`, 'six==1.17.0\n');
-      await this.world.apiClient.editWorkspaceFile(chatId, `${directory}/Dockerfile`, dockerfile);
-    }
+    return this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
+      const dockerfile = 'FROM python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88\nCOPY . /workspace\nWORKDIR /workspace\nRUN pip install --no-cache-dir -r requirements.txt\nUSER 65534\n';
+      for (const directory of ['site', 'api']) {
+        await this.world.apiClient.editWorkspaceFile(chatId, `${directory}/requirements.txt`, 'six==1.17.0\n');
+        await this.world.apiClient.editWorkspaceFile(chatId, `${directory}/Dockerfile`, dockerfile);
+      }
+    });
   }
 
   async introduceUnsafeBuildSymlink(chatId) {

@@ -65,6 +65,26 @@ Extract/lint without running the application:
 npm --prefix acceptance-tests run lint:specs
 ```
 
+## Workspace fixture writes
+
+Preview instruction, Compose, routing and dependency preparation use
+`ApiClient.withWorkspaceFileBatch(chatId, prepare)` to write each fixture's files
+in one fresh backend Python process. Nested preparation for the same client/chat
+joins the outer batch, preserving write order and overwrites. Other edits remain
+immediate; there is no resident interpreter or cross-scenario batch.
+
+Use the callback only for awaited file writes: do not make application requests
+or observe the workspace until the batch resolves. Preparation or Python errors
+propagate; detached writes after a batch closes are rejected.
+
+Focused regression checks (no Docker required):
+
+```sh
+node --test acceptance-tests/support/workspace-file-batching.test.cjs
+```
+
+These checks do not replace the complete acceptance gate.
+
 ## Reports
 
 Every gate execution produces reports under `acceptance-tests/reports/`:
