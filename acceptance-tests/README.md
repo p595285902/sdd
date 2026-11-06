@@ -95,7 +95,7 @@ Every gate execution produces reports under `acceptance-tests/reports/`:
 - `cucumber-results.json`: combined Cucumber results.
 - `cucumber-manifest.json`: freshly extracted inventory and fingerprint.
 - `cucumber-{normal,lifecycle}-events.ndjson`: startup, reset-phase timing,
-  scenario, identity, cancellation, and owned-teardown evidence.
+  scenario, cancellation, and owned-teardown evidence.
 
 Source-only runs use the prefix `cucumber-specs`. To retain independent evidence:
 
@@ -112,12 +112,15 @@ the repository's command-validation scenarios.
 
 Each normal invocation creates a unique
 `sdd-acceptance-<pid>-<random>` Compose project and an independent random reset
-token. There is no cross-run persistence. Backend, database, preview-controller,
-and mounted stack volumes retain their Docker identities, start timestamps,
-restart counters, and mount identities throughout normal execution; backend
-process boot identity is checked too. A healthy replacement still fails this
-check. Disposable chat preview workloads are scenario-owned resources, not the
-long-lived stack.
+token. There is no cross-run persistence. The normal runner starts one shared
+application stack in `BeforeAll` and tears it down in `AfterAll`; a second
+simultaneous stack startup is rejected. Compose startup and HTTP readiness checks
+remain bounded. The harness trusts this lifecycle rather than collecting an
+initial Docker identity snapshot or repeatedly comparing container, process,
+health and mounted-volume identities around resets/configuration changes.
+Disposable chat preview workloads are scenario-owned resources, not the
+long-lived stack. Protected server-side reset ownership and baseline verification
+remain in place; removing harness snapshots does not remove those safeguards.
 
 The backend starts with the declared demo repository available. Protected
 acceptance-only overrides transition between that baseline and unavailable,
@@ -184,8 +187,8 @@ blocks later scenario bodies and the lifecycle group while final teardown runs.
 
 ## Failure, cancellation, and safe teardown
 
-A reset/identity failure closes the invocation, aborts later scenario admission,
-and never starts a replacement stack. Logs identify the failed phase without
+A reset/control or configuration failure closes the invocation, aborts later
+scenario admission, and never starts a replacement stack. Logs identify the failed phase without
 credentials. Normal assertion failures also fail-fast and retain incomplete
 assignment reporting. Supported SIGINT/SIGTERM cancellation initiates owned
 teardown; host loss or SIGKILL cannot promise graceful cleanup.
@@ -245,6 +248,30 @@ No actual acceptance-consuming CI job has been located in this checkout during
 this implementation. Deployed CI coverage is **not verified**. Documentation and
 local gate behavior alone do not complete the consuming-job integration
 requirement; that job must be located, updated, and observed running both groups.
+
+## Snapshot-removal verification — 2026-11-06
+
+Client shared-stack snapshots and related identity comparisons have been removed,
+including the startup baseline. The complete unchanged retry
+`snapshot-removal-retry-5DH5UO` (without a POC preload) passed **88/88 scenarios /
+338 visible steps in 430.393 seconds (7m 10s)**. All **66 harness unit tests**
+passed, along with JavaScript syntax and whitespace checks.
+
+The independent `snapshot-removal-retry-5DH5UO-audit.json` verifies identical
+stable scenario/step inventory and spec fingerprint against the pre-removal run,
+one stack startup/ready/teardown, 88 verified reset generations, no client
+identity payloads, and no remaining exact-owned containers, networks or volumes.
+This verifies the retained lifecycle and cleanup; it does not reinstate or claim
+continuous container/process/mount identity checks.
+
+The first run, `snapshot-removal-BGvT8B`, failed after 17 passing scenarios on a
+cancelled proposal apply command. The cancellation's root cause remains
+unestablished; the unchanged retry passed without loosening assertions or
+timeouts. Both attempts and their HTML/JSON/event reports are retained.
+
+No application or OpenSpec files changed; this test-infrastructure work uses the
+user's explicit no-spec exception. Timing is one passing observation, not a
+repeated matched benchmark or a CI performance guarantee.
 
 ## Historical timing evidence
 

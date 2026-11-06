@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const lifecycle = require('../support/app-lifecycle.js');
 const { state, record, startApplication, stopApplication, resetScenarioState,
-  controlRequest, controlState, verifyStack, dockerOutput, backendPythonOutput } = lifecycle;
+  controlRequest, controlState, dockerOutput, backendPythonOutput } = lifecycle;
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const kinds = new Set(['completed', 'failure', 'cancellation', 'outside', 'deadline', 'cleanup', 'filesystem', 'partial-controller']);
 const { createFilesystemCleanupFault, inspectFilesystemCleanupFault, repairFilesystemCleanupFault } = require('../../support/acceptance-cleanup-fixtures.cjs');
@@ -18,7 +18,6 @@ let operation = Promise.resolve();
 let cancellation;
 let fixture;
 let lock;
-let initial;
 let diagnostics = {};
 
 function send(message) {
@@ -202,7 +201,6 @@ async function start(requestedKind) {
   } finally {
     if (state.resetToken) await send({ type: 'private-credential', credential: state.resetToken });
   }
-  initial = state.initialSnapshot;
   if (kind === 'deadline') {
     // Prestart already created the canonical database. Do not spend the special
     // one-second failure deadline on an unrelated initial warm-up reset.
@@ -217,7 +215,7 @@ async function start(requestedKind) {
   if (kind === 'partial-controller') await partialControllerFixture();
   if (kind === 'outside') await outsideFixture();
   if (kind === 'deadline') await deadlineFixture();
-  return { project: state.projectName, identity: initial, kind };
+  return { project: state.projectName, kind };
 }
 
 async function outsideControls() {
@@ -253,7 +251,6 @@ print(Path('/develop-workspaces/lifecycle-outside-sentinel').read_text())
 `)).trim(), 'must remain');
   assert.deepEqual(await lifecycle.ownedResources(), diagnostics.resourcesBefore);
   assert.deepEqual(JSON.parse(await dockerOutput(['network', 'inspect', fixture.network])), fixture.before);
-  await verifyStack();
   return { responses, controller, unchanged: true };
 }
 
@@ -302,7 +299,6 @@ async function failedReset() {
     });
     assert.equal(admission.status, 503, 'Application mutation admission reopened after failed reset');
     diagnostics.admissionStatus = admission.status;
-    diagnostics.identityAfterFailure = await verifyStack();
     record('invocation-failed', { phase: status.failure_phase });
   } finally {
     if (release) await release;
@@ -315,17 +311,13 @@ async function finish(outcome, exitCode) {
     let cleanupError;
     try { await releaseLock(); await releaseCleanupFaults(); }
     catch { cleanupError = 'Bounded lifecycle fault cleanup failed'; }
-    if (initial && !state.stopped) {
-      try { diagnostics.identityBeforeTeardown = await verifyStack(); }
-      catch { cleanupError = 'Lifecycle service identity changed before final teardown'; }
-    }
     // Log capture must never prevent final cleanup. All captured streams pass
     // through the common lifecycle redactor and the parent's independent audit.
     if (!state.stopped) {
       try { await lifecycle.showApplicationLogs(); } catch { diagnostics.logsUnavailable = true; }
     }
     try { await stopApplication(); } catch { cleanupError = 'Owned lifecycle final teardown failed'; }
-    const result = { outcome, project: state.projectName, kind, initial,
+    const result = { outcome, project: state.projectName, kind,
       diagnostics, events: state.events, cleanupVerified: state.stopped && !cleanupError,
       ...(cleanupError ? { error: cleanupError } : {}) };
     await send({ type: 'result', result });
@@ -344,7 +336,6 @@ async function execute() {
     await failedReset();
     await finish('reset-failed', 1);
   } else if (kind === 'failure') {
-    await verifyStack();
     // A genuine failed scenario assertion drives the invocation's nonzero exit;
     // the terminal result is not merely a fabricated failure-shaped response.
     try {
@@ -354,7 +345,6 @@ async function execute() {
       await finish('failed', 1);
     }
   } else {
-    await verifyStack();
     record('invocation-completed');
     await finish('completed', 0);
   }

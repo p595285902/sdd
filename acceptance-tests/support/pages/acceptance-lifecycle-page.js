@@ -248,7 +248,7 @@ class AcceptanceLifecyclePage {
       assert.equal(result.outcome, 'reset-failed');
       assert.equal(result.code, 1);
       this.failedBoundary();
-      this.noReplacement();
+      this.singleStartup();
       await this.assertResultCleanup(result);
       await this.unrelatedUnchanged();
     }
@@ -257,11 +257,6 @@ class AcceptanceLifecyclePage {
   distinctProjects() {
     assert.equal(this.results.length, 2);
     assert.notEqual(this.results[0].project, this.results[1].project);
-    for (const service of ['backend', 'db', 'preview-controller']) {
-      assert.notEqual(this.results[0].initial.services[service].id, this.results[1].initial.services[service].id,
-        'Fresh invocation reused a prior stack service');
-    }
-    assert.notEqual(this.results[0].initial.boot, this.results[1].initial.boot);
     for (const result of this.results) assert.equal(result.code, 0);
   }
 
@@ -293,15 +288,10 @@ class AcceptanceLifecyclePage {
       'Lifecycle invocation modified unrelated project resources');
   }
 
-  noReplacement() {
+  singleStartup() {
     for (const result of this.results) {
       assert.equal(result.events.filter(event => event.type === 'stack-start').length, 1);
       assert.equal(result.events.filter(event => event.type === 'stack-ready').length, 1);
-      assert.ok(result.events.every(event => !['backend-recreated', 'stack-replaced', 'stack-restarted'].includes(event.type)));
-      for (const identity of [result.diagnostics.identityAfterFailure, result.diagnostics.identityBeforeTeardown].filter(Boolean)) {
-        assert.deepEqual(identity, result.initial,
-          'Terminal boundary restarted or replaced a stack service/process/volume');
-      }
     }
   }
 
@@ -359,7 +349,7 @@ class AcceptanceLifecyclePage {
 
   async failedCleanup() {
     assert.equal(this.results.at(-1).code, 1);
-    this.noReplacement();
+    this.singleStartup();
     await this.ownedResourcesRemoved();
     await this.unrelatedUnchanged();
   }

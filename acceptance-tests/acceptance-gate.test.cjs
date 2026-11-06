@@ -108,13 +108,28 @@ test('source-only uses fresh source inventory and unselected empty groups reject
   fs.writeFileSync(source, fs.readFileSync(source, 'utf8').split('### Requirement: Fresh-run lifecycle remains unchanged')[0]);
   await assert.rejects(runGate({ ...options, group: 'lifecycle' }, async () => { throw new Error('Must not execute empty group'); }), /No acceptance scenario/);
 });
+test('command fixture repository assertions use acknowledged control configuration', async t => {
+  const lifecycle = require('./features/support/app-lifecycle.js');
+  const { AcceptanceResetPage } = require('./support/pages/acceptance-reset-page.js');
+  const originalControlState = lifecycle.controlState;
+  t.after(() => { lifecycle.controlState = originalControlState; });
+  const page = new AcceptanceResetPage({});
+  lifecycle.controlState = async () => ({ configuration: 'available' });
+  await page.expectConfiguredRepository();
+  await assert.rejects(page.expectUnavailableRepository(), /available/);
+  lifecycle.controlState = async () => ({ configuration: 'unavailable' });
+  await page.expectUnavailableRepository();
+  await assert.rejects(page.expectConfiguredRepository(), /unavailable/);
+  lifecycle.controlState = async () => { throw new Error('Owned control unavailable'); };
+  await assert.rejects(page.expectConfiguredRepository(), /Owned control unavailable/);
+});
 test('isolated command fixtures retain bindings without historical repository specs', { timeout: 60_000 }, async t => {
   const page = new AcceptanceGatePage({});
   t.after(() => page.dispose());
   await page.composeFixture();
   const variants = [
     [page.delta, page.source],
-    [page.delta.replace('Then the backend is not recreated between those requests',
+    [page.delta.replace('Then the backend retains the requested demo repository configuration',
       'Then that scenario uses a backend with the demo repository unconfigured'), page.source],
     [page.delta, page.source.replace("Then only that run's project is torn down",
       'Then those invocations use distinct project-scoped stacks')],
