@@ -1,970 +1,460 @@
-# Acceptance suite performance POCs
+# Acceptance test performance POCs
 
-**Latest current complete-gate POC (2026-11-03):** acceptance-only health-check
-cadence and controller shutdown overrides passed **110 scenarios / 445 visible
-steps / 665 steps including local hooks** in **1270.44 seconds**, versus a fresh
-matched **1651.70-second** control: **381.27 seconds saved (23.1%)**, entirely
-serially. Both required groups and all nested lifecycle/command checks ran.
-The normal group was slower, not faster; the net improvement came from lifecycle
-validation. See the [current complete-gate trial](#2026-11-03-current-complete-gate-serial-lifecycle-poc).
+Last reviewed: **2026-11-06**. Python fixture batching is **implemented** in
+`3ca7070` (`perf(acceptance): batch workspace fixture file writes`). Client stack
+snapshots and their identity-comparison code have now been **removed** from the
+acceptance harness at the user's request; the complete unchanged retry passed
+**88/88 scenarios / 338 visible steps in 430.393 seconds (7m 10s)**.
+The earlier Docker identity-batching POC is historical evidence, not a remaining
+promotion candidate. Other ideas remain exploratory; these measurements are not
+CI performance guarantees.
 
-The original sections below contain local slice measurements from 2026-10-30,
-not full-suite benchmarks. The 2026-11-02 follow-up records a fresh full
-source-of-truth regression baseline and additional experiments. The 2026-11-03
-trial uses the newer complete effective gate, including the active state-reset
-delta. No application or checked-in runner code was changed for these
-experiments. Each executable acceptance trial started fresh, project-scoped
-Compose resources and checked scenario and step results.
+## Current workload
 
-**Earlier serial source-only POC:** warm forked Python fixtures, explicit fake
-provider synchronization/phase-specific replies, and bounded archive batching
-passed **91 scenarios / 534 reported steps** in **310.12 seconds**, versus a
-matched **444.72-second** faster-lifecycle serial control: **134.60 seconds
-saved (30.3%)**, with no scenario concurrency. The warm-fixture-only trial took
-361.57 seconds (18.7% faster). See the
-[new serial POCs](#2026-11-02-new-serial-pocs-no-scenario-concurrency).
-These historical runs are not matched comparisons with today's 110-scenario gate.
+The complete command is:
 
-**Earlier concurrent full-suite POC:** the 2026-11-02 source-of-truth regression profile
-passed the same **91 scenarios / 534 reported steps** in **246.01 seconds**,
-versus **535.01 seconds** serially: **54.0% less wall time (2.17x)**. This uses
-two isolated processes, faster acceptance-stack lifecycle settings, and
-updated timing-based shard assignments. It does not change the default runner.
-See the [rebalanced full regression trial](#2026-11-02-rebalanced-full-regression-trial)
-for scope, evidence, and limitations.
+```sh
+npm --prefix acceptance-tests test
+```
 
-## 2026-11-03: current complete gate, serial lifecycle POC
+It runs **88 scenarios / 338 visible Gherkin steps**, serially, against one fresh
+normal stack. Each scenario retains verified state reset and fresh contexts.
+There are no assigned lifecycle/command-validation scenarios. The fixture POCs
+measured revision `3833a950372a5c39c3faa3e6b0b5e59e6a57e35b`; the installed batching
+change retains that exact scenario/step inventory and spec fingerprint. The
+identity-batching POC measured `3ca707076e7ad46787bb855165e1aa7bbad77805`, with
+file-write batching already installed.
 
-### Workload and result
+**Earlier POCs predate removal of the test-infrastructure tests.** Their 91- and
+110-scenario workloads are not controls for today's suite. In particular, the
+historical 381-second lifecycle improvement involved 23 stack invocations;
+today's gate has one. Do not reuse those savings, percentages or shard weights.
 
-Both fresh runs used clean revision `e8b7eeb5767ab632e7ee6d21c22007a8d0c2c99e`
-and the real **complete effective acceptance command**, not a source-only or
-normal-only selection. The existing active state-reset delta's measurement task
-3.6 drives this validation experiment; none of its reset checks was bypassed.
-Docker Engine was 29.5.3 with two CPUs and approximately 5.78 GiB RAM. The control
-finished and tore down before the treatment started. No scenario, validation
-invocation, or benchmark trial ran in parallel; no automatic retries were added.
+## Python fixture batching: measured and implemented
 
-| Complete effective gate | Control (s) | Treatment (s) | Observed change |
+### Change tested
+
+An external Node preload collected adjacent workspace-file writes within six
+preview-fixture preparation methods and executed each group in one fresh Python
+process. It covered instruction, Compose, routing and dependency preparation.
+Nested preparations joined their outer batch; write order and overwrites were
+preserved. Writes outside these methods remained immediate.
+
+The POC changed no application, runner or spec files. Both variants used the same
+measurement wrappers. There was no resident interpreter, scenario concurrency,
+reset shortcut or assertion removal.
+
+### Fresh paired rerun — 2026-11-05
+
+A new control and treatment ran back-to-back, without reusing the earlier
+control. Both complete runs passed **88/88 scenarios / 338 visible steps**, with
+identical stable scenario IDs, step text and all **203 requested file writes**.
+All **15 focused POC checks** passed and owned Docker cleanup was verified.
+
+| Measurement | Control | Batched | Difference |
 | --- | ---: | ---: | ---: |
-| Normal: 102 scenarios | 812.50 | 855.32 | 42.82 s slower (+5.3%) |
-| Lifecycle/command validation: 8 scenarios | 839.08 | 414.98 | 424.09 s faster (-50.5%) |
-| **Full gate: 110 scenarios** | **1651.70** | **1270.44** | **381.27 s faster (-23.1%)** |
-
-The full command fell from **27m32s to 21m10s**, approximately **1.30x** speedup.
-An independent post-run audit matched the freshly discovered stable scenario IDs,
-step text and group assignments, not just counts: **110 scenarios, 445 visible
-Gherkin steps, 665 steps including local Before/After hooks**, all passed. Both
-group HTML reports and complete combined reports were retained. Intentionally
-failing nested command fixtures still tested failure propagation; they are not
-reported as green nested commands or substituted for the full repository gate.
-
-### Only six acceptance lifecycle settings changed
-
-A temporary, project-scoped Docker CLI wrapper inserted a Compose override after
-the repository's exact `acceptance-tests/compose.yml` path. It activated only for
-`compose` calls with an owned `sdd-acceptance-*` project. It did not log command
-arguments or environment. Normal, direct lifecycle children, and nested complete
-command fixtures all received the same override:
-
-```yaml
-services:
-  db:
-    healthcheck:
-      interval: 1s
-      start_interval: 1s
-      retries: 50
-  backend:
-    healthcheck:
-      interval: 1s
-      retries: 50
-  preview-controller:
-    stop_signal: SIGINT
-```
-
-The original successful health predicates, per-probe timeouts, database 30-second
-start period, migrations/builds, 120-second application-readiness deadline,
-Compose subprocess deadlines, ten-second final producer-stop timeout, and
-project-owned cleanup were retained. A Compose configuration comparison verified
-that **only these six fields differed**, and a non-acceptance project passed
-through unchanged without starting a stack. Fifty one-second failed probes retain
-the nominal allowance of five ten-second probes; this changes sampling/retry
-behavior and is not a proof that every failure pattern is equivalent.
-
-There was no fixture worker, provider-delay change, preview transport/cache
-change, reset fast path, stack persistence, health-check omission or skipped
-lifecycle coverage. Repository application, runner, Compose files and OpenSpec
-files remain unchanged; only this report is updated. A permanent implementation
-requires its own driving spec task and separate spec/code work.
-
-### Lifecycle evidence and the normal-group regression
-
-The audit recorded **23 distinct stack invocations in each run**, including nested
-command fixtures, and verified that no recorded exact-owned Compose/preview
-containers, networks or volumes remained. Normal execution retained one unchanged
-stack, all 112 reset calls, increasing reset generations and serial scenario
-boundaries. The pre-existing development mailpit remained running.
-
-| Recorded costs across all 23 invocations | Control (s) | Treatment (s) |
-| --- | ---: | ---: |
-| Startup total | 454.069 | 186.815 |
-| Final teardown total | 272.760 | 55.235 |
-| Normal stack startup | 20.427 | 9.109 |
-| Normal stack teardown | 12.107 | 2.389 |
-| Normal helper reset-call total (112 calls) | 206.105 | 233.957 |
-| Normal helper reset-call median | 1.748 | 2.018 |
-
-The treatment reduced repeated startup/shutdown costs, but normal reset calls and
-scenario execution were slower overall. These nested reset/scenario/server spans
-**overlap**: do not add them as disjoint whole-command costs. The pair does not
-isolate health cadence from shutdown signal, or establish why the normal group
-regressed. More frequent steady-state probes are a candidate to investigate on
-this two-CPU host, not a demonstrated cause. Do not claim a normal-suite speedup
-or promise that 23.1% will repeat on CI.
-
-A live Docker event observer captured controller shutdown. The initial post-run
-audit incorrectly filtered only by Compose service/project labels and flagged
-45 SIGKILL events from preview workloads/registry helpers that inherit controller
-image labels. That rejected audit was not an application/acceptance-test failure.
-After checking the identities, the corrected audit requires **recorded fresh
-stack-ready container IDs and exact controller names**. It independently verified
-all **23 actual controllers received SIGINT and exited 130**, with **zero
-controller SIGKILL events**. Preview workload stop behavior was not changed.
-The raw event evidence is retained, including the inherited-label workload events.
-
-### Evidence and reproduction
-
-Ignored reports under `acceptance-tests/reports/`:
-
-- `serial-poc-20261103-control-{summary,manifest,results}.json`, both group
-  JSON/HTML/event reports, and `serial-poc-20261103-control-audit.json`.
-- `serial-poc-20261103-fast-lifecycle-{summary,manifest,results}.json`, both group
-  JSON/HTML/event reports and the combined `-report.html`.
-- `serial-poc-20261103-fast-lifecycle-driver.{json,log}`,
-  `-docker-events.ndjson`, and `-override-projects.log`.
-- `serial-poc-20261103-comparison.json`: matched inventory, all group outcomes,
-  exact-owned resource audits, reset/lifecycle timings and controller identity audit.
-- `serial-poc-20261103-rejected-label-audit.json`: retained false-positive audit
-  details and the independently verified container-ID correction.
-
-Temporary sources are `/tmp/sdd-serial-full-poc-20261103/{fast-lifecycle.yml,
-run-treatment.cjs,compare.cjs,bin/docker}`. The original control output is
-`/tmp/sdd-serial-poc-20261103-control.log`. These external files are not installed
-in the default runner and `/tmp` is not durable. Both timed runs used
-process-scoped `caffeinate -i -s`; the treatment driver's maximum measured
-heartbeat lag was **9.14 ms**. The primary comparison uses the **same complete-gate
-clock** for both runs. Control npm launch versus treatment Node-driver launch
-and the post-run audits are excluded from that clock.
-
-With the temporary files still present and a clean matched checkout, use new
-report prefixes to avoid overwriting this evidence:
-
-```sh
-poc=/tmp/sdd-serial-full-poc-20261103
-real_docker="$(command -v docker)"
-stamp="$(date +%Y%m%d-%H%M%S)"
-control="serial-poc-$stamp-control"
-treatment="serial-poc-$stamp-fast-lifecycle"
-
-caffeinate -i -s npm --prefix acceptance-tests test -- --report-prefix "$control"
-# Start only after the control succeeds and completes owned teardown.
-POC_REAL_DOCKER="$real_docker" caffeinate -i -s \
-  node "$poc/run-treatment.cjs" "$PWD" "$treatment"
-POC_REAL_DOCKER="$real_docker" \
-  node "$poc/compare.cjs" "$PWD" "$control" "$treatment"
-```
-
-**Recommendation:** pursue spec-first acceptance-only readiness/shutdown tuning;
-this has a measured benefit for today's entire gate. Investigate steady-state
-probe overhead before adopting the exact POC settings, and consider proper
-controller SIGTERM handling as an alternative to SIGINT. Next serial candidates
-are batching fresh runner identity inspections while retaining every pre/post
-check, and batching trusted fixture file writes within a single setup operation.
-Neither has a new full-gate speedup measurement here. Repeat matched trials before
-claiming stable medians or CI reliability.
-
-## Repeated backend lookup
-
-The acceptance runner already reuses a healthy backend container when its
-configuration matches. The proposed optimization was to inspect its remembered
-container ID directly instead of running `docker compose ps -q backend` before
-`docker inspect` on every same-configuration request.
-
-No acceptance backend was running for this POC. Using an existing project-owned
-`sdd/mailpit` container as a read-only Docker CLI latency proxy, 12 repeated
-probes produced:
-
-| Probe | Median | Minimum | Maximum | Total for 12 |
-| --- | ---: | ---: | ---: | ---: |
-| Compose `ps -q` plus `docker inspect` | 92.9 ms | 79.8 ms | 99.4 ms | 1109.9 ms |
-| Direct `docker inspect` by ID | 21.6 ms | 19.0 ms | 30.7 ms | 265.3 ms |
-
-The median difference is about 71 ms per call. The step definitions contain
-31 call sites for `configureDemoRepository`, but that is not a measured runtime
-call count. A stored Cucumber JSON report had only 55 scenarios; its 11.71-second
-"the demo repository is configured" step cannot be attributed to this lookup
-or treated as a current full-suite measurement. **Result:** this proxy does not
-support a substantial full-suite speedup from removing the lookup.
-
-## Parallel Cucumber workers
-
-The same eight named scenarios were discovered by a dry run (54 steps). A
-serial run passed in 59.95 seconds. Running the slice with Cucumber's built-in
-`--parallel 2` failed after 31.77 seconds: both workers used the same
-`sdd-acceptance-9498` Compose project name and raced to create its `db`
-container. They did not run eight passing scenarios. The failed project's
-containers, networks, and volumes were absent after teardown.
-
-**Result:** `--parallel 2` cannot be used with the current project naming
-scheme, which uses the process ID shared by these workers.
-
-## Two independent runner processes
-
-Instead of Cucumber workers, two separate Cucumber processes ran disjoint
-scenario-name selections. Each process had its own PID, port, Compose project,
-database, and backend. The second started after the first had extracted its
-features. The timed serial and concurrent trials selected exactly the same
-scenarios, and all their steps passed.
-
-| Matched slice | Serial, one project | Concurrent, two projects | Difference |
-| --- | ---: | ---: | ---: |
-| 8 scenarios, 54 steps (4 per shard) | 59.95 s | 53.07 s | 6.88 s faster (11.5%) |
-| 24 scenarios, 157 steps (12 per shard) | 81.90 s | 65.89 s | 16.01 s faster (19.5%) |
-
-The 24-scenario slice was selected from the slowest scenarios in the existing
-55-scenario JSON report, split alternately between shards, and verified by dry
-run (24 total, 12 per shard). In its concurrent run, shard A passed 12 scenarios
-and 81 steps in 65.89 seconds; shard B passed 12 scenarios and 76 steps in
-61.82 seconds. Both project IDs were distinct, and neither project left
-containers, networks, or volumes behind.
-
-One earlier launcher attempt started shard B only after shard A exited; its
-91.70-second total for eight passing scenarios was **not a parallel result**.
-The launcher was corrected before the 53.07- and 65.89-second measurements.
-
-**Result:** process-isolated sharding is promising on these slices, but a
-full-suite improvement has not been measured. Each process still pays for
-Compose startup, migrations, health checks, and teardown, and simultaneous
-builds may contend for Docker resources. A real runner also needs coordinated
-feature extraction, disjoint scenario selection, per-shard report paths, and
-one aggregated result and HTML report before it can replace the default suite.
-
-## Concurrent scenarios on one shared stack
-
-The backend service is already reused within a suite run. This POC did **not**
-speed up the suite by reusing the backend more. It started one fresh acceptance
-Compose project, then ran two separate Cucumber processes against its existing
-backend and preview controller. Each process had its own browser and ran two
-different, chat-owned preview scenarios. The parent stopped the shared project
-after both processes finished.
-
-| Matched slice | Serial, one project | Concurrent, one project | Difference |
-| --- | ---: | ---: | ---: |
-| 4 preview scenarios, 24 steps | 125.25 s (all passed) | 87.23 s (all passed) | 38.02 s faster (30.4%) |
-| Same 4 preview scenarios, three processes | 125.25 s (all passed) | 77.10 s (all passed) | 48.15 s faster (38.4%) |
-| Same 4 preview scenarios, one per process | 125.25 s (all passed) | 79.84 s (all passed) | 45.41 s faster (36.3%) |
-
-The concurrent pairs covered website/API startup, Compose dependency isolation,
-unsupported build rejection, and removing one chat's preview without removing
-another's. Each pair passed two scenarios and 12 steps. Both processes used the
-same backend, database, and preview controller; no extra backend stack was
-started. The project left no containers, networks, or volumes after teardown.
-An initial launcher trial started the second pair only after the first ended:
-its 128.12-second result was **not a concurrent measurement**. The corrected
-trial started the second process at 20.45 seconds, after the first had loaded
-its features, and finished in 87.23 seconds.
-
-A later trial used four processes against one fresh stack, each running one of
-the same preview scenarios. All four scenarios and 24 steps passed, the stack
-cleaned up, and elapsed time was 79.84 seconds. That is 7.39 seconds faster
-than the two-process trial, with diminishing returns as worker count grows.
-Another trial used three processes, running the longest two scenarios separately
-and the remaining two together. All four scenarios and 24 steps passed in
-77.10 seconds. This is 2.74 seconds faster than four processes, but each worker
-count was measured only once, so the small difference could be timing noise.
-
-**Result:** independent preview scenario work can overlap on one reused backend.
-This is not evidence that the whole suite is safe to parallelize: other
-scenarios modify process-wide fake LLM state, repository configuration, or
-shared user data. The POC bypassed each child runner's own stack lifecycle;
-production use needs explicit stack ownership, isolated state, coordinated
-feature extraction, and a single combined result and HTML report. The speedup
-comes from concurrency, not from eliminating a repeated backend restart.
-
-## Other probes
-
-The normal fresh-stack startup took 19.06 seconds. Removing `--build` only
-from its final backend `up --wait` (while keeping the build used for migrations)
-reduced startup to 18.29 seconds: a 0.77-second difference, too small to pursue
-as the main suite optimization. Ten fresh Compose exec calls importing a
-backend Python module took 1.73 seconds; ten requests to one resident
-interpreter took 0.032 seconds. That is a real per-call cost but does not
-explain a multi-minute suite.
-
-A separate seven-scenario Compose preview slice passed 41 steps in 135.76
-seconds. Its slowest scenario, removing one chat's preview, spent 30.34 seconds
-in a step that exercises multiple restarts, a failed restart, expiration, and
-deletion. The controller already asks Docker for a one-second graceful stop;
-this timing does not demonstrate a redundant default stop delay.
-
-## Shorter fake agent responses
-
-Three preview-change scenarios each configure a ten-second fake agent response,
-edit the checkout while the turn is running, and assert the resulting
-`preview-change` event. A matched POC shortened just those scripted responses
-to two seconds in memory, without changing application or test files:
-
-| Slice | Ten-second responses | Two-second responses |
-| --- | ---: | ---: |
-| 3 preview-change scenarios, 15 steps | 88.54 s (all passed) | 47.74 s (all passed) |
-
-The observed wall-time difference was 40.80 seconds in one run per setting;
-do not attribute all of that difference to the 24 seconds of configured delays
-removed. Other startup and host timing varied. As a control, the scenario that
-rejects a third Agent Turn at user capacity passed with both delays and took
-32.01 seconds normally versus 32.19 seconds with two-second responses: it
-stops its turns before their scripted delay matters. Shortening every fake
-response therefore does not produce a general speedup.
-
-**Result:** shorter waits in preview-change fixtures are promising, but their
-purpose is to keep the turn active long enough for an edit. A two-second delay
-passing once on this host does not establish reliability on slower CI workers.
-The fake provider currently has timed delays but no explicit hold/release
-barrier; one would need a separate spec and isolation checks before replacing
-time-based coordination. These slices do not establish a full-suite speedup.
-
-## 2026-11-02: fresh full regression baseline
-
-The comparison workload is the entire source-of-truth profile, not a selection
-of its slowest scenarios and not the effective profile containing active deltas:
-
-```sh
-npm --prefix acceptance-tests run test:specs -- \
-  --format progress --format json:reports/performance-poc-baseline.json
-```
-
-This run passed **91 scenarios and 534 Cucumber-reported steps**. The JSON
-contains 352 visible Gherkin steps and 182 per-scenario Before/After hook
-entries; all passed. Cucumber also reported two passing global hooks. The
-runner reported 533.680 seconds; log creation through final output took
-535.007 seconds. Subsequent comparisons use approximately **535.01 seconds**
-as the process-wall baseline. This is a new workload/run, not a reproduction
-of the older 88-scenario, approximately 423-second results in the runner README.
-Docker had two CPUs and approximately 5.78 GiB of memory available.
-
-The baseline JSON apportioned 502.47 seconds to scenarios and their local
-hooks. The slowest scenarios were:
-
-| Scenario | Seconds |
-| --- | ---: |
-| A completed run does not leave a reusable stack | 61.50 |
-| Removing one chat cleans up only its project | 42.16 |
-| Repository configuration changes and is restored | 25.28 |
-| Startup exceeds its bound | 22.38 |
-| An already dirty checkout changes again | 22.27 |
-| Unsupported build source is rejected | 22.11 |
-| A relevant file changes | 22.10 |
-
-The first scenario deliberately starts and tears down two additional fresh
-stacks. Those lifecycle checks must remain in any matched full-suite trial;
-removing them would change the workload rather than optimize it. Four backend
-recreations occurred in the baseline. The baseline Compose project was
-`sdd-acceptance-60540`.
-
-Experiment code/configuration lives outside the repository in
-`/tmp/sdd-acceptance-performance-poc-20261102/`; machine-readable reports live in
-the ignored `acceptance-tests/reports/` directory. Only this README is changed
-in the repository. No spec, application, fixture, runner, or default test
-command is changed, and no default parallelization is being installed.
-
-## 2026-11-02: two isolated processes, entire regression suite
-
-| Workload | Process wall time | Scenarios | Reported steps | Result |
-| --- | ---: | ---: | ---: | --- |
-| Serial full source-of-truth profile | 535.01 s | 91 | 534 | All passed |
-| Same full profile, two isolated processes | 294.03 s | 91 | 534 | All passed |
-
-This is **240.97 seconds less wall time (45.0% faster, approximately 1.82x)**
-in one matched full-suite trial. It is not a slice extrapolation.
-
-The coordinator used the baseline scenario durations to greedily balance
-longest scenarios first, then retained the original relative execution order
-within each shard. Extraction ran once, before either child. Separate temporary
-Cucumber configurations selected exact `feature:line` locations without
-running the normal extraction-on-config-load concurrently. A dry run verified
-a disjoint union of exactly the baseline scenario identities and visible
-step names, keywords, and source lines before executing either shard.
-
-| Shard | Project | Scenarios | Reported steps | Process wall time |
-| --- | --- | ---: | ---: | ---: |
-| 1 | `sdd-acceptance-75959` | 46 | 270 | 293.07 s |
-| 2 | `sdd-acceptance-75960` | 45 | 264 | 293.93 s |
-
-Both child processes exited zero. Every scenario step and per-scenario hook
-passed, as did both global hooks in each process. The visible Gherkin step
-counts were 178 + 174 = 352, matching the baseline. Each shard performed two
-backend recreations, matching four in the serial run. The two nested fresh
-lifecycle checks were retained. Project-scoped queries verified no Compose or
-preview containers, networks, or volumes remained for either shard.
-
-The 294.03-second measurement includes 0.106 seconds for coordinated extraction
-plus the elapsed interval covering both concurrent processes, including each
-process's fresh stack startup, tests, HTML/JSON reporting, and teardown. It
-excludes the short dry-run preflight and manifest generation. The serial
-535.01-second log-observed wall time also includes npm launch overhead. These
-sub-second launcher differences do not explain the approximately 241-second
-gap, but the measurements are not identical harness-overhead accounting.
-
-Evidence under `acceptance-tests/reports/`:
-
-- `performance-poc-baseline.json`
-- `performance-poc-isolated-2-manifest.json`
-- `performance-poc-isolated-2-{1,2}-dry.json`
-- `performance-poc-isolated-2-{1,2}.{json,html}`
-- `performance-poc-isolated-2-summary.json`
-
-The experiment command on this machine was:
-
-```sh
-node /tmp/sdd-acceptance-performance-poc-20261102/shard-trial.cjs 2 isolated-2
-```
-
-The first launcher attempt failed during dry-run configuration loading because
-this Cucumber version resolved an absolute CommonJS config path relative to
-its working directory. No stack or executable scenario started in that
-attempt. Passing the config path relative to the runner directory fixed it;
-the table contains only the subsequent successful full-suite trial.
-
-**Result:** process-isolated sharding now has a measured full-suite benefit on
-this host. This is still a POC: one trial is not a CI reliability result, two
-stacks consume more resources, and the temporary launcher does not provide a
-single aggregated HTML report or production cancellation handling. A permanent
-runner needs a driving spec delta and those lifecycle/reporting guarantees;
-simply adding Cucumber `--parallel 2` remains incorrect.
-
-## 2026-11-02: acceptance-stack startup and shutdown
-
-Separate fresh lifecycle probes used the unmodified `startApplication` and
-`stopApplication` exports. A temporary Docker CLI wrapper inserted additional
-Compose files only after the acceptance override; it did not alter application
-code, credentials, migration commands, build flags, or health-check predicates.
-Every successful probe verified that its project containers, networks, and
-volumes had been removed.
-
-| Acceptance-stack settings | Startup | Teardown | Whole cycle |
-| --- | ---: | ---: | ---: |
-| Existing settings | 19.51 s | 10.74 s | 30.25 s |
-| One-second health checks | 7.12 s | 10.84 s | 17.96 s |
-| One-second checks + controller `SIGINT` | 7.17 s | 0.90 s | 8.08 s |
-
-An earlier unchanged control reproduced the normal cost: 19.51-second startup,
-10.89-second teardown, 30.41 seconds total. The successful probe project IDs
-were `sdd-acceptance-82636`, `sdd-acceptance-82891`, and
-`sdd-acceptance-83088`; the earlier control was `sdd-acceptance-82001`.
-
-### Health-check cadence
-
-The temporary override changed database and backend health-check intervals
-from ten seconds to one second and retries from five to fifty, retaining the
-same successful-probe predicate, per-probe timeout, and at least the nominal
-50-second failure allowance. The database's 30-second start period remained
-unchanged, with `start_interval: 1s` added there. The backend has no start
-period, so it received no `start_interval`. Faster successful readiness is
-not achieved by ignoring a failing health check or skipping migrations.
-This does change sampling/retry behavior; matching the nominal allowance is
-not a claim that every possible failure pattern is identical.
-
-The first health-only probe was rejected before application startup because
-Docker requires `start_period` when `start_interval` is specified. Removing
-that invalid backend field fixed the temporary configuration. Its project
-`sdd-acceptance-82258` was torn down and checked for leftover resources. The
-table excludes that failed configuration probe.
-
-### Controller shutdown signal
-
-This is different from the earlier investigation of **preview workload**
-stops, which already request one second. The acceptance stack's controller
-itself uses a plain Python server as PID 1 and no explicit SIGTERM handler.
-Docker events from the first normal probe show:
-
-1. Controller received signal 15 (`SIGTERM`).
-2. 10.017 seconds later it received signal 9 (`SIGKILL`).
-3. It exited with code 137.
-
-The temporary acceptance-only override set
-`preview-controller.stop_signal: SIGINT`; no stop timeout was shortened.
-The resulting complete teardown took 0.90 seconds instead of approximately
-10.8 seconds. A live, exact-container-name event capture in the subsequent
-full-suite trial also observed `sdd-acceptance-83247-preview-controller-1`
-receive signal 2 and exit with code 130 approximately 0.145 seconds later,
-without a SIGKILL in its shutdown sequence. This is measured acceptance-stack
-lifecycle behavior, not a claim that a preview's own stop operation was
-previously waiting ten seconds.
-
-Evidence: `performance-poc-lifecycle-summary.json` and
-`performance-poc-lifecycle-normal-events.json` under
-`acceptance-tests/reports/`, plus the temporary `fast-health.yml`,
-`controller-stop.yml`, and Docker wrapper in the POC directory.
-
-**Result:** a fresh start/teardown cycle fell from 30.25 to 8.08 seconds in
-these probes. That is not by itself a full-suite timing result. The full-suite
-lifecycle scenarios intentionally repeat this cycle, so they must retain their
-assertions when measuring these settings with the whole regression workload.
-
-## 2026-11-02: full suite with sharding and faster lifecycle
-
-The next full regression trial retained the exact same shard assignments and
-all original step implementations, including ten-second detection-turn replies,
-preview builds, intentional timeout cases, isolation checks, and nested fresh
-lifecycle checks. The only additional changes were the two temporary
-acceptance-stack Compose overrides described above.
-
-| Entire 91-scenario / 534-reported-step workload | Wall time | Result |
-| --- | ---: | --- |
-| Serial, existing lifecycle settings | 535.01 s | All passed |
-| Two isolated processes, existing settings | 294.03 s | All passed |
-| Same two shards, faster health checks and controller shutdown | 260.23 s | All passed |
-
-The combined trial saved **274.77 seconds (51.4%)** against the serial
-baseline, or another **33.80 seconds (11.5%)** against sharding alone. One run
-per full-suite configuration is not a guaranteed performance threshold, and
-this does not isolate a serial full-suite effect of the lifecycle changes.
-
-| Shard | Project | Scenarios | Reported steps | Process wall time |
-| --- | --- | ---: | ---: | ---: |
-| 1 | `sdd-acceptance-83247` | 46 | 270 | 214.78 s |
-| 2 | `sdd-acceptance-83248` | 45 | 264 | 260.15 s |
-
-Both exited zero, with every visible step and local/global hook passed. Each
-shard still performed two backend recreations. Resource checks found no
-remaining Compose/preview containers, networks, or volumes for either project.
-Live events filtered by the **exact controller container names**, not only
-inherited image labels, recorded SIGINT followed by exit code 130 for both
-controllers. The faster lifecycle made the original, baseline-timed partition
-uneven; its roughly 45-second gap is a reason to test rebalancing, not evidence
-that a further speedup has already been achieved.
-
-Evidence under `acceptance-tests/reports/`:
-
-- `performance-poc-isolated-2-fast-lifecycle-manifest.json`
-- `performance-poc-isolated-2-fast-lifecycle-{1,2}.{json,html}`
-- `performance-poc-isolated-2-fast-lifecycle-summary.json`
-- `performance-poc-exact-controller-shutdown-events.ndjson`
-
-The local full-suite experiment used:
-
-```sh
-PATH=/tmp/sdd-acceptance-performance-poc-20261102/bin:$PATH \
-POC_CONTROLLER_SIGINT=1 \
-node /tmp/sdd-acceptance-performance-poc-20261102/shard-trial.cjs \
-  2 isolated-2-fast-lifecycle
-```
-
-## 2026-11-02: rebalanced full regression trial
-
-The final full-suite experiment kept the faster lifecycle settings but computed
-shard weights from the preceding fast-lifecycle reports, rather than from the
-slower serial baseline. It still used the original baseline as the authority
-for scenario/step coverage and required all observed results to pass. No
-fixture reply shortening, preview-preparation cache, build skipping, or
-application-code optimization was included.
-
-| Entire source-of-truth regression workload | Wall time | Reduction vs serial |
-| --- | ---: | ---: |
-| Serial baseline | 535.01 s | — |
-| Two isolated processes | 294.03 s | 45.0% |
-| Same two shards + faster lifecycle | 260.23 s | 51.4% |
-| Two shards rebalanced for the faster lifecycle | **246.01 s** | **54.0%** |
-
-Every row passed **91 scenarios and 534 reported steps**, representing the
-same 352 visible Gherkin steps and 182 per-scenario hook entries. Each process
-also passed its global hooks. The final row saved **289.00 seconds** against
-the serial baseline and **14.22 seconds** against the preceding partition.
-
-| Final shard | Project | Scenarios | Reported steps | Process wall time |
-| --- | --- | ---: | ---: | ---: |
-| 1 | `sdd-acceptance-89165` | 45 | 265 | 245.16 s |
-| 2 | `sdd-acceptance-89166` | 46 | 269 | 245.76 s |
-
-Both exited zero. The coordinator verified disjoint discovery and identical
-visible step identities, checked every result, and found no remaining
-Compose/preview containers, networks, or volumes for either project. The
-reported 246.01 seconds includes coordinated extraction (0.251 seconds) and
-the complete concurrent child-process interval; the short preflight remains
-excluded, as in the earlier sharded measurements.
-
-The partition change also reduced parent-backend recreations from four to
-three: shard 1 recreated three times, shard 2 zero times. All configuration
-transition scenarios and their assertions still executed. Therefore the
-additional 14.22-second improvement is a **partitioning effect combining load
-balance and setup transitions**, not an isolated measurement of balancing
-alone. The original nested lifecycle checks were retained.
-
-Evidence under `acceptance-tests/reports/`:
-
-- `performance-poc-isolated-2-rebalanced-fast-lifecycle-manifest.json`
-- `performance-poc-isolated-2-rebalanced-fast-lifecycle-{1,2}.{json,html}`
-- `performance-poc-isolated-2-rebalanced-fast-lifecycle-summary.json`
-
-The local command used the two preceding successful reports only as timing
-weights; the comparison inventory still came from `performance-poc-baseline.json`:
-
-```sh
-PATH=/tmp/sdd-acceptance-performance-poc-20261102/bin:$PATH \
-POC_CONTROLLER_SIGINT=1 \
-POC_WEIGHTS='acceptance-tests/reports/performance-poc-isolated-2-fast-lifecycle-1.json:acceptance-tests/reports/performance-poc-isolated-2-fast-lifecycle-2.json' \
-node /tmp/sdd-acceptance-performance-poc-20261102/shard-trial.cjs \
-  2 isolated-2-rebalanced-fast-lifecycle
-```
-
-**Result:** a measured full-profile reduction from approximately 8m55s to
-4m06s on this two-CPU Docker host. There is one run per configuration, not a
-statistical or CI reliability study. The fastest row is not a measurement of
-the effective profile containing active deltas, and none of these temporary
-settings or partitioning rules have been installed into the default runner.
-
-## 2026-11-02: remove a repeated fake delay, without shortening the turn
-
-A separate matched slice tested a more conservative alternative to the older
-ten-to-two-second response experiment. It retained the original **ten-second
-edit window** and all Gherkin assertions, and changed only the subsequent
-fake reply used to resolve startup instructions.
-
-The fake provider repeats its last scripted reply. The detection fixture
-scripts one delayed `Turn finished` reply; the two relevant-edit scenarios
-subsequently request startup instructions from the provider. Repeating the
-turn reply makes that unrelated lookup sleep ten more seconds before its
-non-JSON text is treated as no startup plan.
-
-Request-body auditing found an important detail: OpenCode first makes a title
-generation request as well as the main agent request. The observed sequences
-in **both** successful settings were:
-
-| Scenario | Observed provider requests, in order |
+| Complete gate | 587.345 s | 543.936 s | **43.409 s faster (7.4%)** |
+| Python helper invocations | 276 | 137 | 139 fewer |
+| Python helper elapsed total | 137.118 s | 90.158 s | 46.961 s less |
+| File-write Python invocations | 203 | 64 | 139 fewer |
+| Selected fixture preparations | 32 | 32 | Unchanged |
+| Selected fixture-preparation time | 55.927 s | 9.600 s | **46.327 s less (82.8%)** |
+| Stack startup | 19.763 s | 19.593 s | 0.170 s less |
+| Stack teardown | 11.812 s | 11.688 s | 0.124 s less |
+
+**Conclusion:** batching demonstrated an end-to-end saving of **43.4 seconds**,
+with nearly identical startup times. This is a useful improvement, but not a
+three-minute saving. Helper and fixture spans overlap scenario time; do not add
+the component savings to the complete-gate saving.
+
+**Measurement limits:** one accepted sequential pair, not randomized repeated
+samples or a CI guarantee. Sleep prevention remained active and heartbeat checks
+passed; maximum wall-clock heartbeat gaps were 1.009 s / 1.002 s. The existing
+README diff was preserved and the checkout was checked unchanged. An earlier
+fresh control attempt failed after 31 passing scenarios on a 30-second
+preview-launch timeout; it was cleaned up, retained and excluded from timing
+comparisons. The accepted pair used no timeout or assertion changes.
+
+### Installed implementation
+
+Commit **`3ca7070`** implements this optimization only in `acceptance-tests/`:
+
+- `support/api-client.js`: explicit `withWorkspaceFileBatch(chatId, prepare)` and
+  ordered writes in one fresh backend Python process.
+- `support/pages/preview-workload-page.js`: the six write-only preparations opt
+  in; nested preparation for the same client/chat joins the enclosing batch.
+- `support/workspace-file-batching.test.cjs`: 19 checks for immediate standalone
+  edits, ordered/Unicode/empty writes, nesting, async/client/chat isolation,
+  failures, closed-batch rejection and the nine fixture variants.
+- `README.md`: batch boundaries and the focused test command.
+
+All nine fixture variants matched the original file contents and write order.
+The **39 harness unit checks** passed. The installed implementation, without the
+POC preload, passed the **complete 88-scenario / 338-visible-step gate in
+544.316 seconds (9m 4s)**. Inventory/spec fingerprint and exact-owned cleanup
+were verified. No application or OpenSpec files changed; the acceptance-only
+implementation used the user's explicit no-spec exception.
+
+The first implementation validation timed out after 19 passing scenarios on
+"First Context visit starts the original checkout." The unchanged full-suite
+retry passed. The timeout's cause remains unresolved; no timeouts, resets or
+assertions were weakened to obtain the pass.
+
+### Earlier paused comparison
+
+The original control (2026-11-04) and resumed treatment (2026-11-05) measured
+**610.398 → 611.652 s** for the complete gate: no end-to-end gain. Fixture
+preparation fell **56.411 → 10.073 s**, but startup rose **20.742 → 85.794 s** for
+an unestablished reason. Each variant passed 88/88 cases. This pair was separated
+by a pause, reused its completed control, and had no sleep/heartbeat validity
+checks; it remains exploratory evidence. The first treatment was cancelled,
+cleaned up and excluded.
+
+### Evidence
+
+Reports are gitignored under `acceptance-tests/reports/`:
+
+| Report prefix | Meaning |
 | --- | --- |
-| A relevant file changes | title, agent, startup plan |
-| An already dirty checkout changes again | title, agent, startup plan |
-| Only ignored files change | title, agent |
+| `fixture-batching-rerun-qhCR1I-control` / `fixture-batching-rerun-qhCR1I-batch` | Accepted fresh paired rerun. |
+| `fixture-batching-rerun-9buaMs-control` | Failed initial control; excluded. |
+| `fixture-batching-implementation-retry-20261105-153804` | Passing installed-implementation gate. |
+| `fixture-batching-implementation-20261105-153240` | Failed first implementation validation; retained. |
+| `fixture-batching-poc-Fn9ERa-control` / `fixture-batching-poc-Fn9ERa-batch-resume-1793889903637` | Earlier paused comparison. |
+| `fixture-batching-poc-Fn9ERa-batch` | Cancelled original treatment; excluded. |
+| `perf-poc-20261104-baseline` | Separate unchanged 618.659-second pass, overlapped by read-only probes; not a batching control. |
 
-The temporary client wrapper therefore supplied **two unchanged ten-second
-replies**, followed by immediate JSON `null`. The third reply was verified to
-serve only the startup-plan request in the relevant-edit cases. `null` retains
-the original no-plan result without waiting for delayed invalid text. The
-ignored-only case made no plan request and left the extra reply unused; normal
-scenario reset cleared it. The provider's global repeat-last behavior, main
-turn output, application code, and original test steps were not changed.
+Each prefix has manifest, summary, group results/events and HTML reports.
+Temporary POC sources, `comparison.json`, per-run metrics and logs are under
+`/private/tmp/sdd-fixture-batching-retry.qhCR1I/` (accepted rerun),
+`/private/tmp/sdd-fixture-batching-rerun.9buaMs/` (failed control), and
+`/private/tmp/sdd-fixture-batching-poc.Fn9ERa/` (original comparison).
+These external experiment files are not durable or installed dependencies.
+Fresh trials need new directories and report prefixes; the installed code and
+regression checks are in the commit above.
 
-| Same three detection scenarios | Whole slice | Result |
-| --- | ---: | --- |
-| Existing repeating delayed reply, with request audit | 89.11 s | All passed |
-| Preserve title/agent delays; immediate explicit no-plan reply | 69.58 s | All passed |
+## Client stack snapshot removal
 
-The observed difference was **19.53 seconds (21.9%)** in one run per setting.
-Both runs executed the same nine visible Gherkin steps. Cucumber reported 18
-steps each: those nine plus six normal scenario hooks and three added audit
-hooks. All 18 and both global hooks passed. The local scenario times were:
+On **2026-11-06**, the user chose to trust the single-stack lifecycle and remove
+all client shared-stack snapshots, including the initial snapshot. This is a
+coverage trade-off, not an equivalent implementation of identity batching.
 
-| Scenario | Control | Explicit no-plan reply |
-| --- | ---: | ---: |
-| A relevant file changes | 22.81 s | 12.62 s |
-| An already dirty checkout changes again | 22.26 s | 12.75 s |
-| Only ignored files change | 12.18 s | 12.28 s |
+Removed from `acceptance-tests/`:
 
-The unchanged ignored-only case is a useful control: the gain occurs in the
-additional plan lookup, not by making the turn complete earlier. Fresh
-projects `sdd-acceptance-93760` and `sdd-acceptance-94368` were checked for
-remaining Compose/preview containers, networks, and volumes; none remained.
-These trials used the original lifecycle settings, not the faster overrides.
+- Per-service Compose ID lookups and Docker identity inspection, `stackSnapshot`,
+  `verifyStack`, `backendInfo`, initial identity state and backend-recreation state.
+- Container/process/health/mount comparisons around resets and configuration,
+  and shared-stack identity payloads in lifecycle events/child IPC.
+- Obsolete reuse assertions and their step-definition file. Surviving isolated
+  command-fixture assertions now verify acknowledged repository configuration.
 
-The first instrumented control used an incorrect call-count assumption of
-2/2/1 instead of the observed 3/3/2. All original Gherkin assertions passed,
-but the three added After audit checks failed. That attempt was excluded;
-the corrected experiment logged and checked the request roles and ordering
-before accepting both successful measurements. It did not merely suppress
-the unexpected request or remove the audit.
+Retained: bounded Compose/HTTP startup readiness, one-start lifecycle guards,
+protected server-side reset ownership and baseline verification, strict reset
+acknowledgements, fatal control/configuration boundaries, fresh scenario contexts,
+and exact-owned final cleanup. Unrelated-resource sentinel comparisons still
+protect teardown scope; application workspace change-detection snapshots are
+untouched. No application or OpenSpec files changed; this test-only work uses
+the user's explicit no-spec exception.
 
-Evidence under `acceptance-tests/reports/`:
+**Validation:** all **66 harness unit tests passed**, along with JavaScript
+syntax and whitespace checks. The complete unchanged retry, without a POC
+preload, passed **88/88 scenarios / 338 visible steps in 430.393 seconds
+(7m 10s)**. Its independent audit verified identical stable scenario IDs, step
+text and spec fingerprint against the pre-removal inventory, one stack
+startup/ready/teardown, 88 successful reset generations, absence of client
+identity payloads, and no remaining exact-owned containers, networks or volumes.
+These lifecycle checks do not claim continuous service/process/mount identity
+validation; that client coverage was deliberately removed.
 
-- `performance-poc-detection-{repeat-delay-control,immediate-plan}.{json,html}`
-- `performance-poc-detection-summary.json`, including request-role evidence
-- `performance-poc-detection-incorrect-call-count-audit.json`, the rejected audit
+The first full run (`snapshot-removal-BGvT8B`) failed after 17 passing scenarios
+at "User approves a proposal": the expected apply response was not persisted.
+Backend logs report `Agent command was cancelled`; the cancellation's root cause
+and relation to this change are not established. The remaining 70 scenarios were
+fail-fast skipped, not removed from inventory. Owned teardown passed. That
+failed 120.366-second run is retained and excluded from performance samples;
+no timeout, reset or application assertion was weakened before the passing retry.
 
-The local experiment command was:
+The fresh **pre-removal** gate (`stack-invariant-check-kVEk27`) passed all
+88 scenarios / 338 visible steps in **546.004 seconds** and verified one shared
+stack with stable checked identities. The snapshot-free passing observation was
+**115.611 seconds shorter (21.2%)**. This is one passing unchanged retry compared
+with an earlier pre-removal run, not a repeated matched benchmark, a statistical
+speedup estimate, or a CI guarantee.
 
-```sh
-node /tmp/sdd-acceptance-performance-poc-20261102/detection-trial.cjs
-```
+Gitignored evidence under `acceptance-tests/reports/`:
 
-**Result:** avoid repeating a turn-coordination delay for a different provider
-operation. This slice does **not** establish an additional full-suite speedup,
-and its approximately 20-second saving must not be subtracted from the
-246.01-second full-suite result. A durable fixture should identify response
-purposes explicitly rather than assume this OpenCode version's exact request
-count. The active Git-detection change also calls for an observation-ready
-boundary; that signal was not implemented or bypassed by this POC.
+- `snapshot-removal-retry-5DH5UO-*`: passing complete gate, manifest, results,
+  lifecycle events, HTML reports and independent `audit.json`.
+- `snapshot-removal-BGvT8B-*`: failed first validation, retained.
+- `stack-invariant-check-kVEk27-*`: fresh pre-removal verification, retained.
 
-## 2026-11-02: new serial POCs (no scenario concurrency)
+Full logs are under `/private/tmp/sdd-snapshot-removal-retry.5DH5UO/` and
+`/private/tmp/sdd-snapshot-removal-validation.BGvT8B/`; these temporary paths are
+not durable dependencies.
 
-These follow-up experiments use **one Cucumber runner, with scenarios executed
-serially**. Trials also run one after another. Existing lifecycle scenarios that
-start temporary fresh stacks are retained, not used to shard the workload.
-All executable prototypes are outside the repository in
-`/tmp/sdd-acceptance-serial-poc-20261102/`; the normal runner is unchanged.
+## Docker identity batching: historical POC
 
-The matched control already includes the preceding faster acceptance health
-checks and controller SIGINT teardown. It is not the earlier 535.01-second
-original-settings baseline, nor the 246.01-second two-runner result.
+**Superseded on 2026-11-06:** the user chose to remove all client stack snapshots,
+including the startup baseline and reset/configuration comparisons. The following
+results describe the previous harness, not the current implementation. Temporary
+POC preloads are SHA-pinned to that earlier source and must not be applied to the
+snapshot-free harness.
 
-### Warm Python imports with a fresh child per fixture command
+### Change tested
 
-Profiling the complete serial regression found **276 Python fixture calls**,
-taking **131.03 seconds** inside `runBackendPython`. Each normally starts a
-Docker Compose exec and a new Python interpreter, importing the backend models
-and configuration again. By contrast, creating **698 API request contexts**
-took only **0.43 seconds** in total; context pooling is not a useful main target
-on this measurement.
+A temporary, SHA-pinned Node loader hook replaced only the Docker identity
+collection within `stackSnapshot()` in
+`acceptance-tests/features/support/app-lifecycle.js`. Both control and treatment
+used identical measurement wrappers; only the treatment changed collection:
 
-The external preload instead opens a persistent `docker exec -i` Python parent
-for the verified backend container, preimports SQLModel/backend modules, and
-**forks one fresh child per fixture command**. Commands remain strictly serial.
-The parent never executes fixture code or opens a database session. Each child
-gets a new execution namespace and disposes inherited SQLAlchemy engine pools
-before executing the unchanged fixture script and arguments. Output and errors
-return through a JSON-line protocol. A backend ID change starts another worker;
-the worker closes before normal application teardown.
+- Control: separate Compose lookup and Docker inspection for each of `backend`,
+  `db` and `preview-controller` — **six Docker calls per snapshot**.
+- Treatment: one fresh multi-service Compose lookup followed by one fresh
+  multi-container Docker inspection — **two calls per snapshot**.
+- Require exactly three distinct discovered/inspected container IDs and a
+  one-to-one mapping to the expected services with exact project/service labels.
+  Inspection order does not determine service order.
+- Retain running/health status, full container IDs, start timestamps, restart
+  counts and sorted named-volume identities. Preserve the actual HTTP health
+  probe and authenticated control-state/backend boot-ID check.
+- Retain every pre/post-reset and configuration verification, reset-generation
+  acknowledgement, fatal boundary and owned final teardown. Standalone
+  `backendInfo()` is unchanged. No IDs or inspection results are cached across
+  snapshots; no scenario concurrency, timeout changes or assertion removal.
 
-| Complete serial `specs` profile | Wall time | Python helper time | Result |
-| --- | ---: | ---: | --- |
-| Matched faster-lifecycle control | 444.72 s | 131.03 s | 91 scenarios / 534 reported steps passed |
-| Same settings + warm forked fixture worker | 361.57 s | 46.35 s | 91 scenarios / 534 reported steps passed |
+No application, checked-in harness or OpenSpec files changed during the trials.
+The existing README diff was preserved byte-for-byte until measurement finished.
+The user explicitly exempted this acceptance-tests-only POC from spec creation.
 
-**Measured full-suite saving: 83.15 seconds (18.7%)**, without test concurrency.
-Both runs made the same 276 fixture calls and recorded four backend
-recreations. Their fresh discovery and executed inventories matched: 91
-scenarios, 352 visible Gherkin steps, and 182 per-scenario hook entries, making
-534 reported steps. Global hooks also passed. Scoped Compose/preview
-containers, networks, and volumes were absent afterward.
+### Accepted fresh pairs — 2026-11-05 and 2026-11-06
 
-The worker trial created two parents, processing 274 and ten requests
-respectively. These 284 requests include eight isolation/error probes, leaving
-276 actual fixture commands. Every request had a distinct child PID within its
-worker. The probes verified that child changes to globals, environment,
-`sys.path`, and a settings object did not reach the next child, and that an
-expected fixture error was reported without breaking the following command.
-A preceding five-scenario worker smoke test also passed (25.19 seconds).
+Each pair used new control and treatment runs, in that order, with fresh owned
+stacks on the same revision and installed file-write batching. All four runs
+passed **88/88 scenarios / 338 visible steps**, with identical stable scenario
+IDs, step text and spec fingerprint.
 
-**Limitations:** a fresh fork is not a fresh interpreter. Import-time state is
-inherited, and these probes plus one full regression do not prove equivalence
-for arbitrary fixture code, fork-unsafe libraries, or future import-time side
-effects. Persistent database/workspace effects remain intentional fixture
-behavior. A durable implementation needs explicit supported-script semantics,
-request timeouts, worker-death handling, backend lifecycle ownership, and CI
-repeatability checks. No stack or worker is reused across suite runs.
+| Measurement | Nov 5 control | Nov 5 treatment | Nov 6 control | Nov 6 treatment |
+| --- | ---: | ---: | ---: | ---: |
+| Complete gate | 534.428 s | 459.104 s | 561.600 s | 469.517 s |
+| Identity snapshots | 301 | 301 | 301 | 301 |
+| Snapshot Docker calls | 1,806 | 602 | 1,806 | 602 |
+| Docker identity-collection time | 119.635 s | 44.947 s | 124.289 s | 45.855 s |
+| Scenario reset time | 122.328 s | 77.537 s | 128.249 s | 80.165 s |
+| Stack startup | 19.778 s | 19.685 s | 19.703 s | 19.568 s |
+| Stack teardown | 11.871 s | 11.840 s | 11.952 s | 11.923 s |
 
-### Batched dependency-archive transfer
+Complete-gate savings were **75.324 seconds (14.1%)** and
+**92.083 seconds (16.4%)**. The descriptive average is
+**548.014 → 464.311 seconds: 83.703 seconds saved (15.3%)**. Identity collection
+itself fell by **74.687 / 78.435 seconds**. These component spans overlap scenario
+and gate time; they are not additional savings to add to the end-to-end result.
 
-The preview controller transfers dependency inputs/outputs through Docker
-Engine execs, not the host Docker CLI. This POC changes only that transport:
-input chunks grow from 24 to 64 KiB, output chunks from 24 to 128 KiB, and
-extraction/unlink/manifest checks share one checked exec. The bounded output
-read grows from 64 to 256 KiB to accommodate the larger base64 response.
-Archive limits remain 16 MiB. Non-root exec, safe extraction, downstream
-path/type/count/size validation, builds, readiness checks, and sandbox settings
-remain in force. There is no dependency-preparation cache or skipped build.
+The original ~42-second estimate counted only the **176 scenario-reset boundary
+snapshots**. Actual complete runs had **301 snapshots**, including startup and
+configuration verification, removing **1,204 Docker CLI calls per gate**.
+Every accepted run retained 88 verified resets and one effective configuration
+change. Maximum heartbeat gaps were approximately 1.007 seconds on Nov 5 and
+1.005 seconds on Nov 6; sleep guards remained active and exact-owned cleanup
+was verified.
 
-The matched slice contains `First Context visit starts the original checkout`
-and `Unsupported build source is rejected`. Both settings passed the same two
-scenarios / seven visible steps / 11 reported steps and all global hooks.
+**Measurement limits:** two accepted control→treatment pairs on one host,
+separated across days. The planned control→treatment→treatment→control sequences
+did not finish; do not describe these results as completed ABBA or randomized
+trials, a stable median, or a CI guarantee. Failed subsequent attempts were
+retained and excluded, not treated as successful repetitions.
 
-| Matched two-scenario slice | Wall time | Input/output transfer execs | Transfer time |
-| --- | ---: | ---: | ---: |
-| Original transport + instrumentation | 42.18 s | 17 | 1.388 s |
-| Batched transport + same instrumentation | 40.53 s | 10 | 0.957 s |
+### Regression and final validation
 
-Both transferred identical byte counts: 20,480 input bytes and 92,160 output
-bytes. Each executed two successful calls apiece to input transfer, output
-transfer, dependency preparation, and image build. Transfer Engine requests
-fell from 66 to 38. The instrumentation attributes nested transfer operations
-separately rather than counting them again in dependency-preparation totals.
+- **45 selected existing harness checks** passed: lifecycle, hooks, inventory,
+  gate and installed workspace-file batching.
+- **88 external focused POC checks** passed: identity/order/mount equivalence,
+  fresh discovery, ownership/cardinality/shape/health/error rejection,
+  pre/post-reset drift and fatal boundaries, acknowledgements, HTTP probes,
+  standalone backend lookup and unchanged teardown, plus preservation of
+  `execFile` callback/custom-promisified behavior.
+- Final standalone treatment validation passed the **complete 88-scenario /
+  338-visible-step gate in 478.585 seconds (7m 59s)** on Nov 6. It retained all
+  301 snapshots / 602 Docker calls, passed heartbeat checks and verified owned
+  cleanup. This is a green final validation, **not another paired saving**.
 
-**Result:** 1.65 seconds (3.9%) less slice wall time in one pair, with a directly
-measured 0.43-second transport reduction. Dependency preparation itself varied
-from 3.93 to 4.39 seconds, so the whole wall-time difference should not be
-attributed to transport or extrapolated to a full-suite gain. This is a small,
-lower-priority optimization, not the main serial bottleneck. Reports use
-`archive-control-inline` and `archive-batched`; both scoped cleanups passed.
+Three attempts were excluded:
 
-### Explicit provider hold/release boundary
+1. Initial Nov 5 control: an instrumentation wrapper dropped `execFile`'s custom
+   promisifier, breaking the runtime-image step after 14 passing scenarios.
+   The corrected wrapper preserves the original descriptor and has explicit
+   regression checks; the failed attempt was retained and cleaned up.
+2. Nov 5 second treatment: a **1,004.807-second heartbeat gap** invalidated timing,
+   and chat-specific preview cleanup timed out after 45 passing scenarios.
+   The precise reason for the host/process pause is unestablished, despite an
+   active sleep guard. Cleanup was verified; no timeout was weakened.
+3. Nov 6 second treatment: Docker failed to bind the newly reserved backend host
+   port because it was already in use. **Zero scenarios and identity snapshots
+   ran**. Owned cleanup passed; the unchanged fresh final validation passed.
+   Port-reservation race behavior was not changed for this POC.
 
-The three detection fixtures use a ten-second fake response as an edit window.
-Instead of guessing a shorter sleep, an external acceptance-only backend
-bootstrap observes the **original before snapshot completing**, then holds the
-main fake-agent request until the fixture has finished editing the workspace.
-It releases after one real edit for the relevant/dirty cases and two for the
-ignored-only case. The original after snapshot, change comparison,
-`preview-change` event, and Gherkin assertions still run unmodified.
+### Evidence and next action
 
-The matched control uses the same observation/auditing wrappers but does not
-block the request; it retains the ten-second title/agent replies. Both settings
-already supply the preceding POC's explicit immediate no-plan reply, so this
-pair isolates synchronization rather than counting that earlier saving again.
-The treatment uses zero-delay title/agent replies, with the main request held
-at the explicit boundary instead of relying on their sleep.
+Gitignored reports are under `acceptance-tests/reports/`:
 
-| Same three detection scenarios | Whole slice | Result |
-| --- | ---: | --- |
-| Ten-second replies + observation-only control | 46.09 s | All passed |
-| Explicit hold/release + immediate replies | 16.14 s | All passed |
+| Report prefix | Meaning |
+| --- | --- |
+| `identity-batching-cvuMIq-1-control` / `identity-batching-cvuMIq-2-batch` | Accepted Nov 5 pair. |
+| `identity-batching-NE6Fx8-1-control` / `identity-batching-NE6Fx8-2-batch` | Accepted Nov 6 pair. |
+| `identity-batching-pVKPT5-1-batch` | Passing standalone final validation. |
+| `identity-batching-WzCwjD-1-control` | Initial instrumentation failure; excluded. |
+| `identity-batching-cvuMIq-3-batch` | Heartbeat-gap/timeout failure; excluded. |
+| `identity-batching-NE6Fx8-3-batch` | Startup port collision; excluded. |
 
-**Measured slice saving: 29.94 seconds (65.0%)**. Each run passed the same three
-scenarios / nine visible steps / 15 reported steps and all global hooks. No
-extra Cucumber hooks were added. Audits verified a valid observed baseline,
-that the turn had not completed before/during either edit, the correct edit
-count, explicit release, an observed after snapshot, and exactly one blocked
-main request per treatment scenario (zero in the control).
+Each prefix retains manifest, summary, scenario results, lifecycle events and
+HTML reports. Corrected external sources, focused tests, metrics, logs and
+`pair-1.json` files are in `/private/tmp/sdd-identity-batching-retry.cvuMIq/` and
+`/private/tmp/sdd-identity-batching-rerun.NE6Fx8/`. Final validation sources and
+`validation.json` are in `/private/tmp/sdd-identity-batching-validation.pVKPT5/`;
+the initial failed source/evidence is retained in
+`/private/tmp/sdd-identity-batching-poc.WzCwjD/`. These are temporary experiment
+files, not durable installed dependencies. Reruns must copy corrected sources
+into a new directory and use fresh report prefixes, never overwrite an attempt.
 
-Provider purposes remained `title, agent, plan` for both relevant-change
-scenarios and `title, agent` for ignored-only edits. The actual provider route
-still supplies the configured response after release; the wrapper does not
-substitute the change event or snapshot contents. Gate polling is bounded by
-ten seconds; server-side waiting by 15 seconds. Normal fake-provider reset
-clears/releases the scenario gate. Both scoped resource cleanups passed.
-Reports use `gate-control` and `gate-explicit-release`.
+**Historical conclusion:** identity batching showed roughly **1¼–1½ minutes
+saved** beyond installed file-write batching without removing infrastructure
+assertions. It was not installed. Snapshot removal now supersedes this candidate
+and intentionally removes those client-side assertions instead; the two changes
+have different coverage and must not be described as equivalent optimizations.
 
-The acceptance-only Compose command override imports the existing FastAPI app
-and starts Uvicorn with one worker; it does not edit the backend image or its
-default command. The controller experiment likewise imports the image's
-controller and wraps/replaces only the measured transport functions.
+## Next POCs for the current suite
 
-**Limitations:** the prototype recognizes the current main-agent system prompt
-and response ordering. A permanent fixture protocol should express request
-purposes and the observation-ready/release boundary explicitly, rather than
-freeze those prompt conventions. This is not an implementation of the active
-Git observer: it instruments the existing content snapshots. The slice saving
-must not be added to other experiments as a substitute for a combined full
-regression, which was measured separately below.
+Unless noted, profiling budgets below come from the original **88-scenario
+control**, not the installed implementation run, and predate snapshot removal.
+Re-profile the current harness; treat these as investigation budgets, not
+additional measured savings.
 
-### Combined full serial regression — passed
+### Serial execution
 
-| Complete serial `specs` profile | Wall time | Saving versus matched control |
-| --- | ---: | ---: |
-| Faster-lifecycle control | 444.72 s | — |
-| Same + warm forked fixture worker | 361.57 s | 83.15 s (18.7%) |
-| Same + warm worker + batched archives + explicit synchronization/phase-specific replies | **310.12 s** | **134.60 s (30.3%)** |
+| Priority | Candidate | Current evidence and limits |
+| --- | --- | --- |
+| 1 | Phase-specific fake replies and explicit hold/release | Three detection completion steps total **55.140 s** in the original profiling control. Avoid replaying coordination delays into planner requests; replace sleeps only after observing the workspace change-detection before-snapshot. This is distinct from the removed infrastructure snapshots. Not all of this time is removable. |
+| 2 | Warm fixture execution after file-write batching | The fresh batched treatment still made **137 helper calls / 90.158 s**, including real work. Measure incremental value against the snapshot-free harness with installed file-write batching; do not add historical worker savings to batching savings. |
+| 3 | Consolidate preview readiness probes | Controller/workload checks repeatedly create Engine execs/interpreters. Profile bounded in-container waits while preserving actual source, socket/HTTP readiness, deadlines and failures. No current speedup measurement. |
+| 4 | Startup/shutdown and archive transport tuning | Fresh control startup plus teardown was only **31.575 s**. Archive batching had a small historical slice gain. Neither supports a current multi-minute claim. |
 
-This is a directly measured reduction from **7m25s to 5m10s**, not a sum of
-slice savings. All three full runs executed the same freshly discovered
-**91 scenarios / 352 visible steps / 534 reported steps**, and all steps,
-scenario hooks, and global hooks passed. There was no scenario sharding or
-overlapping trial execution. The combined setting also includes the earlier
-explicit immediate no-plan reply; that improvement is not attributed to the
-new hold/release boundary alone.
+Relevant source locations:
 
-The combined run made the same 276 Python fixture calls (46.57 seconds), had
-four backend recreations, and passed both workers' isolation/error probes.
-Its two workers processed 274 and ten requests, each with a fresh child PID;
-eight requests were the probes. All three detection fixtures passed their
-snapshot/edit/release and provider-purpose audits. Controller instrumentation
-recorded 46 operation events, all in batched mode. Maximum driver heartbeat lag
-was 2.99 ms. All six scoped cleanup queries were empty: Compose/preview
-containers, networks, and volumes. The only running container afterward was
-the pre-existing `mailpit` development service.
+- Provider coordination: `acceptance-tests/step-definitions/develop.steps.js:107-143`
+  and `backend/app/api/routes/testing_agent.py:51-58,240-246`. The fake API repeats
+  its final reply and delay. Use explicit planner results where appropriate;
+  retain real plans where startup is under test. "Turn active" does not establish
+  that the before-snapshot finished. Hold/release must be bounded and safe during
+  reset/cancellation; do not batch edits across that observation boundary.
+- Reset controls: `acceptance-tests/features/support/app-lifecycle.js:238`.
+  Client identity snapshots have been removed; reset request/acknowledgement and
+  server-side baseline/ownership verification remain. The earlier profiling
+  control's resets totalled 128.764 seconds, with 51.353 seconds of recorded
+  server phases. Its remaining 77.411 seconds included now-removed client identity
+  overhead plus request overhead; it is not a current budget or measured saving.
+  These spans overlap scenario time.
+- Fixture processes: `acceptance-tests/features/support/app-lifecycle.js:229`.
+  A warm worker needs current isolation, deadline, database-pool, worker-death
+  and reset-generation checks. A fresh fork is not a fresh interpreter.
+- Preview probes/transport: `backend/app/services/preview_controller.py:622-696,928-943,1044-1074,1138-1146,1238-1284`.
+  These are distinct from backend fixture helpers. Keep archive limits,
+  extraction validation and sandboxing; "container running" is not readiness.
 
-`compare.cjs` passed cross-run scenario/visible-step inventory comparisons,
-full-suite counts, fixture-call counts, worker-isolation/child-PID checks,
-three gate audits per relevant run, transport-mode checks, and matched archive
-operation success/call counts and transferred byte counts. It writes
-`acceptance-tests/reports/performance-poc-serial-comparison.json`.
+The current slow scenarios include chat-specific cleanup (**45.537 s**), rejected
+build source (**26.415 s**), bounded startup failure (**25.557 s**) and the two
+relevant-edit detection cases (**24.692 / 24.104 s**), including local hooks.
+Profile them without removing intentional timeout, isolation or failure coverage.
+API-context pooling is not a priority based on its historical sub-second cost.
 
-### Measurement controls and excluded attempts
+**Recommended next serial work:** profile provider coordination against the
+snapshot-free harness and installed file-write batching, using fresh matched
+controls rather than adding prior savings. Old identity-batching preloads no
+longer apply. No current serial result demonstrates a three-minute end-to-end
+gain.
 
-Each serial trial performs fresh `specs` dry-run discovery and compares the
-executed scenario/visible-step inventory against it. Historical timing reports
-do not define the scenario inventory. Wall time includes Node startup,
-extraction, fresh stack startup, all tests and hooks, reports, teardown, and
-child exit; it excludes the preliminary dry run and post-run result checks.
+### If concurrency is acceptable
 
-The first control was excluded: the host slept for 176 and 781 seconds during
-the run, which took 1483.31 seconds and had three timed-out scenarios. The
-experiment did not patch application code in response. Subsequent benchmark
-runs use process-scoped `caffeinate -i -s` and a driver heartbeat that rejects
-runs with more than ten seconds of event-loop lag. Maximum recorded heartbeat
-lag was 4.64 ms for the clean control and 3.62 ms for the full worker trial.
+**Two isolated stacks are the strongest candidate for a three-minute target,
+not a proven current result.** Fresh weights from the current 88-scenario control
+balance into two disjoint **44-scenario** shards with **285.900 / 284.513 s** of
+scenario/local-hook work. Including observed startup, teardown and residual
+command overhead gives an idealized **approximately 326-second** makespan.
+This is pre-batching arithmetic without resource contention, not an executed
+benchmark or an incremental saving against installed batching. Recompute shard
+weights from the installed baseline before the next trial. Docker currently has
+**two CPUs / approximately 5.78 GiB RAM**.
 
-An initial archive-control attempt failed during BeforeAll: Docker did not
-expose the `/tmp`-bound bootstrap as a file, and Python reported that it could
-not find `__main__` in `/poc/controller.py`. It executed zero scenarios and is
-not a performance result. Its evidence is retained under the original
-`archive-control` label. The external overlays were changed to deliver the
-bootstrap through an inline command rather than a host bind mount; a bounded
-standalone import/boot smoke check passed before resuming the matched trials.
+A sharding POC must freshly coordinate extraction, execute every stable
+scenario/step ID exactly once, retain serial scenarios and full resets within
+each shard, isolate projects/ports/databases/volumes/credentials, aggregate status
+and HTML, and handle cancellation/failure/owned teardown for both children.
+**Never run concurrent resets against one shared stack.** The default gate
+remains serial; old shard allocations and speedup percentages are not reusable.
 
-Evidence under `acceptance-tests/reports/` uses the prefix
-`performance-poc-serial-`:
+## Historical experiments
 
-- `lifecycle-control-awake`, `warm-fixtures`, and `combined`: full JSON/HTML
-  reports, `-summary.json`, and `-metrics.json`.
-- `archive-control-inline`, `archive-batched`, `gate-control`, and
-  `gate-explicit-release`: the matched slice reports, summaries, and metrics.
-- `comparison.json` (with the same prefix): verified cross-trial results;
-  controller-instrumented trials also retain raw `-controller.log` diagnostics.
-- `warm-smoke`: passing five-scenario preliminary check.
-- `lifecycle-control` and `archive-control`: rejected attempts, retained rather
-  than substituted for successful measurements.
+All results below predate removal of infrastructure tests. Comparisons are
+within each listed workload, not against the current 88-scenario suite. The
+91-scenario source-only profile contained 352 visible steps / 534 steps including
+local hooks; the 110-scenario effective gate contained 445 / 665 respectively.
+Each accepted configuration was measured once, not as a statistical study.
 
-The local driver is `trial.cjs`; `batch.cjs` awaits each trial before starting
-the next. With the temporary scripts still present, all successful settings can
-be rerun sequentially with the following commands. Rerunning regenerates their
-canonical reports, so preserve existing reports first if needed.
+### Complete workloads
 
-```sh
-poc=/tmp/sdd-acceptance-serial-poc-20261102
-node "$poc/make-overlays.cjs"
-caffeinate -i -s node "$poc/batch.cjs"
-node "$poc/compare.cjs"
-```
+| Date | POC | Workload | Control → treatment | Observed saving |
+| --- | --- | --- | --- | ---: |
+| 2026-11-02 | Two isolated processes | 91 source-only scenarios | 535.01 → 294.03 s | 240.97 s |
+| 2026-11-02 | Two processes + faster lifecycle | Same 91 scenarios | 535.01 → 260.23 s | 274.77 s |
+| 2026-11-02 | Rebalanced shards + faster lifecycle | Same 91 scenarios | 535.01 → 246.01 s | 289.00 s |
+| 2026-11-02 | Warm imports, fresh child per fixture command | 91 scenarios; faster lifecycle in both variants | 444.72 → 361.57 s | 83.15 s |
+| 2026-11-02 | Warm worker + archive batching + explicit provider coordination/replies | Same faster-lifecycle workload | 444.72 → 310.12 s | 134.60 s |
+| 2026-11-03 | Faster health sampling + controller SIGINT | 110 effective scenarios; 23 stack invocations | 1651.70 → 1270.44 s | 381.27 s |
 
-The resumed batch that produced the successful remaining measurements used
-`caffeinate -i -s node "$poc/batch.cjs" archive-control-inline`; it did not
-repeat the already passing clean control or warm-worker full suite. Logs are
-`batch.log` (initial batch) and `batch-resumed.log`. The new Docker wrapper
-chains through the preceding POC's lifecycle wrapper under
-`/tmp/sdd-acceptance-performance-poc-20261102/`, which must also remain present.
-Neither the wrappers nor the temporary scripts are checked in, and `/tmp` is
-not durable. The README documents the experiment, not an installed runner.
-These results concern the source-of-truth **`specs` profile**, not the effective
-profile that includes active unimplemented deltas. There is one accepted run
-per setting, not a statistical or CI reliability study.
+The 110-scenario lifecycle treatment reduced its dedicated group from 839.08 to
+414.98 seconds; the normal group regressed from 812.50 to 855.32 seconds. Its net
+gain therefore does not demonstrate a faster present-day normal suite.
+Rebalancing also changed configuration-transition costs, not just load balance.
+Warm imports and file-write batching attack overlapping overhead, and the combined
+serial result is not the sum of its individual slice measurements.
 
-## Recommended next implementation
+### Smaller probes
 
-For the current **no-concurrency** goal:
+| POC | Scope | Control → treatment | Interpretation |
+| --- | --- | --- | --- |
+| Immediate no-plan reply after delayed turn replies | Three detection scenarios | 89.11 → 69.58 s | Avoids an unrelated repeated delay; retains the turn's edit window. |
+| Observation-ready hold/release | Same three scenarios, immediate planner replies in both | 46.09 → 16.14 s | Explicit synchronization rather than guessing shorter sleeps. |
+| Bounded dependency-archive transfer batching | Two preview scenarios | 42.18 → 40.53 s | Direct transfer reduction was only 0.43 s; not a major full-suite result. |
+| Faster health checks + controller SIGINT | One fresh stack cycle | 30.25 → 8.08 s | Single-cycle probe, not today's complete-gate saving. |
 
-1. Specify warm fixture execution with a fresh child per command, explicit
-   isolation semantics, bounded protocol/requests, worker failure recovery,
-   backend-ID lifecycle checks, and teardown on failure/cancellation. This has
-   the strongest new isolated full-suite measurement.
-2. Make phase-specific fake replies and observation-ready/explicit-release
-   synchronization first-class acceptance fixtures. Keep the actual snapshot,
-   event, isolation, and bounded-startup assertions; do not merely lower their
-   timeouts or shorten an uncoordinated sleep.
-3. Incorporate acceptance-only health-check cadence and prompt controller
-   shutdown, preserving real readiness checks and project ownership. Consider
-   proper SIGTERM handling/init as an alternative to the POC's SIGINT override.
-4. Treat bounded archive batching as a smaller follow-up, retaining extraction
-   and sandbox checks. Do not equate transport batching with a dependency cache
-   or extrapolate its small slice difference into a major full-suite gain.
-5. Repeat matched trials on CI before claiming stable medians or reliability.
-   Always discover the current complete workload rather than using a historical
-   timing report as the scenario inventory. API-context pooling is not a
-   priority on the measured 0.43-second total creation cost.
+Other early probes included small isolated/shared-stack concurrency slices,
+shortened fake responses, direct container lookup and API-context creation.
+They do not establish current full-suite gains. Shared-stack concurrency is
+incompatible with concurrent scenario resets; shorter sleeps do not establish
+reliable observation boundaries. An old Cucumber-worker naming collision used
+PID-only project names, not today's PID-plus-random naming.
 
-If concurrency is wanted later, the earlier process-isolated runner experiment
-is separate work: coordinated extraction, complete/disjoint discovery, fresh
-per-shard stacks, bounded worker count, aggregate status/reporting, and failure
-cleanup are still required. None of the new serial gains requires that runner.
+Historical evidence is under `acceptance-tests/reports/` with prefixes
+`performance-poc-`, `performance-poc-serial-` and `serial-poc-20261103-`.
+Comparison/summary files retain inventory, timing and cleanup checks. Temporary
+sources were under `/tmp/sdd-acceptance-performance-poc-20261102/`,
+`/tmp/sdd-acceptance-serial-poc-20261102/` and `/tmp/sdd-serial-full-poc-20261103/`;
+they are not durable or installed runner dependencies.
 
-Permanent runner/lifecycle changes need a driving spec delta and the project's
-separate spec/code tasks and commits. This POC leaves that implementation for
-a subsequent task: only this README changed in the repository, all final
-executable trials passed, and no acceptance stack is kept warm between runs.
+## Rules for the next measurement
+
+1. Use the freshly discovered **current complete inventory**, matching stable
+   scenario IDs and step text, not counts alone or historical report selections.
+2. Run variants sequentially on the same clean revision with fresh owned stacks,
+   consistent host conditions, sleep prevention and heartbeat-gap validation.
+3. Include startup, tests/hooks, reports, teardown and child exit in the same
+   command clock. Report overlapping component timings separately; do not sum
+   them into an end-to-end claim.
+4. Preserve cancelled/failed attempts, but exclude them from passing performance
+   samples. Earlier rejected trials included host sleep, invalid overrides,
+   bootstrap failures and incorrect audit assumptions; they are not speedups.
+5. Require green results with no missing/pending/undefined coverage, exact-owned
+   cleanup, and repeated matched runs before claiming stable medians or CI gains.
+
+Python fixture batching is installed; client stack snapshots have been removed.
+Docker identity batching is historical evidence superseded by snapshot removal;
+other optimizations remain exploratory. Future application changes still require
+a driving spec delta and separate spec/code tasks and commits.

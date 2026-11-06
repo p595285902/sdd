@@ -11,8 +11,8 @@ const composeFiles = [path.join(repoRoot, 'compose.yml'), path.join(repoRoot, 'a
 const demoRepository = 'https://example.com/acceptance/demo-repository.git';
 const demoToken = 'acceptance-token';
 const state = {
-  baseUrl: undefined, projectName: undefined, backendId: undefined,
-  demoRepositoryAvailable: undefined, backendRecreations: 0,
+  baseUrl: undefined, projectName: undefined,
+  demoRepositoryAvailable: undefined,
   generation: 0, fatal: undefined, events: [], stopped: true,
 };
 
@@ -115,59 +115,6 @@ async function controlState() {
   return result.body;
 }
 
-async function containerInfo(service) {
-  const id = (await dockerOutput(composeArgs(state.projectName, 'ps', '-q', service))).trim();
-  if (!id) throw new Error(`Owned acceptance ${service} container is absent`);
-  const container = JSON.parse(await dockerOutput(['inspect', '--format', '{{json .}}', id]));
-  if (container.Config.Labels?.['com.docker.compose.project'] !== state.projectName ||
-      container.Config.Labels?.['com.docker.compose.service'] !== service) {
-    throw new Error(`Acceptance ${service} ownership is invalid`);
-  }
-  return { id: container.Id, healthy: Boolean(container.State.Running) &&
-      (!container.State.Health || container.State.Health.Status === 'healthy'),
-    startedAt: container.State.StartedAt, restartCount: container.RestartCount,
-    mounts: container.Mounts.filter(mount => mount.Type === 'volume').map(mount => ({ name: mount.Name, destination: mount.Destination })).sort((a, b) => a.destination.localeCompare(b.destination)),
-    environment: Object.fromEntries(container.Config.Env.map(entry => {
-      const separator = entry.indexOf('=');
-      return [entry.slice(0, separator), entry.slice(separator + 1)];
-    })) };
-}
-
-async function stackSnapshot() {
-  const services = {};
-  for (const service of ['backend', 'db', 'preview-controller']) {
-    const info = await containerInfo(service);
-    if (!info.healthy) throw new Error(`Acceptance ${service} is not healthy`);
-    const { environment, ...identity } = info;
-    services[service] = identity;
-  }
-  const health = await fetch(`${state.baseUrl}/api/v1/utils/health-check/`, { signal: AbortSignal.timeout(5_000) });
-  if (!health.ok) throw new Error('Owned acceptance backend health probe failed');
-  let boot;
-  if (state.resetEnabled) {
-    const status = await controlState();
-    boot = status.boot_id;
-    if (!boot) throw new Error('Acceptance backend did not report its process boot identity');
-  }
-  return { services, boot };
-}
-
-async function verifyStack() {
-  const current = await stackSnapshot();
-  if (state.initialSnapshot && JSON.stringify(current) !== JSON.stringify(state.initialSnapshot)) {
-    throw new Error('Acceptance stack service, process, restart counter, or mounted-volume identity changed');
-  }
-  return current;
-}
-
-async function backendInfo() {
-  const container = await containerInfo('backend');
-  let available = Boolean(container.environment.DEMO_GITHUB_REPO);
-  if (state.resetEnabled) available = (await controlState()).configuration === 'available';
-  return { id: container.id, healthy: container.healthy,
-    repo: available ? demoRepository : '', startedAt: container.startedAt, restartCount: container.restartCount };
-}
-
 async function startApplication(options = {}) {
   if (!state.stopped) throw new Error('An acceptance invocation cannot start a second stack');
   const port = await reservePort();
@@ -186,19 +133,17 @@ async function startApplication(options = {}) {
     DEVELOP_ACCEPTANCE_RESET_ENABLED: String(state.resetEnabled), ACCEPTANCE_RUN_ID: project,
     ACCEPTANCE_RESET_TOKEN: state.resetToken, ACCEPTANCE_RESET_TIMEOUT_SECONDS: String(state.resetTimeoutSeconds),
     ACCEPTANCE_AGENT_ROOT: '/acceptance-agent-state' };
-  Object.assign(state, { projectName: project, baseUrl: `http://127.0.0.1:${port}`, backendId: undefined,
-    demoRepositoryAvailable: undefined, backendRecreations: 0, generation: 0, fatal: undefined,
-    events: [], initialSnapshot: undefined, stopped: false });
+  Object.assign(state, { projectName: project, baseUrl: `http://127.0.0.1:${port}`,
+    demoRepositoryAvailable: undefined, generation: 0, fatal: undefined,
+    events: [], stopped: false });
   record('stack-start');
   try {
     await run('docker', composeArgs(project, 'up', '--build', '--detach', 'db'));
     await run('docker', composeArgs(project, 'run', '--build', '--rm', 'backend', 'bash', 'scripts/prestart.sh'));
     await run('docker', composeArgs(project, 'up', '--build', '--detach', '--wait', 'backend'));
     await waitForApplication(state.baseUrl);
-    state.initialSnapshot = await stackSnapshot();
-    state.backendId = state.initialSnapshot.services.backend.id;
     state.demoRepositoryAvailable = true;
-    record('stack-ready', { identity: state.initialSnapshot });
+    record('stack-ready');
   } catch (error) {
     try { await stopApplication(); } catch (cleanupError) { error.cause = cleanupError; }
     throw error;
@@ -265,7 +210,6 @@ async function stopApplication() {
     try {
       await assertOwnedResourcesRemoved();
       state.stopped = true;
-      state.backendId = undefined;
       state.demoRepositoryAvailable = undefined;
       record('stack-stopped', { milliseconds: Date.now() - start, ownedResourcesEmpty: true });
     } catch (error) { errors.push(error); }
@@ -292,10 +236,9 @@ async function runBackendPython(code, ...args) {
 }
 
 async function resetScenarioState() {
-  if (state.fatal) throw new Error('Acceptance invocation has already failed its reset/identity boundary');
+  if (state.fatal) throw new Error('Acceptance invocation has already failed its reset/control boundary');
   const start = Date.now();
   try {
-    await verifyStack();
     const previous = await controlState();
     const resetId = randomUUID();
     const result = await controlRequest('reset', { method: 'POST', data: {
@@ -311,12 +254,11 @@ async function resetScenarioState() {
     }
     state.generation = result.body.generation;
     state.demoRepositoryAvailable = true;
-    await verifyStack();
     record('reset-ready', { generation: state.generation, milliseconds: Date.now() - start, phases: result.body.phases });
     return result.body;
   } catch (error) {
     state.fatal = error;
-    record('reset-failed', { phase: error.phase || 'identity-or-control', milliseconds: Date.now() - start });
+    record('reset-failed', { phase: error.phase || 'control', milliseconds: Date.now() - start });
     throw error;
   }
 }
@@ -325,7 +267,6 @@ async function configureDemoRepository(available) {
   const start = Date.now();
   if (state.fatal) throw new Error('Acceptance invocation is closed after a boundary failure');
   try {
-    await verifyStack();
     const current = await controlState();
     const mode = available ? 'available' : 'unavailable';
     if (current.configuration !== mode) {
@@ -337,7 +278,6 @@ async function configureDemoRepository(available) {
       if (verified.configuration !== mode) throw new Error('Acceptance effective configuration was not applied');
       record('configuration', { mode, generation: verified.generation, milliseconds: Date.now() - start });
     }
-    await verifyStack();
     state.demoRepositoryAvailable = available;
   } catch (error) {
     state.fatal = error;
@@ -346,7 +286,7 @@ async function configureDemoRepository(available) {
   }
 }
 
-module.exports = { backendInfo, backendPythonOutput, configureDemoRepository, controlHeaders, controlRequest,
+module.exports = { backendPythonOutput, configureDemoRepository, controlHeaders, controlRequest,
   controlState, dockerOutput, composeArgs, ownedResources, assertOwnedResourcesRemoved, record,
-  resetScenarioState, runBackendPython, showApplicationLogs, stackSnapshot, startApplication, state,
-  stopApplication, verifyStack, redact };
+  resetScenarioState, runBackendPython, showApplicationLogs, startApplication, state,
+  stopApplication, redact };

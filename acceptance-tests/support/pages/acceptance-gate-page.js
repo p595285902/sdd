@@ -13,7 +13,7 @@ const acceptanceRoot = path.resolve(__dirname, '../..');
 const normal = `#### Scenario: Fixture normal configuration\n\n\`\`\`gherkin
 Given an acceptance run has a backend with the demo repository configured
 When successive scenarios request that same repository configuration
-Then the backend is not recreated between those requests
+Then the backend retains the requested demo repository configuration
 And each scenario retains its fresh browser context and independent test state
 \`\`\`\n`;
 const lifecycle = `### Requirement: Fresh-run lifecycle remains unchanged
@@ -118,7 +118,7 @@ class AcceptanceGatePage {
     assert.ok(starts.every(event => event.at >= stopped[0].at), 'Dedicated lifecycle started before normal final teardown');
   }
   async expectFailurePropagation() {
-    this.write('changes/fixture-change/specs/acceptance-stack-reuse/spec.md', this.delta.replace('Then the backend is not recreated between those requests', 'Then that scenario uses a backend with the demo repository unconfigured'));
+    this.write('changes/fixture-change/specs/acceptance-stack-reuse/spec.md', this.delta.replace('Then the backend retains the requested demo repository configuration', 'Then that scenario uses a backend with the demo repository unconfigured'));
     const normalFailed = await this.execute();
     assert.notEqual(normalFailed.code, 0);
     assert.equal(normalFailed.summary.status, 'failed');

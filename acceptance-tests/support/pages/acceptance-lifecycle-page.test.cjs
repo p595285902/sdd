@@ -27,9 +27,6 @@ function fakeForkFactory(options = {}) {
     child.connected = true;
     const secret = `private-run-credential-${number}`;
     const project = `sdd-acceptance-test-${number}`;
-    const initial = { boot: `boot-${number}`, services: Object.fromEntries(['backend', 'db', 'preview-controller']
-      .map(service => [service, { id: `${service}-${number}`, startedAt: `started-${number}`, restartCount: 0,
-        mounts: [{ name: `owned-volume-${number}`, destination: '/fixture' }] }])) };
     let kind;
     let closed = false;
     function close(outcome, code) {
@@ -39,7 +36,7 @@ function fakeForkFactory(options = {}) {
         { type: 'stack-stopped', project, at: number * 100 + 2, ownedResourcesEmpty: true }];
       if (outcome === 'cancelled') events.push({ type: 'invocation-cancelled', signal: 'SIGTERM' });
       if (options.publicLeak) events.push({ type: 'accidental-secret', value: secret });
-      child.emit('message', { type: 'result', result: { outcome, kind, project, initial, diagnostics: {},
+      child.emit('message', { type: 'result', result: { outcome, kind, project, diagnostics: {},
         events, cleanupVerified: true } });
       child.connected = false;
       child.stdout.end();
@@ -55,7 +52,7 @@ function fakeForkFactory(options = {}) {
           child.emit('message', { type: 'private-credential', credential: secret });
           child.stdout.write(options.stdoutLeak ? secret.slice(0, 7) : 'safe redacted lifecycle log\n');
           if (options.stdoutLeak) child.stdout.write(secret.slice(7));
-          child.emit('message', { type: 'ready', ready: { project, kind, identity: initial } });
+          child.emit('message', { type: 'ready', ready: { project, kind } });
         } else if (message.command === 'execute') close(kind === 'failure' ? 'failed' : 'completed', kind === 'failure' ? 1 : 0);
         else if (message.command === 'stop') close('aborted', 1);
       });
@@ -174,7 +171,7 @@ test('two fresh invocations audit teardown before reuse and remove only fixture-
   const page = new AcceptanceLifecyclePage({}, { forkProcess: fixture.forkProcess, dockerOutput: docker.dockerOutput });
   await page.twoSerialInvocations();
   page.distinctProjects();
-  page.noReplacement();
+  page.singleStartup();
   assert.equal(page.results.length, 2);
   assert.equal(fixture.maxActive(), 1);
   assert.equal(page.report().parentOwnsStack, false);
@@ -199,7 +196,7 @@ test('source-only legacy lifecycle owns no parent stack and runs two real-child 
   await page.dispose();
 });
 
-test('supported cancellation reports the signal and audits owned final cleanup without replacement', async () => {
+test('supported cancellation reports the signal and audits owned final cleanup with a single startup', async () => {
   const fixture = fakeForkFactory();
   const docker = fakeDocker();
   const page = new AcceptanceLifecyclePage({ scenarioName: 'Controlled cancellation removes the owned stack' },
@@ -207,7 +204,7 @@ test('supported cancellation reports the signal and audits owned final cleanup w
   await page.startExecutionInvocation();
   await page.cancelInvocation();
   await page.cancelledCleanup();
-  page.noReplacement();
+  page.singleStartup();
   await page.unrelatedUnchanged();
   await page.dispose();
 });
@@ -262,7 +259,7 @@ test('cleanup variants complete and audit serially before the next owned invocat
   page.startIsolated = async kind => { order.push(`start:${kind}`); page.current = invocation(kind); };
   page.collect = async result => { page.results.push(result); return result; };
   page.failedBoundary = () => { order.push(`closed:${page.results.at(-1).kind}`); };
-  page.noReplacement = () => {};
+  page.singleStartup = () => {};
   page.assertResultCleanup = async result => { order.push(`removed:${result.kind}`); };
   page.unrelatedUnchanged = async () => { order.push('sentinel'); };
   await page.requestTerminalReset();

@@ -22,7 +22,6 @@ class AcceptanceResetPage {
     assert.equal(this.world.page.context(), this.world.context);
     assert.ok(this.previousContext.pages().length === 0);
     for (const api of this.previousRequests) await assert.rejects(api.get('/api/v1/utils/health-check/'));
-    await lifecycle.verifyStack();
   }
   async armNextBoundaryFailure() {
     const manifest = JSON.parse(fs.readFileSync(process.env.ACCEPTANCE_MANIFEST_PATH, 'utf8'));
@@ -36,9 +35,6 @@ class AcceptanceResetPage {
   }
   async configuredRepository() {
     await lifecycle.configureDemoRepository(true);
-    this.identity = await lifecycle.verifyStack();
-    this.initialBackend = await lifecycle.backendInfo();
-    assert.equal(this.initialBackend.healthy, true);
   }
   async sameRepositoryRequests() {
     await lifecycle.configureDemoRepository(true);
@@ -46,7 +42,9 @@ class AcceptanceResetPage {
     await this.reset();
     await lifecycle.configureDemoRepository(true);
   }
-  async expectNoRecreation() { await this.expectSameStack(); assert.equal(lifecycle.state.backendRecreations, 0); }
+  async expectConfiguredRepository() {
+    assert.equal((await lifecycle.controlState()).configuration, 'available');
+  }
   async expectIndependentState() {
     await this.expectFreshContexts();
     assert.deepEqual(await this.api.fakeLlmRequests(), []);
@@ -54,12 +52,7 @@ class AcceptanceResetPage {
     assert.equal((await api.post('/api/v1/testing/llm/v1/responses', { data: { input: [] } })).status(), 500);
   }
   async expectUnavailableRepository() {
-    const info = await lifecycle.backendInfo();
-    assert.equal(info.repo, '');
-    assert.equal(info.healthy, true);
-    assert.equal(info.id, this.initialBackend.id);
-    await lifecycle.verifyStack();
+    assert.equal((await lifecycle.controlState()).configuration, 'unavailable');
   }
-  async expectSameStack() { assert.deepEqual(await lifecycle.verifyStack(), this.identity); }
 }
 module.exports = { AcceptanceResetPage };
