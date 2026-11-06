@@ -73,13 +73,15 @@ async function prepareReadyDevelopmentChat(world, titlePrefix) {
 }
 
 async function startDelayedTurn(world, chat = world.developmentChat, delaySeconds = 10) {
-  await world.apiClient.configureFakeLlm([
-    { kind: 'delay', delay_seconds: delaySeconds, text: 'Delayed completion' },
-  ]);
+  const message = `Lifecycle turn ${Date.now()}`;
+  await world.apiClient.configureFakeLlm({
+    prompt: `/openspec explore ${message}`,
+    replies: [{ kind: 'delay', delay_seconds: delaySeconds, text: 'Delayed completion' }],
+  });
   world.turnPromise = world.apiClient.exploreDevelopmentChat(
     world.userToken,
     chat.id,
-    `Lifecycle turn ${Date.now()}`,
+    message,
   );
   await world.apiClient.waitForAgentTurn(world.userToken, chat.id);
 }
@@ -92,9 +94,7 @@ async function expectNoActiveTurn(world, chat = world.developmentChat) {
 async function prepareUndecidedProposal(world, titlePrefix) {
   await prepareReadyDevelopmentChat(world, titlePrefix);
   world.proposalText = `Implementation proposal ${Date.now()}`;
-  await world.apiClient.configureFakeLlm([
-    { kind: 'text', text: world.proposalText },
-  ]);
+  await world.apiClient.configureFakeProposal(world.userToken, world.developmentChat.id, world.proposalText);
   world.proposal = await world.apiClient.proposeDevelopmentChat(
     world.userToken,
     world.developmentChat.id,
@@ -105,9 +105,10 @@ async function prepareUndecidedProposal(world, titlePrefix) {
 }
 
 async function startPreviewDetectionTurn(world) {
-  await world.apiClient.configureFakeLlm([
-    { kind: 'delay', delay_seconds: 10, text: 'Turn finished' },
-  ]);
+  await world.apiClient.configureFakeLlm({
+    prompt: '/openspec explore Edit the checkout',
+    replies: [{ kind: 'delay', delay_seconds: 10, text: 'Turn finished' }],
+  });
   world.previewTurn = world.apiClient.request(
     world.userToken, 'post',
     `/api/v1/develop/chats/${world.developmentChat.id}/messages/explore/stream`,
@@ -158,9 +159,10 @@ Given(
   async function () {
     await prepareReadyDevelopmentChat(this, 'Proposal request');
     this.explorationMessage = `Canonical exploration ${Date.now()}`;
-    await this.apiClient.configureFakeLlm([
-      { kind: 'text', text: 'Canonical findings' },
-    ]);
+    await this.apiClient.configureFakeLlm({
+      prompt: `/openspec explore ${this.explorationMessage}`,
+      replies: [{ kind: 'text', text: 'Canonical findings' }],
+    });
     const explored = await this.apiClient.exploreDevelopmentChat(
       this.userToken,
       this.developmentChat.id,
@@ -168,9 +170,7 @@ Given(
     );
     assert.equal(explored.status(), 200, await explored.text());
     this.proposalText = `Implementation proposal ${Date.now()}`;
-    await this.apiClient.configureFakeLlm([
-      { kind: 'text', text: this.proposalText },
-    ]);
+    await this.apiClient.configureFakeProposal(this.userToken, this.developmentChat.id, this.proposalText);
     await this.developPage.open(this.userToken);
     await this.developPage.selectChat(this.developmentChat.title);
   },
@@ -182,7 +182,9 @@ When('the user selects Make it happen', async function () {
 
 Then('the stored conversation is supplied to the agent proposal workflow', async function () {
   const requests = await this.apiClient.fakeLlmRequests();
-  assert.match(JSON.stringify(requests.at(-1).body), new RegExp(this.explorationMessage));
+  const request = requests.findLast(({ selection }) => selection?.phase === 'agent');
+  assert.ok(request, 'A proposal agent request must reach the configured provider');
+  assert.match(JSON.stringify(request.body), new RegExp(this.explorationMessage));
 });
 
 Then('the resulting undecided proposal is stored in the Development Chat', async function () {
@@ -206,17 +208,20 @@ Given('a Development Chat contains an undecided proposal', async function () {
 
 When('its owner approves the proposal', async function () {
   this.applyResponse = `Applied proposal ${Date.now()}`;
-  await this.apiClient.configureFakeLlm([
-    {
-      kind: 'tool',
-      tool_name: 'bash',
-      tool_arguments: {
-        command: "printf 'applied' > proposal-apply-marker.txt",
-        description: 'Record proposal application',
+  await this.apiClient.configureFakeLlm({
+    prompt: '/openspec apply',
+    replies: [
+      {
+        kind: 'tool',
+        tool_name: 'bash',
+        tool_arguments: {
+          command: "printf 'applied' > proposal-apply-marker.txt",
+          description: 'Record proposal application',
+        },
       },
-    },
-    { kind: 'text', text: this.applyResponse },
-  ]);
+      { kind: 'text', text: this.applyResponse },
+    ],
+  });
   await this.developPage.approveProposal();
 });
 
@@ -270,12 +275,13 @@ Given(
   async function () {
     await prepareReadyDevelopmentChat(this, 'Streamed interface');
     this.streamedResponse = 'Repository summary';
-    await this.apiClient.configureFakeLlm([
-      {
+    await this.apiClient.configureFakeLlm({
+      prompt: '/openspec explore Summarize the repository',
+      replies: [{
         kind: 'text',
         text: `**${this.streamedResponse}** <img src=x onerror=alert(1)>`,
-      },
-    ]);
+      }],
+    });
     await this.developPage.startStreamedExploration('Summarize the repository');
   },
 );
@@ -609,9 +615,10 @@ Then('the Context panel displays No additional context', async function () {
 Given('an authenticated user has a running Agent Turn', async function () {
   await prepareReadyDevelopmentChat(this, 'Timed activity');
   this.timedResponse = 'Delayed completion';
-  await this.apiClient.configureFakeLlm([
-    { kind: 'delay', delay_seconds: 4, text: this.timedResponse },
-  ]);
+  await this.apiClient.configureFakeLlm({
+    prompt: '/openspec explore Time this turn',
+    replies: [{ kind: 'delay', delay_seconds: 4, text: this.timedResponse }],
+  });
   await this.developPage.startStreamedExploration('Time this turn');
 });
 
@@ -848,9 +855,10 @@ Then('its isolated Development Workspace is deleted', async function () {
 When('the user submits an exploration message', async function () {
   this.explorationMessage = 'Inspect the repository structure';
   this.agentResponse = 'Repository explored by the fake provider.';
-  await this.apiClient.configureFakeLlm([
-    { kind: 'text', text: this.agentResponse },
-  ]);
+  await this.apiClient.configureFakeLlm({
+    prompt: `/openspec explore ${this.explorationMessage}`,
+    replies: [{ kind: 'text', text: this.agentResponse }],
+  });
   this.response = await this.apiClient.exploreDevelopmentChat(
     this.userToken,
     this.developmentChat.id,
@@ -885,18 +893,21 @@ Then('the completed assistant response is stored with the validated agent sessio
 
 Given('OpenCode is connected to an OpenAI-compatible LLM', async function () {
   this.agentResponse = 'README updated.';
-  await this.apiClient.configureFakeLlm([
-    { kind: 'text', text: 'Update README' },
-    {
-      kind: 'tool',
-      tool_name: 'bash',
-      tool_arguments: {
-        command: "printf '\\ntest\\n' >> README.md",
-        description: 'Append test to README',
+  await this.apiClient.configureFakeLlm({
+    prompt: '/openspec explore update the readme file to append `test`',
+    title: 'Update README',
+    replies: [
+      {
+        kind: 'tool',
+        tool_name: 'bash',
+        tool_arguments: {
+          command: "printf '\\ntest\\n' >> README.md",
+          description: 'Append test to README',
+        },
       },
-    },
-    { kind: 'text', text: this.agentResponse },
-  ]);
+      { kind: 'text', text: this.agentResponse },
+    ],
+  });
 });
 
 When('the user types "update the readme file to append `test`" in the chatbox', async function () {
@@ -908,8 +919,9 @@ When('the user types "update the readme file to append `test`" in the chatbox', 
 
 Then('OpenCode sends the prompt to the configured LLM', async function () {
   const requests = await this.apiClient.fakeLlmRequests();
-  assert.ok(requests.length > 0);
-  assert.match(JSON.stringify(requests[0].body), /update the readme file/);
+  const request = requests.find(({ selection }) => selection?.phase === 'agent');
+  assert.ok(request, 'OpenCode must send an agent request, not just generate a title');
+  assert.match(JSON.stringify(request.body), /update the readme file/);
 });
 
 Then('OpenCode appends "test" to the README file', async function () {
@@ -945,9 +957,10 @@ Then("the chatbox displays OpenCode's response", async function () {
 Given('the OPENAI_API_KEY environment variable is configured', async function () {
   await prepareReadyDevelopmentChat(this, 'Provider credential');
   this.agentResponse = 'Credential received.';
-  await this.apiClient.configureFakeLlm([
-    { kind: 'text', text: this.agentResponse },
-  ]);
+  await this.apiClient.configureFakeLlm({
+    prompt: '/openspec explore Check provider configuration',
+    replies: [{ kind: 'text', text: this.agentResponse }],
+  });
 });
 
 When('an OpenCode exploration starts', async function () {
@@ -961,8 +974,10 @@ When('an OpenCode exploration starts', async function () {
 
 Then('OpenCode connects to the OpenAI provider using OPENAI_API_KEY', async function () {
   const requests = await this.apiClient.fakeLlmRequests();
+  const request = requests.find(({ selection }) => selection?.phase === 'agent');
+  assert.ok(request, 'OpenCode must authenticate its agent request');
   assert.equal(
-    requests[0].authorization,
+    request.authorization,
     `Bearer ${this.applicationState.env.OPENAI_API_KEY ?? 'acceptance-provider-key'}`,
   );
 });
@@ -971,12 +986,13 @@ Given('agent output contains the configured OPENAI_API_KEY or repository secret'
   await prepareReadyDevelopmentChat(this, 'Secret redaction');
   this.providerSecret = this.applicationState.env.OPENAI_API_KEY ?? 'acceptance-provider-key';
   this.repositorySecret = this.applicationState.env.DEMO_GITHUB_TOKEN ?? 'acceptance-token';
-  await this.apiClient.configureFakeLlm([
-    {
+  await this.apiClient.configureFakeLlm({
+    prompt: '/openspec explore Return configured values',
+    replies: [{
       kind: 'text',
       text: `provider=${this.providerSecret} repository=${this.repositorySecret}`,
-    },
-  ]);
+    }],
+  });
 });
 
 When('the output is logged, stored, or returned', async function () {
@@ -1212,9 +1228,10 @@ Given('a user has two active Agent Turns across different Development Chats', as
     const setup = await this.apiClient.setupDevelopmentWorkspace(this.userToken, chat.id);
     assert.equal(setup.status(), 200);
   }
-  await this.apiClient.configureFakeLlm([
-    { kind: 'delay', delay_seconds: 10, text: 'Delayed completion' },
-  ]);
+  await this.apiClient.configureFakeLlm({
+    prompt: ['/openspec explore Capacity turn 0', '/openspec explore Capacity turn 1'],
+    replies: [{ kind: 'delay', delay_seconds: 10, text: 'Delayed completion' }],
+  });
   this.turnPromises = this.developmentChats.slice(0, 2).map((chat, index) =>
     this.apiClient.exploreDevelopmentChat(
       this.userToken,

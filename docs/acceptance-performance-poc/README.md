@@ -1,13 +1,20 @@
 # Acceptance test performance POCs
 
-Last reviewed: **2026-11-06**. Python fixture batching is **implemented** in
-`3ca7070` (`perf(acceptance): batch workspace fixture file writes`). Client stack
-snapshots and their identity-comparison code have now been **removed** from the
-acceptance harness at the user's request; the complete unchanged retry passed
-**88/88 scenarios / 338 visible steps in 430.393 seconds (7m 10s)**.
-The earlier Docker identity-batching POC is historical evidence, not a remaining
-promotion candidate. Other ideas remain exploratory; these measurements are not
-CI performance guarantees.
+Last reviewed: **2026-11-06**.
+
+## Current status
+
+- **Implemented:** [workspace fixture batching](#python-fixture-batching-measured-and-implemented)
+  (`3ca7070`) and [prompt-matched fake responses](#prompt-matched-fake-responses).
+- **Removed:** [client stack snapshots and identity comparisons](#client-stack-snapshot-removal)
+  (`74f9264`). The Docker identity-batching POC is superseded, not a promotion candidate.
+- **Exploratory:** [observation-ready hold/release, warm fixtures, readiness probes
+  and isolated-stack concurrency](#next-pocs-for-the-current-suite).
+
+The latest complete gate passed **88/88 scenarios / 338 visible Gherkin steps**
+in **423.150 seconds** (wrapper clock). See the prompt-matching verification below
+for reports and measurement limits. Historical results are retained for context,
+not additive savings or CI performance guarantees.
 
 ## Current workload
 
@@ -192,6 +199,96 @@ Full logs are under `/private/tmp/sdd-snapshot-removal-retry.5DH5UO/` and
 `/private/tmp/sdd-snapshot-removal-validation.BGvT8B/`; these temporary paths are
 not durable dependencies.
 
+## Prompt-matched fake responses
+
+**Implemented and verified on 2026-11-06.** Full-suite fixtures now select replies
+by request phase and exact latest-user input, rather than a global reply queue
+whose final response and delay could leak into unrelated requests. This uses the
+user's test-infrastructure no-spec exception; production workflows, OpenCode
+command construction, workspace observation boundaries and OpenSpec are unchanged.
+
+### Installed behavior
+
+- The acceptance-only provider selects title/planner phases from control prompts
+  before matching the **exact latest user text**. Unknown commands fail closed;
+  legacy queue mode remains available for isolated fixtures, not full-suite use.
+- Fixtures configure separate immediate title/planner replies and explicit agent
+  commands. Match keys preserve OpenCode 1.18.23's literal surrounding quotes and
+  newlines. Proposal keys use the complete, bounded stored conversation; the
+  backend does not strip quotes or search arbitrary history.
+- Tool replies advance from tool outputs **after the latest user message**, not
+  mutable counters. Auxiliary calls, retries and prior turns cannot consume them.
+- Preview startup fixtures retain their documented website/API plans and real
+  planner execution, validation and workload startup. Other fixtures use JSON
+  `null` for no documented plan.
+- Streaming success emits `response.created` and `response.in_progress` before
+  delaying content. Waits remain bounded to **30 seconds**, observe disconnect/reset
+  cancellation, and drain through the existing completion barrier. Reset clears
+  rules and request records.
+
+Existing **3- and 10-second edit windows remain unchanged**. A running turn or
+provider preamble does not prove the application's workspace before-snapshot is
+ready. Observation-ready hold/release remains separate exploratory work.
+
+See the [acceptance README](../../acceptance-tests/README.md#prompt-matched-fake-provider)
+for fixture configuration, source locations and focused test commands.
+
+### Full-suite verification
+
+The complete effective-spec gate passed **88/88 scenarios / 338 visible Gherkin
+steps**, with identical stable scenario IDs and spec fingerprint to a fresh
+control. Each run completed 88 sequential verified resets on one owned stack.
+Exact project-label checks found no remaining owned containers, networks or
+volumes, including preview resources.
+
+Focused validation passed **83 JavaScript harness tests, 36 provider tests and
+98 related backend service tests**, plus changed-file Ruff, provider type checks
+and whitespace checks. Regressions cover phase precedence, native multiline
+commands, the `has_more` pagination contract, tool followups, planner preservation,
+bounded delays, disconnects and reset/drain.
+
+Observed wrapper times were **432.372 seconds for the control** and **423.150
+seconds for the implementation**. This single, non-randomized comparison had
+unmatched host load: other checks and an exploratory scan overlapped portions
+of validation. It is **not an attributable speedup estimate or CI guarantee**.
+Failed attempts and the partial proposal diagnostic are excluded from timings.
+
+Evidence is gitignored under `acceptance-tests/reports/`:
+
+| Report prefix/file | Meaning |
+| --- | --- |
+| `prompt-matching-2qMYKs-control-*` | Passing fresh control. |
+| `prompt-matching-2qMYKs-matched-wire-*` | Passing complete implementation gate, including HTML. |
+| `prompt-matching-2qMYKs-audit.json` | Inventory, fingerprint, reset and owned-cleanup comparison. |
+| `prompt-matching-2qMYKs-{matched,matched-retry,matched-final}-*` | Earlier failed attempts exposing native quoting, pagination and multiline mismatches. |
+| `prompt-matching-2qMYKs-proposal-diagnostic-*` | Partial failing diagnostic capturing real proposal input. |
+| `prompt-matching-2qMYKs-excluded-audit.json` | Cleanup verification for excluded attempts. |
+
+Full logs and diagnostic sources are under
+`/private/tmp/sdd-prompt-matching.2qMYKs/`; these are temporary evidence, not runtime
+dependencies. No assertion, scenario or timeout was weakened to obtain the pass.
+
+### Historical standalone POC
+
+The preceding loopback-only experiment used fake credentials, isolated HOME/XDG/TMP
+state and real OpenCode 1.18.23. It returned the mapped response for `do balablala`,
+waited **10.002 seconds** for `do balalala, wait for 10 secs`, matched the latest
+command in a continued session, and kept title generation immediate. Commands
+were fixture data, not shell instructions; unknown `POC_CASE` markers rejected.
+The optional prompt-controlled delay was capped at **10 seconds** in that POC;
+the installed fixtures instead declare bounded delays explicitly.
+
+That experiment established functional selection, not full-suite speedup,
+application planner integration or cancellation correctness. Its SIGTERM probe
+did not promptly abort the wait. The full-suite and reset evidence above comes
+from the installed implementation, not this external experiment. Early streaming
+allowed an OpenCode `step_start`, but did not establish an application observation
+boundary or deterministic hold/release.
+
+Temporary sources/results remain under
+`/private/tmp/sdd-opencode-checkpoints-poc.WW89VN/`: `checkpoints.cjs`,
+`requests.json`, per-case `result.json`, `summary.json` and `conclusion.json`.
+
 ## Docker identity batching: historical POC
 
 **Superseded on 2026-11-06:** the user chose to remove all client stack snapshots,
@@ -332,18 +429,20 @@ additional measured savings.
 
 | Priority | Candidate | Current evidence and limits |
 | --- | --- | --- |
-| 1 | Phase-specific fake replies and explicit hold/release | Three detection completion steps total **55.140 s** in the original profiling control. Avoid replaying coordination delays into planner requests; replace sleeps only after observing the workspace change-detection before-snapshot. This is distinct from the removed infrastructure snapshots. Not all of this time is removable. |
+| 1 | Observation-ready hold/release | Prompt matching is installed; edit windows remain unchanged. The original control spent **55.140 s** in three detection completion steps, not all removable. Replace sleeps only after observing the application's workspace before-snapshot, distinct from removed infrastructure snapshots. |
 | 2 | Warm fixture execution after file-write batching | The fresh batched treatment still made **137 helper calls / 90.158 s**, including real work. Measure incremental value against the snapshot-free harness with installed file-write batching; do not add historical worker savings to batching savings. |
 | 3 | Consolidate preview readiness probes | Controller/workload checks repeatedly create Engine execs/interpreters. Profile bounded in-container waits while preserving actual source, socket/HTTP readiness, deadlines and failures. No current speedup measurement. |
 | 4 | Startup/shutdown and archive transport tuning | Fresh control startup plus teardown was only **31.575 s**. Archive batching had a small historical slice gain. Neither supports a current multi-minute claim. |
 
 Relevant source locations:
 
-- Provider coordination: `acceptance-tests/step-definitions/develop.steps.js:107-143`
-  and `backend/app/api/routes/testing_agent.py:51-58,240-246`. The fake API repeats
-  its final reply and delay. Use explicit planner results where appropriate;
-  retain real plans where startup is under test. "Turn active" does not establish
-  that the before-snapshot finished. Hold/release must be bounded and safe during
+- Provider coordination: `acceptance-tests/step-definitions/develop.steps.js`,
+  `acceptance-tests/support/api-client.js` and
+  `backend/app/api/routes/testing_agent.py`. Full-suite fixtures now use exact
+  latest-input rules and separate immediate planner results; documented plans are
+  retained where startup is under test. Only legacy isolated queue fixtures
+  repeat their tail reply. "Turn active" does not establish that the
+  before-snapshot finished. Future hold/release must be bounded and safe during
   reset/cancellation; do not batch edits across that observation boundary.
 - Reset controls: `acceptance-tests/features/support/app-lifecycle.js:238`.
   Client identity snapshots have been removed; reset request/acknowledgement and
@@ -359,17 +458,18 @@ Relevant source locations:
   These are distinct from backend fixture helpers. Keep archive limits,
   extraction validation and sandboxing; "container running" is not readiness.
 
-The current slow scenarios include chat-specific cleanup (**45.537 s**), rejected
-build source (**26.415 s**), bounded startup failure (**25.557 s**) and the two
-relevant-edit detection cases (**24.692 / 24.104 s**), including local hooks.
+The original profiling control's slow scenarios included chat-specific cleanup
+(**45.537 s**), rejected build source (**26.415 s**), bounded startup failure
+(**25.557 s**) and the two relevant-edit detection cases (**24.692 / 24.104 s**),
+including local hooks. These are historical investigation targets, not current timings.
 Profile them without removing intentional timeout, isolation or failure coverage.
 API-context pooling is not a priority based on its historical sub-second cost.
 
-**Recommended next serial work:** profile provider coordination against the
-snapshot-free harness and installed file-write batching, using fresh matched
-controls rather than adding prior savings. Old identity-batching preloads no
-longer apply. No current serial result demonstrates a three-minute end-to-end
-gain.
+**Recommended next serial work:** re-profile the snapshot-free harness with
+file-write batching and prompt matching installed before testing observation-ready
+hold/release. Use fresh matched controls, not accumulated historical savings.
+Old identity-batching preloads no longer apply. No current serial result
+demonstrates a three-minute end-to-end gain.
 
 ### If concurrency is acceptable
 
@@ -454,7 +554,8 @@ they are not durable or installed runner dependencies.
 5. Require green results with no missing/pending/undefined coverage, exact-owned
    cleanup, and repeated matched runs before claiming stable medians or CI gains.
 
-Python fixture batching is installed; client stack snapshots have been removed.
-Docker identity batching is historical evidence superseded by snapshot removal;
-other optimizations remain exploratory. Future application changes still require
-a driving spec delta and separate spec/code tasks and commits.
+Python fixture batching and prompt-matched fake responses are integrated; client
+stack snapshots have been removed. Docker identity batching is historical evidence
+superseded by snapshot removal; observation-ready hold/release and other remaining
+optimizations are exploratory. Future application changes still require a driving
+spec delta and separate spec/code tasks and commits.

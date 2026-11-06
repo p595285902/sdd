@@ -85,6 +85,60 @@ node --test acceptance-tests/support/workspace-file-batching.test.cjs
 
 These checks do not replace the complete acceptance gate.
 
+## Prompt-matched fake provider
+
+Configure full-suite fixtures with an explicit CLI command and agent replies:
+
+```js
+await apiClient.configureFakeLlm({
+  prompt: '/openspec explore Inspect the repository',
+  replies: [{ kind: 'text', text: 'Repository findings' }],
+});
+```
+
+`prompt` includes `/openspec explore`, `/openspec propose` or `/openspec apply`;
+an array declares separate commands for concurrent chats. Optional `title` and
+`plan` configure auxiliary phases independently. Use `configureFakeProposal` to
+construct a proposal command from the fixture's complete, bounded conversation.
+
+The helper preserves OpenCode 1.18.23's literal surrounding quote characters and
+newlines, rather than JSON-stringifying the command. The server matches this
+exact wire text; it does not strip quotes or search arbitrary substrings.
+
+Title generation and preview planning are identified from their system/developer
+control prompts **before** agent matching. They have separate immediate replies:
+by default an acceptance title and JSON `null` (no documented plan). Preview
+startup fixtures pass their actual plan through `plan`; real planner requests,
+plan validation, setup and workload startup still execute. Unmatched agent
+inputs fail with HTTP 500—there is no agent wildcard or previous-reply fallback.
+
+Within a rule, zero or more tool replies precede one terminal reply. Selection
+uses tool outputs after the latest user message, not a mutable request counter;
+auxiliary requests, retries and prior-turn tool history do not advance it. The
+request log includes `selection.phase`, `reply_index` and `delay_seconds`, so
+assertions can select the agent request without depending on arrival order.
+
+Configured waits retain the existing **0–30 second** bound. Streaming success
+sends `response.created` and `response.in_progress` before delaying content.
+Pending waits observe disconnect/reset cancellation, and scenario reset clears
+all rules and request records through the existing completion barrier. Legacy
+`{replies: [...]}` control payloads remain supported only for isolated fixtures;
+queue and rule modes cannot be configured together.
+
+The existing edit-window delays remain in place. A running turn or the provider
+preamble does **not** establish completion of the application's workspace
+before-snapshot; no hold/release synchronization or shorter sleeps are introduced.
+
+Focused checks (not a replacement for the complete gate):
+
+```sh
+node --test acceptance-tests/support/prompt-matching.test.cjs
+uv run --directory backend --no-sync pytest --confcutdir=tests/api/routes \
+  tests/api/routes/test_testing_agent.py -q
+uv run --directory backend --no-sync pytest --confcutdir=tests/services \
+  tests/services/test_acceptance_reset.py -q
+```
+
 ## Reports
 
 Every gate execution produces reports under `acceptance-tests/reports/`:
@@ -331,9 +385,9 @@ uses new report prefixes rather than overwriting this evidence. Expanded coverag
 failed/incomplete runs, and prior warm-import POCs are not evidence of a speedup
 from this architecture.
 
-## Latest effective verification
+## Historical state-reset verification
 
-After the task-audit fixes, `reset-final-effective-*` records a complete real
+After the task-audit fixes, `reset-final-effective-*` recorded a complete real
 **110/110 scenario pass**, zero pending/undefined results, and both group HTML
 reports. Normal validation passed 102 scenarios in 829.146 seconds; separate
 lifecycle/command validation passed 8 in 868.752 seconds. Complete invocation

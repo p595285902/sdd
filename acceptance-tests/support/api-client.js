@@ -348,12 +348,35 @@ class ApiClient {
     });
   }
 
-  async configureFakeLlm(replies) {
+  async configureFakeLlm({ prompt = [], replies = [], plan = null, title = 'Acceptance chat' }) {
+    const prompts = Array.isArray(prompt) ? prompt : [prompt];
+    if (prompts.some(value => typeof value !== 'string' || !value) ||
+        new Set(prompts).size !== prompts.length || Boolean(prompts.length) !== Boolean(replies.length)) {
+      throw new Error('Fake LLM agent replies require distinct, explicit prompts');
+    }
+    const rules = [
+      { phase: 'title', replies: [{ kind: 'text', text: title }] },
+      { phase: 'planner', replies: [{ kind: 'text', text: JSON.stringify(plan) }] },
+      // Pinned OpenCode 1.18.23 surrounds this CLI argument with literal quotes;
+      // captured multiline proposals retain real newlines, not JSON escapes.
+      ...prompts.map(value => ({ phase: 'agent', prompt: `"${value}"`, replies })),
+    ];
     const api = await this.world.openApiContext();
-    const response = await api.post('/api/v1/testing/llm/control', {
-      data: { replies },
-    });
+    const response = await api.post('/api/v1/testing/llm/control', { data: { rules } });
     if (!response.ok()) throw new Error(`Unable to configure fake LLM: ${response.status()}`);
+  }
+
+  async configureFakeProposal(token, chatId, text) {
+    const messages = await this.listDevelopmentMessages(token, chatId);
+    if (messages.has_more !== false) throw new Error('Proposal fixture requires the complete conversation');
+    // Match the application's bounded, role-prefixed proposal command. These
+    // fixtures use the default 100,000-character conversation bound.
+    const conversation = messages.data.filter(message => message.kind === 'message')
+      .filter(message => message.content.trim())
+      .map(message => `${message.role}: ${message.content.trim()}`).join('\n').slice(-100_000);
+    await this.configureFakeLlm({
+      prompt: `/openspec propose ${conversation.trim()}`, replies: [{ kind: 'text', text }],
+    });
   }
 
   async resetScenarioState() {

@@ -38,7 +38,10 @@ class AcceptanceResetPage {
   }
   async sameRepositoryRequests() {
     await lifecycle.configureDemoRepository(true);
-    await this.api.configureFakeLlm([{ kind: 'text', text: 'previous configuration scenario reply' }]);
+    await this.api.configureFakeLlm({
+      prompt: '/openspec explore previous configuration scenario',
+      replies: [{ kind: 'text', text: 'previous configuration scenario reply' }],
+    });
     await this.reset();
     await lifecycle.configureDemoRepository(true);
   }
