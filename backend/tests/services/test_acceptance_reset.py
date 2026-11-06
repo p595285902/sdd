@@ -633,7 +633,8 @@ def test_preview_fetch_drain_keeps_health_available_and_joins_actual_rpc(monkeyp
     asyncio.run(execute())
 
 
-def test_provider_request_is_actually_cancelled_and_drained_before_reply_reset(monkeypatch):
+@pytest.mark.parametrize("matched,stream", [(False, False), (True, False), (True, True)])
+def test_provider_request_is_actually_cancelled_and_drained_before_reply_reset(monkeypatch, matched, stream):
     import httpx
 
     barrier = WorkBarrier()
@@ -644,19 +645,29 @@ def test_provider_request_is_actually_cancelled_and_drained_before_reply_reset(m
         started.set()
         return reply
     monkeypatch.setattr(testing_agent.fake_llm_state, "take", take)
-    testing_agent.fake_llm_state.configure([testing_agent.FakeLlmReply(kind="delay", text="old", delay_seconds=30)])
+    reply = testing_agent.FakeLlmReply(kind="delay", text="old", delay_seconds=30)
+    if matched:
+        testing_agent.fake_llm_state.configure([], rules=[
+            testing_agent.FakeLlmRule(phase="agent", prompt="old", replies=[reply]),
+        ])
+    else:
+        testing_agent.fake_llm_state.configure([reply])
     app = FastAPI()
     app.include_router(testing_agent.router, prefix="/api/v1")
     app.add_middleware(AcceptanceAdmissionMiddleware, barrier=barrier, prefix="/api/v1")
     async def execute():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            task = asyncio.create_task(client.post("/api/v1/testing/llm/v1/responses", json={"input": "old"}))
+            task = asyncio.create_task(client.post("/api/v1/testing/llm/v1/responses", json={"input": "old", "stream": stream}))
             assert await anyio.to_thread.run_sync(started.wait, 1)
             assert barrier.counts() == {"provider": 1}
             barrier.close()
             response = await asyncio.wait_for(task, timeout=1)
             await anyio.to_thread.run_sync(barrier.drain, monotonic() + 1)
-            assert response.status_code == 503
+            assert response.status_code == (200 if stream else 503)
+            if stream:
+                assert "response.created" in response.text
+                assert "response.completed" not in response.text
+                assert "response.output_text.delta" not in response.text
             assert testing_agent.fake_llm_state.requests()
             testing_agent.fake_llm_state.configure([])
             assert testing_agent.fake_llm_state.baseline_verified()

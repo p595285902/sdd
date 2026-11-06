@@ -84,7 +84,7 @@ http.createServer((request, response) => {
   }
 
   async selectInstructions(plan) {
-    await this.world.apiClient.configureFakeLlm([{ kind: 'text', text: JSON.stringify(plan) }]);
+    await this.world.apiClient.configureFakeLlm({ plan });
   }
 
   documentedPlan() {
@@ -500,11 +500,11 @@ target.unlink()
 
   async completedTurn(chatId, filename) {
     const plan = this.documentedPlan();
-    await this.selectInstructions(plan);
-    await this.world.apiClient.configureFakeLlm([
-      { kind: 'delay', delay_seconds: 3, text: 'Turn finished' },
-      { kind: 'text', text: JSON.stringify(plan) },
-    ]);
+    await this.world.apiClient.configureFakeLlm({
+      prompt: '/openspec explore Edit checkout',
+      replies: [{ kind: 'delay', delay_seconds: 3, text: 'Turn finished' }],
+      plan,
+    });
     const turn = this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
       `/api/v1/develop/chats/${chatId}/messages/explore/stream`, { data: { content: 'Edit checkout' } });
     await this.world.apiClient.waitForAgentTurn(this.world.apiClient.superuserToken, chatId);

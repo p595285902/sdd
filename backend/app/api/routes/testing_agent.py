@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.core.config import settings
 from app.services.acceptance_work import CompletionStreamingResponse, current_work
@@ -26,8 +26,76 @@ class FakeLlmReply(BaseModel):
     delay_seconds: float = Field(default=0, ge=0, le=30)
 
 
-class FakeLlmScript(BaseModel):
+class FakeLlmRule(BaseModel):
+    phase: Literal["agent", "title", "planner"]
+    prompt: str | None = Field(default=None, min_length=1)
     replies: list[FakeLlmReply] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_rule(self) -> FakeLlmRule:
+        if (self.phase == "agent") != (self.prompt is not None):
+            raise ValueError("Only agent rules require an exact latest-user prompt")
+        if any(reply.kind != "tool" for reply in self.replies[:-1]):
+            raise ValueError("Only tool replies may precede the terminal reply")
+        if self.replies[-1].kind == "tool":
+            raise ValueError("A matched rule must end with a non-tool reply")
+        if self.phase != "agent" and len(self.replies) != 1:
+            raise ValueError("Title and planner rules require one reply")
+        return self
+
+
+class FakeLlmScript(BaseModel):
+    # Queue mode is retained for existing isolated testing fixtures. Full-suite
+    # scenarios use rules exclusively; the two modes cannot silently mix.
+    replies: list[FakeLlmReply] = Field(default_factory=list)
+    rules: list[FakeLlmRule] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_script(self) -> FakeLlmScript:
+        if bool(self.replies) == bool(self.rules):
+            raise ValueError("Configure either replies or rules, not both")
+        keys = [(rule.phase, rule.prompt) for rule in self.rules]
+        if len(set(keys)) != len(keys):
+            raise ValueError("Duplicate fake LLM rule")
+        return self
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part["text"] for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+            and part.get("type") in ("input_text", "text")
+        )
+    return ""
+
+
+def _request_match(body: dict[str, Any]) -> tuple[str, str, int]:
+    inputs = body.get("input", [])
+    if isinstance(inputs, str):
+        inputs = [{"role": "user", "content": inputs}]
+    if not isinstance(inputs, list):
+        inputs = []
+    messages = [item for item in inputs if isinstance(item, dict)]
+    controls = [body.get("instructions", "")] + [
+        _content_text(item.get("content")) for item in messages
+        if item.get("role") in ("system", "developer")
+    ]
+    # Inspect control messages only: user text and old conversation history may
+    # contain these phrases too. Auxiliary phases always win over agent matching.
+    if any(isinstance(text, str) and text.startswith("You are a title generator.") for text in controls):
+        return "title", "", 0
+    if any(isinstance(text, str) and text.startswith("Extract only explicitly documented non-Compose") for text in controls):
+        return "planner", "", 0
+    latest = next((index for index in range(len(messages) - 1, -1, -1)
+                   if messages[index].get("role") == "user"), None)
+    if latest is None:
+        return "agent", "", 0
+    prompt = _content_text(messages[latest].get("content"))
+    tool_outputs = sum(item.get("type") == "function_call_output" for item in messages[latest + 1:])
+    return "agent", prompt, tool_outputs
 
 
 class FakeTurnSettings(BaseModel):
@@ -40,17 +108,30 @@ class FakeLlmState:
         self._lock = Lock()
         self._replies: deque[FakeLlmReply] = deque()
         self._last_reply: FakeLlmReply | None = None
+        self._rules: dict[tuple[str, str | None], FakeLlmRule] = {}
         self._requests: list[dict[str, Any]] = []
 
-    def configure(self, replies: list[FakeLlmReply]) -> None:
+    def configure(self, replies: list[FakeLlmReply], *, rules: list[FakeLlmRule] | None = None) -> None:
         with self._lock:
             self._replies = deque(replies)
             self._last_reply = None
+            self._rules = {(rule.phase, rule.prompt): rule for rule in rules or []}
             self._requests = []
 
     def take(self, request: dict[str, Any]) -> FakeLlmReply:
         with self._lock:
             self._requests.append(request)
+            if self._rules:
+                phase, prompt, tool_outputs = _request_match(request["body"])
+                rule = self._rules.get((phase, prompt if phase == "agent" else None))
+                if rule is None:
+                    raise HTTPException(status_code=500, detail=f"No fake LLM rule matched {phase} input")
+                # Selection is derived from this turn's tool results, not request
+                # order. Retries and identical prompts in other sessions are safe.
+                index = min(tool_outputs, len(rule.replies) - 1)
+                reply = rule.replies[index]
+                request["selection"] = {"phase": phase, "reply_index": index, "delay_seconds": reply.delay_seconds}
+                return reply
             if self._replies:
                 self._last_reply = self._replies.popleft()
             if self._last_reply is None:
@@ -59,7 +140,7 @@ class FakeLlmState:
 
     def baseline_verified(self) -> bool:
         with self._lock:
-            return not self._replies and self._last_reply is None and not self._requests
+            return not self._rules and not self._replies and self._last_reply is None and not self._requests
 
     def requests(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -71,8 +152,8 @@ fake_llm_state = FakeLlmState()
 
 @router.post("/control")
 def configure_fake_llm(script: FakeLlmScript) -> dict[str, int]:
-    fake_llm_state.configure(script.replies)
-    return {"queued": len(script.replies)}
+    fake_llm_state.configure(script.replies, rules=script.rules)
+    return {"rules": len(script.rules)} if script.rules else {"queued": len(script.replies)}
 
 
 @router.get("/requests")
@@ -230,6 +311,27 @@ def _response_events(response: dict[str, Any]) -> Iterator[str]:
     yield event("response.completed", response=response)
 
 
+async def _wait_for_reply(reply: FakeLlmReply, request: Request) -> bool:
+    work = current_work.get()
+    deadline = time.monotonic() + reply.delay_seconds
+    while True:
+        if (work is not None and work.cancelled.is_set()) or await request.is_disconnected():
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        await asyncio.sleep(min(0.05, remaining))
+
+
+async def _delayed_response_events(reply: FakeLlmReply, response: dict[str, Any], request: Request) -> AsyncIterator[str]:
+    for index, event in enumerate(_response_events(response)):
+        # OpenCode may establish its step checkpoint from the initial events.
+        # Delay content, never the created/in_progress streaming preamble.
+        if index == 2 and not await _wait_for_reply(reply, request):
+            return
+        yield event
+
+
 @router.post("/v1/responses", response_model=None)
 async def fake_responses(
     request: Request,
@@ -237,13 +339,13 @@ async def fake_responses(
 ) -> Response:
     body = await request.json()
     reply = fake_llm_state.take({"authorization": authorization, "body": body})
-    if reply.delay_seconds:
-        work = current_work.get()
-        deadline = time.monotonic() + reply.delay_seconds
-        while time.monotonic() < deadline:
-            if work is not None and work.cancelled.is_set():
-                return JSONResponse(status_code=503, content={"error": {"message": "Acceptance provider request cancelled"}})
-            await asyncio.sleep(min(0.05, max(0, deadline - time.monotonic())))
+    if body.get("stream") and reply.kind in ("text", "tool", "delay"):
+        response = _response_object(reply, f"resp_{uuid.uuid4().hex}")
+        return CompletionStreamingResponse(
+            _delayed_response_events(reply, response, request), media_type="text/event-stream"
+        )
+    if not await _wait_for_reply(reply, request):
+        return JSONResponse(status_code=503, content={"error": {"message": "Acceptance provider request cancelled"}})
     if reply.kind == "failure":
         return JSONResponse(
             status_code=reply.status_code,
@@ -257,9 +359,4 @@ async def fake_responses(
             raise RuntimeError("Scripted provider disconnect")
 
         return CompletionStreamingResponse(disconnect(), media_type="text/event-stream")
-    response = _response_object(reply, f"resp_{uuid.uuid4().hex}")
-    if body.get("stream"):
-        return CompletionStreamingResponse(
-            _response_events(response), media_type="text/event-stream"
-        )
-    return JSONResponse(content=response)
+    return JSONResponse(content=_response_object(reply, f"resp_{uuid.uuid4().hex}"))
