@@ -71,5 +71,6 @@ Added:
 To add:
 - a final cleanup after all the tests finishes
 - 1 stack and same docker services for the whole tests. Use reset API to reset.
+- often needs POC to verify behaviours or idea. This should also skip specs
 
 -/api/hello from ClaudeCode is to warm up before the real LLM calls. (helps to warm up DNS resolution, TCP, TLS, and the connection pool.)
