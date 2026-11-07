@@ -267,7 +267,7 @@ def test_matched_rules_preserve_error_responses(kind, status):
         assert response.json() == ({"error": {"message": "limited"}} if kind == "failure" else {"unexpected": True})
 
 
-async def capture_stream(*, disconnect=False):
+async def capture_stream(*, disconnect=False, disconnect_at=None):
     app = FastAPI()
     app.include_router(router)
     barrier = WorkBarrier()
@@ -293,7 +293,7 @@ async def capture_stream(*, disconnect=False):
         if event["type"] == "http.response.body" and event.get("body"):
             frame = json.loads(event["body"].decode().removeprefix("data: "))
             frames.append((monotonic(), frame))
-            if disconnect and frame["type"] == "response.in_progress":
+            if (disconnect and frame["type"] == "response.in_progress") or frame["type"] == disconnect_at:
                 closed.set()
 
     await asyncio.wait_for(app(scope, receive, send), timeout=1)
@@ -311,6 +311,33 @@ def test_stream_preamble_precedes_bounded_content_delay():
     assert frames[2][0] - frames[1][0] >= 0.05
     assert frames[-1][1]["type"] == "response.completed"
     assert [frame["sequence_number"] for _, frame in frames] == list(range(1, len(frames) + 1))
+
+
+def test_stream_chunks_arrive_before_delayed_completion():
+    with fake_llm_client() as client:
+        client.post("/testing/llm/control", json={"rules": [rule(replies=[{
+            "kind": "text", "text": "partial complete", "stream_chunk_size": 8,
+            "stream_chunk_delay_seconds": 0.06,
+        }])]})
+    frames = asyncio.run(capture_stream())
+    deltas = [(timestamp, frame) for timestamp, frame in frames
+              if frame["type"] == "response.output_text.delta"]
+    assert [frame["delta"] for _, frame in deltas] == ["partial ", "complete"]
+    assert deltas[1][0] - deltas[0][0] >= 0.05
+    assert frames[-1][1]["type"] == "response.completed"
+    assert [frame["sequence_number"] for _, frame in frames] == list(range(1, len(frames) + 1))
+
+
+def test_disconnect_after_partial_chunk_cancels_the_remaining_stream():
+    with fake_llm_client() as client:
+        client.post("/testing/llm/control", json={"rules": [rule(replies=[{
+            "kind": "text", "text": "partial complete", "stream_chunk_size": 8,
+            "stream_chunk_delay_seconds": 30,
+        }])]})
+    frames = asyncio.run(capture_stream(disconnect_at="response.output_text.delta"))
+    deltas = [frame for _, frame in frames if frame["type"] == "response.output_text.delta"]
+    assert [frame["delta"] for frame in deltas] == ["partial "]
+    assert frames[-1][1]["type"] == "response.output_text.delta"
 
 
 def test_disconnected_stream_ends_pending_wait_without_content_or_completion():

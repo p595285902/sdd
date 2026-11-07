@@ -366,7 +366,7 @@ class ApiClient {
     if (!response.ok()) throw new Error(`Unable to configure fake LLM: ${response.status()}`);
   }
 
-  async configureFakeProposal(token, chatId, text) {
+  async configureFakeProposal(token, chatId, text, streamOptions = {}) {
     const messages = await this.listDevelopmentMessages(token, chatId);
     if (messages.has_more !== false) throw new Error('Proposal fixture requires the complete conversation');
     // Match the application's bounded, role-prefixed proposal command. These
@@ -375,7 +375,8 @@ class ApiClient {
       .filter(message => message.content.trim())
       .map(message => `${message.role}: ${message.content.trim()}`).join('\n').slice(-100_000);
     await this.configureFakeLlm({
-      prompt: `/openspec propose ${conversation.trim()}`, replies: [{ kind: 'text', text }],
+      prompt: `/openspec propose ${conversation.trim()}`,
+      replies: [{ kind: 'text', text, ...streamOptions }],
     });
   }
 

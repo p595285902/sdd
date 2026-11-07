@@ -109,6 +109,26 @@ test('one stack starts with bounded readiness and no initial or later identity s
   assertNoSnapshots();
   await app.stopApplication();
 });
+test('browser and preview use separate same-site loopback origins at the published port', async () => {
+  await fresh();
+  const base = new URL(app.state.baseUrl);
+  const browser = new URL(app.state.browserBaseUrl);
+  const preview = new URL(app.state.env.PREVIEW_ORIGIN);
+  assert.equal(base.hostname, '127.0.0.1');
+  assert.equal(browser.hostname, 'app.localhost');
+  assert.equal(preview.hostname, `preview.${browser.hostname}`);
+  assert.notEqual(browser.origin, preview.origin);
+  assert.equal(preview.protocol, base.protocol);
+  assert.equal(browser.protocol, base.protocol);
+  assert.equal(preview.port, base.port);
+  assert.equal(browser.port, base.port);
+  assert.equal(app.state.env.ACCEPTANCE_PORT, base.port);
+  assert.equal(app.state.env.FRONTEND_HOST, browser.origin);
+  assert.ok(calls.filter(call => call.env).every(call =>
+    call.env.PREVIEW_ORIGIN === preview.origin && call.env.FRONTEND_HOST === browser.origin));
+  await app.stopApplication();
+});
+
 test('configuration overrides verify effective control state without inspecting or recreating containers', async () => {
   await fresh();
   await app.configureDemoRepository(false);

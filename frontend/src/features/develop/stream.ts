@@ -5,6 +5,8 @@ export type DevelopStreamEventKind =
   | "error"
   | "idle"
   | "done"
+  | "result"
+  | "preview-change"
 
 export type DevelopStreamEvent = {
   sequence: number
@@ -28,6 +30,8 @@ const eventKinds = new Set<DevelopStreamEventKind>([
   "error",
   "idle",
   "done",
+  "result",
+  "preview-change",
 ])
 
 const parseEvent = (frame: string): DevelopStreamEvent | undefined => {

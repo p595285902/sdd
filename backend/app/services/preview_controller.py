@@ -771,6 +771,8 @@ def status(chat_id: uuid.UUID) -> dict[str, str]:
                 return {"state": "failed"}
         raise FileNotFoundError("Preview workload not found")
     result = {"id": container["Id"], "state": container["State"]["Status"]}
+    if container["Config"]["Labels"].get("sdd.preview.compose-service"):
+        result["runtime"] = "compose"
     with activity_lock:
         if container["State"]["Running"]:
             result.update(ready_services.get(chat_id, {}))

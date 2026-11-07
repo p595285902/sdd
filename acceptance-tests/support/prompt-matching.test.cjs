@@ -98,6 +98,20 @@ test('proposal matching uses the complete stored message conversation, not old c
   });
 });
 
+test('proposal streaming fixtures preserve exact prompt matching and delayed chunks', async () => {
+  const { api, posts } = fixture();
+  api.listDevelopmentMessages = async () => ({ has_more: false, data: [
+    { kind: 'message', role: 'user', content: 'Inspect repository' },
+  ] });
+  await api.configureFakeProposal('token', 'chat', 'partial complete', {
+    stream_chunk_size: 8, stream_chunk_delay_seconds: 8,
+  });
+  assert.deepEqual(rules(posts)[2], {
+    phase: 'agent', prompt: '"/openspec propose user: Inspect repository"',
+    replies: [{ kind: 'text', text: 'partial complete', stream_chunk_size: 8, stream_chunk_delay_seconds: 8 }],
+  });
+});
+
 test('proposal fixture applies the configured default conversation tail bound', async () => {
   const { api, posts } = fixture();
   api.listDevelopmentMessages = async () => ({ has_more: false, next_cursor: null, data: [

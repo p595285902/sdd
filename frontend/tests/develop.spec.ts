@@ -63,7 +63,7 @@ const mockDevelopApi = async (
       /\/develop\/chats\/([^/]+)\/messages$/,
     )
     const proposeMatch = url.pathname.match(
-      /\/develop\/chats\/([^/]+)\/messages\/propose$/,
+      /\/develop\/chats\/([^/]+)\/messages\/propose\/stream$/,
     )
     const decisionMatch = url.pathname.match(
       /\/develop\/chats\/([^/]+)\/messages\/([^/]+)\/(reject|approve\/stream)$/,
@@ -104,7 +104,15 @@ const mockDevelopApi = async (
         proposal_state: "undecided",
         created_at: "2026-09-24T12:00:09Z",
       }
-      await route.fulfill({ contentType: "application/json", json: proposal })
+      await route.fulfill({
+        contentType: "text/event-stream",
+        body: [
+          'data: {"sequence":1,"kind":"status","data":"Writing proposal"}\n\n',
+          `data: ${JSON.stringify({ sequence: 2, kind: "text", data: proposal.content })}\n\n`,
+          `data: ${JSON.stringify({ sequence: 3, kind: "result", data: JSON.stringify(proposal) })}\n\n`,
+          'data: {"sequence":4,"kind":"done","data":"complete"}\n\n',
+        ].join(""),
+      })
       return
     }
 
@@ -372,6 +380,57 @@ test.describe("Develop chat shell", () => {
     await expect(response.locator("img")).toHaveCount(0)
   })
 
+  for (const workflow of ["Explore", "Propose", "Apply"] as const) {
+    test(`${workflow} keeps its stream through rerenders and aborts only on chat leave`, async ({ page }) => {
+      await page.getByRole("button", { name: "Set up demo repository" }).click()
+      if (workflow === "Apply") {
+        await page.getByRole("button", { name: "Make it happen" }).click()
+        await expect(page.getByRole("article", { name: "Proposal" })).toBeVisible()
+      }
+      await page.evaluate(() => {
+        const probe = window as Window & { developStreamAborted?: boolean }
+        const fetch = window.fetch.bind(window)
+        window.fetch = async (input, init) => {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+          if (init?.method !== "POST" || !url.includes("/develop/chats/") || !url.endsWith("/stream")) {
+            return fetch(input, init)
+          }
+          probe.developStreamAborted = false
+          const encoder = new TextEncoder()
+          return new Response(new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(
+                'data: {"sequence":1,"kind":"status","data":"Checking stream ownership"}\n\n' +
+                'data: {"sequence":2,"kind":"text","data":"Live partial response"}\n\n',
+              ))
+              init.signal?.addEventListener("abort", () => {
+                probe.developStreamAborted = true
+                controller.error(new DOMException("Aborted", "AbortError"))
+              })
+            },
+          }), { headers: { "Content-Type": "text/event-stream" } })
+        }
+      })
+      if (workflow === "Explore") {
+        await page.getByRole("textbox", { name: "Exploration message" }).fill("Inspect")
+        await page.getByRole("button", { name: "Send exploration" }).click()
+      } else {
+        await page.getByRole("button", { name: workflow === "Propose" ? "Make it happen" : "Approve", exact: true }).click()
+      }
+      const response = page.getByRole("article", { name: "Streaming assistant response" })
+      await expect(response).toContainText("Live partial response")
+      await expect(response.locator("summary")).toContainText(/Agent activity · 0:0[1-9]/)
+      await page.getByRole("button", { name: "Rename Development Chat" }).click()
+      await page.getByLabel("Development Chat title").fill("Metadata changed during streaming")
+      await page.getByRole("button", { name: "Save", exact: true }).click()
+      await expect(page.getByRole("heading", { name: "Metadata changed during streaming" })).toBeVisible()
+      expect(await page.evaluate(() => (window as Window & { developStreamAborted?: boolean }).developStreamAborted)).toBe(false)
+      await expect(page.getByRole("button", { name: "Stop Agent Turn" })).toBeEnabled()
+      await page.getByRole("navigation", { name: "Development Chats" }).getByRole("button", { name: "Earlier chat" }).click()
+      await expect.poll(() => page.evaluate(() => (window as Window & { developStreamAborted?: boolean }).developStreamAborted)).toBe(true)
+    })
+  }
+
   test("shows running activity time beside its label", async ({ page }) => {
     await mockDevelopApi(page, { waitForStop: true })
     await page.reload()
@@ -520,7 +579,7 @@ test.describe("Develop chat shell", () => {
     await expect(
       page
         .getByRole("complementary", { name: "Development context" })
-        .getByText("No additional context")
+        .getByText("Set up the repository to preview this chat.")
         .last(),
     ).toBeVisible()
   })

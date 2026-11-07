@@ -11,7 +11,7 @@ const composeFiles = [path.join(repoRoot, 'compose.yml'), path.join(repoRoot, 'a
 const demoRepository = 'https://example.com/acceptance/demo-repository.git';
 const demoToken = 'acceptance-token';
 const state = {
-  baseUrl: undefined, projectName: undefined,
+  baseUrl: undefined, browserBaseUrl: undefined, projectName: undefined,
   demoRepositoryAvailable: undefined,
   generation: 0, fatal: undefined, events: [], stopped: true,
 };
@@ -126,14 +126,18 @@ async function startApplication(options = {}) {
   state.env = { ...process.env, COMPOSE_PROJECT_NAME: project, ACCEPTANCE_PORT: String(port),
     PROJECT_NAME: 'SDD Acceptance', SECRET_KEY: 'acceptance-secret-key-not-for-production',
     FIRST_SUPERUSER: 'admin@example.com', FIRST_SUPERUSER_PASSWORD: 'acceptance-admin-password',
-    POSTGRES_PASSWORD: 'acceptance-postgres-password', SMTP_HOST: '', PREVIEW_ORIGIN: 'http://preview.localhost',
+    POSTGRES_PASSWORD: 'acceptance-postgres-password', SMTP_HOST: '', PREVIEW_ORIGIN: `http://preview.app.localhost:${port}`,
+    FRONTEND_HOST: `http://app.localhost:${port}`,
     EMAILS_FROM_EMAIL: 'test@example.com', OPENAI_API_KEY: 'acceptance-provider-key',
     DEMO_GITHUB_REPO: demoRepository, DEMO_GITHUB_TOKEN: demoToken,
     DEVELOP_ACCEPTANCE_MODE: String(options.acceptanceMode ?? true),
     DEVELOP_ACCEPTANCE_RESET_ENABLED: String(state.resetEnabled), ACCEPTANCE_RUN_ID: project,
     ACCEPTANCE_RESET_TOKEN: state.resetToken, ACCEPTANCE_RESET_TIMEOUT_SECONDS: String(state.resetTimeoutSeconds),
     ACCEPTANCE_AGENT_ROOT: '/acceptance-agent-state' };
+  // Browser and preview share a loopback site for HTTP cookies; Node/API clients
+  // keep the numeric loopback address and do not depend on wildcard DNS.
   Object.assign(state, { projectName: project, baseUrl: `http://127.0.0.1:${port}`,
+    browserBaseUrl: state.env.FRONTEND_HOST,
     demoRepositoryAvailable: undefined, generation: 0, fatal: undefined,
     events: [], stopped: false });
   record('stack-start');

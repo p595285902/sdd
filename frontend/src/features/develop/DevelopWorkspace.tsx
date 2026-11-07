@@ -51,6 +51,7 @@ import useCustomToast from "@/hooks/useCustomToast"
 import { handleError } from "@/utils"
 
 import { DevelopMarkdown } from "./DevelopMarkdown"
+import { DevelopPreview } from "./DevelopPreview"
 import {
   applyStreamEvent,
   cacheConversation,
@@ -58,6 +59,7 @@ import {
   type DevelopConversationCache,
   emptyConversation,
   reconcileMessages,
+  startAgentTurn,
   startOptimisticTurn,
 } from "./state"
 import { streamDevelopTurn } from "./stream"
@@ -84,6 +86,10 @@ export function DevelopWorkspace() {
   const [cache, setCache] = useState<DevelopConversationCache>({})
   const [now, setNow] = useState(Date.now())
   const streams = useRef(new Map<string, AbortController>())
+  const streamErrorToast = useRef(showErrorToast)
+  useEffect(() => {
+    streamErrorToast.current = showErrorToast
+  }, [showErrorToast])
   const viewport = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
 
@@ -167,7 +173,8 @@ export function DevelopWorkspace() {
   }, [conversation.running])
 
   const finishStream = useCallback(
-    async (chatId: string) => {
+    async (chatId: string, controller?: AbortController) => {
+      if (controller && streams.current.get(chatId) !== controller) return
       streams.current.delete(chatId)
       await Promise.all([
         queryClient.invalidateQueries({
@@ -202,16 +209,16 @@ export function DevelopWorkspace() {
           body: content === undefined ? undefined : { content },
           signal: controller.signal,
         })) {
+          if (controller.signal.aborted || streams.current.get(chatId) !== controller) return
           updateConversation(chatId, (current) =>
             applyStreamEvent(current, event),
           )
         }
-        await finishStream(chatId)
+        await finishStream(chatId, controller)
       } catch (error) {
-        if (controller.signal.aborted) {
-          streams.current.delete(chatId)
-          return
-        }
+        const ownsStream = streams.current.get(chatId) === controller
+        if (ownsStream) streams.current.delete(chatId)
+        if (controller.signal.aborted || !ownsStream) return
         if (method === "GET" && String(error).includes("404")) return
         const message = error instanceof Error ? error.message : "Stream failed"
         updateConversation(chatId, (current) => ({
@@ -219,17 +226,18 @@ export function DevelopWorkspace() {
           error: message,
           running: false,
         }))
-        showErrorToast(message)
+        streamErrorToast.current(message)
       }
     },
-    [finishStream, showErrorToast, updateConversation],
+    [finishStream, updateConversation],
   )
 
+  const selectedChatId = selected?.id
   useEffect(() => {
-    if (!selected || streams.current.has(selected.id)) return
-    void consumeStream(selected.id, "GET")
-    return () => streams.current.get(selected.id)?.abort()
-  }, [selected, consumeStream])
+    if (!selectedChatId || streams.current.has(selectedChatId)) return
+    void consumeStream(selectedChatId, "GET")
+    return () => streams.current.get(selectedChatId)?.abort()
+  }, [selectedChatId, consumeStream])
 
   const createChat = useMutation({
     mutationFn: async (content: string) =>
@@ -301,21 +309,12 @@ export function DevelopWorkspace() {
     },
   })
   const propose = useMutation({
-    mutationFn: async (chatId: string) =>
-      (
-        await DevelopService.proposeDevelopmentChat({
-          path: { chat_id: chatId },
-        })
-      ).data,
-    onError: handleError.bind(showErrorToast),
-    onSuccess: async (proposal) => {
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: ["development-messages", proposal.chat_id],
-        }),
-        queryClient.invalidateQueries({ queryKey: ["development-chats"] }),
-      ])
+    mutationFn: async (chatId: string) => {
+      updateConversation(chatId, startAgentTurn)
+      pinned.current = true
+      await consumeStream(chatId, "POST", undefined, "messages/propose/stream")
     },
+    onError: handleError.bind(showErrorToast),
   })
   const rejectProposal = useMutation({
     mutationFn: async ({
@@ -374,15 +373,7 @@ export function DevelopWorkspace() {
   }
   const approveProposal = (messageId: string) => {
     if (!selected || conversation.running) return
-    updateConversation(selected.id, (current) => ({
-      ...current,
-      activity: [],
-      response: "",
-      lastSequence: 0,
-      running: true,
-      startedAt: Date.now(),
-      error: null,
-    }))
+    updateConversation(selected.id, startAgentTurn)
     pinned.current = true
     void consumeStream(
       selected.id,
@@ -453,7 +444,7 @@ export function DevelopWorkspace() {
   const context = (
     <aside
       aria-label="Development context"
-      className="h-full border-l bg-background"
+      className="flex h-full min-h-0 min-w-0 flex-col border-l bg-background"
     >
       <div className="flex h-14 items-center justify-between border-b px-4">
         <h2 className="text-sm font-semibold">Context</h2>
@@ -468,7 +459,17 @@ export function DevelopWorkspace() {
           </Button>
         )}
       </div>
-      <p className="p-4 text-sm text-muted-foreground">No additional context</p>
+      {selected ? (
+        <DevelopPreview
+          chatId={selected.id}
+          key={selected.id}
+          open={mobilePanel === "context"}
+          setupPending={setupWorkspace.isPending}
+          workspaceReady={workspaceQuery.data?.ready ?? selected.workspace_ready}
+        />
+      ) : (
+        <p className="p-4 text-sm text-muted-foreground">Select a chat to open its preview.</p>
+      )}
     </aside>
   )
 
@@ -479,8 +480,9 @@ export function DevelopWorkspace() {
           <h1 className="text-2xl font-bold">Develop</h1>
           <p className="text-sm text-muted-foreground">Development Chats</p>
         </div>
-        <div className="flex gap-1 md:hidden">
+        <div className="flex gap-1 lg:hidden">
           <Button
+            className="md:hidden"
             aria-label="Open chat history"
             onClick={() => setMobilePanel("history")}
             size="icon"
@@ -860,10 +862,16 @@ export function DevelopWorkspace() {
             </div>
           )}
         </section>
-        <div className="hidden min-h-0 lg:block">{context}</div>
-        {mobilePanel && (
+        <div
+          className={mobilePanel === "context"
+            ? "absolute inset-0 z-20 min-h-0 min-w-0 bg-background lg:static"
+            : "hidden min-h-0 min-w-0 lg:block"}
+        >
+          {context}
+        </div>
+        {mobilePanel === "history" && (
           <div className="absolute inset-0 z-20 bg-background md:hidden">
-            {mobilePanel === "history" ? history : context}
+            {history}
           </div>
         )}
       </div>

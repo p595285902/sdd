@@ -33,7 +33,7 @@ class AcceptanceWorld extends World {
     await this.disposeContexts();
     this.apiClient = new ApiClient(this);
     this.previewWorkloadPage.chatIds = [];
-    this.context = await browser.newContext({ baseURL: state.baseUrl });
+    this.context = await browser.newContext({ baseURL: state.browserBaseUrl });
     this.page = await this.context.newPage();
   }
 
