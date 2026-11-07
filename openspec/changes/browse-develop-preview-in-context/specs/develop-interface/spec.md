@@ -3,15 +3,39 @@
 ## MODIFIED Requirements
 
 ### Requirement: Develop presents and controls streamed exploration
-The application SHALL provide an authenticated responsive workspace for chat history, conversation, context, repository setup, safe Markdown, incremental Agent Turn activity, reattachment, Stop, and Presence Mode controls. The selected chat's header MUST contain the repository setup/status control, a rename control beside the title, and a Presence Mode dropdown beside Delete. The Context panel and its mobile entry point SHALL remain available and SHALL show the selected chat's interactive website or Swagger preview when ready, with meaningful setup, loading, stopped, and error states otherwise. Agent activity SHALL show elapsed time while a turn runs and its final duration when a completed assistant message is displayed.
+The application SHALL provide an authenticated responsive workspace for chat history, conversation, context, repository setup, safe Markdown, incremental Agent Turn activity, reattachment, Stop, and Presence Mode controls. The selected chat's header MUST contain the repository setup/status control, a rename control beside the title, and a Presence Mode dropdown beside Delete. The Context panel and its mobile entry point SHALL remain available and SHALL show the selected chat's interactive Compose-based website or Swagger preview when ready, with meaningful setup, loading, stopped, and error states otherwise. Explore, Propose and Apply SHALL share the same incremental activity and response streaming behavior: ordered expandable activity and safe Markdown response updates MUST be visible while the Agent Turn is running, and the complete response and expandable activity MUST remain available after completion. Agent activity SHALL show elapsed time while a turn runs and its final duration when a completed assistant message is displayed.
+
+Context SHALL provide address entry, Reload and Restart for Compose-based previews. It SHALL NOT provide preview history or Back/Forward controls. Registered localhost addresses entered in Context MUST route to the selected chat's preview. External navigation from the preview SHALL be permitted and SHALL use the browser directly rather than proxying external destinations through the chat gateway. Non-Compose preview integration and non-Compose restart fixes are outside this change's scope.
 
 #### Scenario: Streamed exploration is displayed
 
 ```gherkin
-Given an authenticated user starts exploration in a ready Development Workspace
+Given an authenticated user starts the Explore workflow in a ready Development Workspace
 When normalized Agent Turn events arrive
 Then expandable activity is displayed in order
 And safe Markdown response text is displayed incrementally
+And partial response text is visible while the Agent Turn is still running
+When the Agent Turn completes
+Then the complete assistant response is displayed once
+And its activity remains expandable
+```
+
+#### Scenario Outline: Propose and Apply share the same streaming checks as Explore
+
+```gherkin
+Given an authenticated user starts the <workflow> workflow in a ready Development Workspace
+When normalized Agent Turn events arrive
+Then expandable activity is displayed in order
+And safe Markdown response text is displayed incrementally
+And partial response text is visible while the Agent Turn is still running
+When the Agent Turn completes
+Then the complete assistant response is displayed once
+And its activity remains expandable
+
+Examples:
+| workflow |
+| Propose  |
+| Apply    |
 ```
 
 #### Scenario: Chat header exposes controls and repository state
@@ -60,28 +84,36 @@ Then the final duration appears beside Agent activity on the completed assistant
 #### Scenario: User interacts with a chat-local website
 
 ```gherkin
-Given an authenticated user has selected a Development Chat with a ready website preview
+Given an authenticated user has selected a Development Chat with a ready Compose website preview
 When the user opens Context
 Then the website can be used inside Context
 And the browser shows its localhost address
+And the preview toolbar offers address entry, Reload and Restart
 When the user enters a registered localhost path in the URL bar
 Then that path loads from the selected chat's preview
 ```
 
-#### Scenario: User opens Swagger and restarts the preview
+#### Scenario: User opens Swagger inside Context
 
 ```gherkin
-Given an authenticated user has selected a Development Chat with a ready API preview
+Given an authenticated user has selected a Development Chat with a ready Compose API preview
 When the user enters its localhost Swagger address in Context
 Then Swagger loads inside Context
+```
+
+#### Scenario: User restarts the Compose preview
+
+```gherkin
+Given an authenticated user has selected a Development Chat with a ready Compose website preview
 When the user selects Restart preview
 Then Context shows startup progress until that chat's preview is ready
+And the website can be used inside Context
 ```
 
 #### Scenario: Context does not show another chat's page
 
 ```gherkin
-Given an authenticated user has selected a Development Chat without a ready preview
+Given an authenticated user has selected a Development Chat without a ready Compose preview
 When the user opens Context
 Then Context shows that chat's setup or failure status
 And another chat's preview is not displayed
