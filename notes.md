@@ -72,6 +72,7 @@ To add:
 - a final cleanup after all the tests finishes
 - 1 stack and same docker services for the whole tests. Use reset API to reset.
 - often needs POC to verify behaviours or idea. This should also skip specs
+- response to be short and easy to understand
 
 Explore:
 - checkpoints during the AI conversation ( to rollback the stuff AI done after a turn)
