@@ -39,6 +39,6 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY-acceptance-provider-key}"
       OPENAI_BASE_URL: "http://127.0.0.1:8000/api/v1/testing/llm/v1"
       FASTAPI_ENV: development
-      FRONTEND_HOST: "http://127.0.0.1:${ACCEPTANCE_PORT:?Variable not set}"
+      FRONTEND_HOST: "${FRONTEND_HOST:?Variable not set}"
       SMTP_PORT: "1025"
       SMTP_TLS: "false"

@@ -24,6 +24,8 @@ class FakeLlmReply(BaseModel):
     tool_arguments: dict[str, Any] = Field(default_factory=dict)
     status_code: int = 500
     delay_seconds: float = Field(default=0, ge=0, le=30)
+    stream_chunk_size: int = Field(default=0, ge=0, le=100_000)
+    stream_chunk_delay_seconds: float = Field(default=0, ge=0, le=30)
 
 
 class FakeLlmRule(BaseModel):
@@ -242,7 +244,7 @@ def _response_object(reply: FakeLlmReply, response_id: str) -> dict[str, Any]:
     }
 
 
-def _response_events(response: dict[str, Any]) -> Iterator[str]:
+def _response_events(response: dict[str, Any], *, chunk_size: int = 0) -> Iterator[str]:
     sequence = 0
 
     def event(event_type: str, **values: Any) -> str:
@@ -269,14 +271,18 @@ def _response_events(response: dict[str, Any]) -> Iterator[str]:
             content_index=0,
             part={**content, "text": ""},
         )
-        yield event(
-            "response.output_text.delta",
-            item_id=item["id"],
-            output_index=0,
-            content_index=0,
-            delta=text,
-            logprobs=[],
-        )
+        chunks = [text] if not chunk_size else [
+            text[offset:offset + chunk_size] for offset in range(0, len(text), chunk_size)
+        ]
+        for chunk in chunks:
+            yield event(
+                "response.output_text.delta",
+                item_id=item["id"],
+                output_index=0,
+                content_index=0,
+                delta=chunk,
+                logprobs=[],
+            )
         yield event(
             "response.output_text.done",
             item_id=item["id"],
@@ -311,9 +317,11 @@ def _response_events(response: dict[str, Any]) -> Iterator[str]:
     yield event("response.completed", response=response)
 
 
-async def _wait_for_reply(reply: FakeLlmReply, request: Request) -> bool:
+async def _wait_for_reply(
+    reply: FakeLlmReply, request: Request, *, delay_seconds: float | None = None,
+) -> bool:
     work = current_work.get()
-    deadline = time.monotonic() + reply.delay_seconds
+    deadline = time.monotonic() + (reply.delay_seconds if delay_seconds is None else delay_seconds)
     while True:
         if (work is not None and work.cancelled.is_set()) or await request.is_disconnected():
             return False
@@ -324,11 +332,18 @@ async def _wait_for_reply(reply: FakeLlmReply, request: Request) -> bool:
 
 
 async def _delayed_response_events(reply: FakeLlmReply, response: dict[str, Any], request: Request) -> AsyncIterator[str]:
-    for index, event in enumerate(_response_events(response)):
+    emitted_text = False
+    for index, event in enumerate(_response_events(response, chunk_size=reply.stream_chunk_size)):
         # OpenCode may establish its step checkpoint from the initial events.
         # Delay content, never the created/in_progress streaming preamble.
         if index == 2 and not await _wait_for_reply(reply, request):
             return
+        if json.loads(event.removeprefix("data: "))["type"] == "response.output_text.delta":
+            if emitted_text and not await _wait_for_reply(
+                reply, request, delay_seconds=reply.stream_chunk_delay_seconds,
+            ):
+                return
+            emitted_text = True
         yield event
 
 

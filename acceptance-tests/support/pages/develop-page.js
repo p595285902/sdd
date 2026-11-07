@@ -222,7 +222,7 @@ class DevelopPage {
     });
   }
 
-  async startStreamedExploration(content) {
+  async observeStreamingResponse() {
     await this.page.evaluate(() => {
       window.__developObservedActivity = [];
       window.__developObservedResponses = [];
@@ -252,11 +252,56 @@ class DevelopPage {
       });
       window.__developActivityObserver.observe(document.body, {
         childList: true,
+        characterData: true,
         subtree: true,
       });
     });
+  }
+
+  async startStreamedExploration(content) {
+    await this.observeStreamingResponse();
     await this.page.getByRole('textbox', { name: 'Exploration message' }).fill(content);
     await this.page.getByRole('button', { name: 'Send exploration' }).click();
+  }
+
+  async startStreamingWorkflow(workflow, content) {
+    if (workflow === 'Explore') return this.startStreamedExploration(content);
+    await this.observeStreamingResponse();
+    if (workflow === 'Propose') {
+      await this.page.getByRole('button', { name: 'Make it happen' }).click();
+    } else if (workflow === 'Apply') {
+      await this.proposal().getByRole('button', { name: 'Approve' }).click();
+    } else {
+      throw new Error(`Unknown streaming workflow: ${workflow}`);
+    }
+  }
+
+  async expectPartialResponseWhileRunning(text, finalMarker) {
+    const streaming = this.page.getByRole('article', { name: 'Streaming assistant response' });
+    await expect(streaming.locator('strong')).toHaveText(text);
+    await expect(streaming).not.toContainText(finalMarker);
+    await expect(this.page.getByRole('button', { name: 'Stop Agent Turn' })).toBeEnabled();
+  }
+
+  completedResponse(text) {
+    return this.page.locator('article').filter({ hasText: text });
+  }
+
+  async expectCompletedResponseOnce(text) {
+    await expect(this.page.getByRole('article', { name: 'Streaming assistant response' })).toHaveCount(0);
+    await expect(this.completedResponse(text)).toHaveCount(1);
+    await expect(this.completedResponse(text).locator('img')).toHaveCount(0);
+  }
+
+  async expectCompletedActivityExpandable(text) {
+    const response = this.completedResponse(text);
+    const summary = response.locator('summary');
+    await expect(summary).toContainText('Agent activity');
+    await summary.click();
+    await expect(response.locator('ol')).toBeVisible();
+    await expect(response.locator('ol li').first()).toBeVisible();
+    await summary.click();
+    await expect(response.locator('ol')).not.toBeVisible();
   }
 
   proposal() {

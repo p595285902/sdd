@@ -286,6 +286,72 @@ Given(
   },
 );
 
+Given(
+  'an authenticated user starts the {word} workflow in a ready Development Workspace',
+  async function (workflow) {
+    assert.ok(['Explore', 'Propose', 'Apply'].includes(workflow));
+    this.streamingWorkflow = workflow;
+    if (workflow === 'Apply') {
+      await prepareUndecidedProposal(this, 'Streamed Apply');
+    } else {
+      await prepareReadyDevelopmentChat(this, `Streamed ${workflow}`);
+    }
+    await this.apiClient.configureTurnLifecycle({ timeoutSeconds: 30 });
+    this.streamedResponse = 'Repository summary';
+    this.streamedFinalMarker = 'Complete streaming response.';
+    const prefix = `**${this.streamedResponse}** <img src=x onerror=alert(1)>`;
+    this.streamedFullResponse = `${prefix} ${this.streamedFinalMarker}`;
+    const streamOptions = {
+      stream_chunk_size: prefix.length,
+      stream_chunk_delay_seconds: 8,
+    };
+    if (workflow === 'Propose') {
+      await this.apiClient.configureFakeProposal(
+        this.userToken, this.developmentChat.id, this.streamedFullResponse, streamOptions,
+      );
+    } else {
+      await this.apiClient.configureFakeLlm({
+        prompt: workflow === 'Explore'
+          ? '/openspec explore Summarize the repository'
+          : '/openspec apply',
+        replies: [{ kind: 'text', text: this.streamedFullResponse, ...streamOptions }],
+      });
+    }
+    await this.developPage.startStreamingWorkflow(workflow, 'Summarize the repository');
+  },
+);
+
+Then('partial response text is visible while the Agent Turn is still running', async function () {
+  await this.developPage.expectPartialResponseWhileRunning(this.streamedResponse, this.streamedFinalMarker);
+  const active = await this.apiClient.currentAgentTurn(this.userToken, this.developmentChat.id);
+  assert.equal(active.status(), 200, 'Partial text must be visible before turn completion');
+});
+
+When('the Agent Turn completes', async function () {
+  const { message, messages } = await this.apiClient.waitForDevelopmentMessage(
+    this.userToken, this.developmentChat.id, this.streamedFullResponse,
+  );
+  assert.equal(messages.data.filter(entry => entry.content === this.streamedFullResponse).length, 1);
+  assert.ok(message.activity.length > 0);
+  if (this.streamingWorkflow === 'Propose') {
+    assert.equal(message.kind, 'proposal');
+    assert.equal(message.proposal_state, 'undecided');
+    await this.developPage.expectProposalActions();
+  }
+});
+
+Then('the complete assistant response is displayed once', async function () {
+  await this.developPage.expectCompletedResponseOnce(this.streamedFinalMarker);
+});
+
+Then('its activity remains expandable', async function () {
+  await this.developPage.expectCompletedActivityExpandable(this.streamedFinalMarker);
+  await this.developPage.open(this.userToken);
+  await this.developPage.selectChat(this.developmentChat.title);
+  await this.developPage.expectCompletedResponseOnce(this.streamedFinalMarker);
+  await this.developPage.expectCompletedActivityExpandable(this.streamedFinalMarker);
+});
+
 When('normalized Agent Turn events arrive', async function () {
   await this.developPage.expectOrderedActivity([
     'Agent Turn started',

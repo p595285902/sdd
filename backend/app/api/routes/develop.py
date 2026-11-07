@@ -84,7 +84,7 @@ from app.services.develop_workspace import (
     setup_workspace,
     workspace_path,
 )
-from app.services.preview_compose import documented_compose
+from app.services.preview_compose import documented_compose, validated_graph
 
 router = APIRouter(prefix="/develop/chats", tags=["develop"])
 logger = logging.getLogger(__name__)
@@ -333,10 +333,6 @@ def _stream_response(
 
 
 def _start_turn_worker(target: Any, **kwargs: Any) -> None:
-    if not reset_enabled():
-        threading.Thread(target=target, kwargs=kwargs, daemon=True).start()
-        return
-
     def complete(**values: Any) -> None:
         turn = values["turn"]
         work = current_work.get()
@@ -349,7 +345,10 @@ def _start_turn_worker(target: Any, **kwargs: Any) -> None:
             if turn.terminal_state is None:
                 develop_turn_manager.finish_turn(turn, TurnTerminalState.failed, "Agent Turn failed")
 
-    acceptance_reset.barrier.start_thread(complete, kwargs)
+    if reset_enabled():
+        acceptance_reset.barrier.start_thread(complete, kwargs)
+    else:
+        threading.Thread(target=complete, kwargs=kwargs, daemon=True).start()
 
 
 def _emit_agent_event(turn: TurnSession, event: AgentEvent) -> None:
@@ -361,6 +360,77 @@ def _emit_agent_event(turn: TurnSession, event: AgentEvent) -> None:
         turn.emit("text", event.text or "")
     elif event.kind == AgentEventKind.error:
         turn.emit("error", event.text or "")
+
+
+def _publish_turn_message(turn: TurnSession, message: DevelopmentMessage) -> None:
+    turn.emit("result", DevelopmentMessagePublic.model_validate(message).model_dump_json())
+
+
+def _run_streamed_proposal(*, chat_id: uuid.UUID, turn: TurnSession) -> None:
+    with Session(engine) as session:
+        chat = session.get(DevelopmentChat, chat_id)
+        if chat is None:
+            develop_turn_manager.finish_turn(turn, TurnTerminalState.failed, "Development Chat not found")
+            return
+        provider_key = settings.OPENAI_API_KEY
+        if provider_key is None:
+            turn.emit("error", "Agent provider is not configured")
+            develop_turn_manager.finish_turn(turn, TurnTerminalState.failed)
+            return
+        messages = list(session.exec(
+            select(DevelopmentMessage).where(
+                DevelopmentMessage.chat_id == chat.id,
+                DevelopmentMessage.kind == DevelopmentMessageKind.message,
+            ).order_by(col(DevelopmentMessage.created_at), col(DevelopmentMessage.id))
+        ).all())
+        try:
+            completion = execute_proposal(
+                root=settings.DEVELOP_WORKSPACE_ROOT,
+                chat_id=chat.id,
+                messages=messages,
+                max_conversation_characters=settings.DEVELOP_AGENT_MAX_CONVERSATION_CHARACTERS,
+                session_id=chat.agent_session_id,
+                provider_key=provider_key.get_secret_value(),
+                provider_base_url=str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None,
+                repository_secret=settings.DEMO_GITHUB_TOKEN.get_secret_value() if settings.DEMO_GITHUB_TOKEN else None,
+                model=settings.DEVELOP_AGENT_MODEL,
+                timeout_seconds=settings.DEVELOP_TURN_TIMEOUT_SECONDS,
+                max_activity_parts=settings.DEVELOP_AGENT_MAX_ACTIVITY_PARTS,
+                max_part_characters=settings.DEVELOP_AGENT_MAX_PART_CHARACTERS,
+                max_response_characters=settings.DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS,
+                cancel_event=turn.cancel_event,
+                on_event=lambda event: _emit_agent_event(turn, event),
+            )
+        except (AgentCommandCancelled, AgentCommandTimeout):
+            state = turn.stop_reason or TurnTerminalState.timed_out
+            content = "Proposal Agent Turn timed out." if state == TurnTerminalState.timed_out else "Proposal Agent Turn was interrupted."
+            completion = None
+        except AgentCommandError as error:
+            logger.error("Agent proposal failed for chat %s: %s", chat.id, error)
+            turn.emit("error", "Agent proposal failed")
+            develop_turn_manager.finish_turn(turn, TurnTerminalState.failed, "Agent proposal failed")
+            return
+        completed_at = get_datetime_utc()
+        if completion is not None:
+            state = TurnTerminalState.completed
+            content = completion.response_text
+            activity = [part.model_dump() for part in completion.activity]
+            chat.agent_session_id = completion.session_id
+        else:
+            activity = [{"text": content}]
+        proposal = DevelopmentMessage(
+            role="assistant", content=content, activity=activity,
+            duration_seconds=turn.elapsed_seconds(), chat_id=chat.id,
+            created_at=completed_at,
+            kind=DevelopmentMessageKind.proposal if completion is not None else DevelopmentMessageKind.message,
+            proposal_state=DevelopmentProposalState.undecided if completion is not None else None,
+        )
+        chat.updated_at = completed_at
+        session.add(proposal)
+        session.add(chat)
+        session.commit()
+        _publish_turn_message(turn, proposal)
+        develop_turn_manager.finish_turn(turn, state, content)
 
 
 def _run_streamed_exploration(
@@ -450,6 +520,7 @@ def _run_streamed_exploration(
         session.add(assistant_message)
         session.add(chat)
         session.commit()
+        _publish_turn_message(turn, assistant_message)
         if completion is not None:
             after = snapshot_workspace(
                 root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id
@@ -538,6 +609,7 @@ def _run_streamed_apply(*, chat_id: uuid.UUID, turn: TurnSession) -> None:
         session.add(assistant_message)
         session.add(chat)
         session.commit()
+        _publish_turn_message(turn, assistant_message)
         if completion is not None:
             after = snapshot_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
             if relevant_turn_change(before, after):
@@ -1011,6 +1083,49 @@ async def browser_preview_socket(
         await websocket.close(code=1008)
 
 
+@router.get("/{chat_id}/preview/context", response_model=dict[str, str])
+def development_preview_context(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
+) -> Any:
+    """Describe Context without starting or integrating non-Compose runtimes."""
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not chat.workspace_ready:
+        return {"state": "unavailable", "message": "Set up the repository to preview this chat."}
+    try:
+        checkout = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+        documented = documented_compose(checkout)
+        if documented is None:
+            return {
+                "state": "needs_instructions", "runtime": "unsupported",
+                "message": "Context requires checkout-local Docker Compose startup instructions in README.md. Non-Compose previews are not supported in Context.",
+            }
+        validated_graph(checkout, *documented)
+    except (ValueError, FileNotFoundError, RuntimeError):
+        return {"state": "failed", "runtime": "compose", "message": "The documented Compose project is missing, unsafe or unsupported."}
+    try:
+        current = _preview_status(chat.id)
+    except httpx.HTTPError:
+        return {"state": "failed", "runtime": "compose", "message": "Preview controller unavailable."}
+    if current.get("state") == "ready" and current.get("runtime") != "compose":
+        return {
+            "state": "unsupported", "runtime": "unsupported",
+            "message": "This checkout has an existing non-Compose runtime. Context only supports Compose previews; this runtime has not been restarted.",
+        }
+    if current.get("state") == "ready" and "api_port" not in current:
+        classification = classify_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+        if classification.kind == "api_documentation":
+            initial_path = classification.entry_point or "/docs"
+            instructions = (checkout / "README.md").read_text(encoding="utf-8")
+            if re.search(re.escape(initial_path) + r"/(?=[\s`.,;:)\]}\"']|$)", instructions):
+                initial_path += "/"
+            current = {
+                **current, "initial_path": initial_path,
+                "api_port": current["initial_port"],
+            }
+            current.pop("website_port", None)
+    return {**current, "runtime": "compose"}
+
+
 @router.get("/{chat_id}/preview/status", response_model=dict[str, str])
 def development_preview_status(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
@@ -1191,6 +1306,35 @@ def read_development_messages(
     )
 
 
+@router.post("/{chat_id}/messages/propose/stream", response_model=None)
+def stream_development_chat_proposal(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID,
+) -> StreamingResponse:
+    chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    if not chat.workspace_ready:
+        raise HTTPException(status_code=409, detail="Development Workspace is not ready")
+    if settings.OPENAI_API_KEY is None:
+        raise HTTPException(status_code=503, detail="Agent provider is not configured")
+    try:
+        turn = develop_turn_manager.start_turn(
+            chat_id=chat.id, user_id=current_user.id,
+            user_limit=current_user.concurrent_agent_turn_limit,
+            presence_mode=chat.presence_mode,
+            replay_limit=settings.DEVELOP_TURN_REPLAY_LIMIT,
+            timeout_seconds=settings.DEVELOP_TURN_TIMEOUT_SECONDS,
+        )
+    except ChatTurnActiveError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except UserTurnLimitError as error:
+        raise HTTPException(status_code=429, detail=str(error))
+    turn.emit("session", chat.agent_session_id or "")
+    turn.emit("status", "Agent Turn started")
+    subscriber_id = uuid.uuid4().hex
+    buffered_events = turn.attach(subscriber_id)
+    _start_turn_worker(_run_streamed_proposal, chat_id=chat.id, turn=turn)
+    return _stream_response(turn, subscriber_id, buffered_events)
+
+
 @router.post(
     "/{chat_id}/messages/propose",
     response_model=DevelopmentMessagePublic,
@@ -1252,6 +1396,7 @@ def propose_development_chat(
             max_part_characters=settings.DEVELOP_AGENT_MAX_PART_CHARACTERS,
             max_response_characters=settings.DEVELOP_AGENT_MAX_RESPONSE_CHARACTERS,
             cancel_event=turn.cancel_event,
+            on_event=lambda event: _emit_agent_event(turn, event),
         )
     except AgentCommandError as error:
         develop_turn_manager.finish_turn(
@@ -1370,7 +1515,7 @@ def approve_development_proposal(
         raise HTTPException(status_code=409, detail="Proposal is already decided")
     session.commit()
     turn.emit("session", chat.agent_session_id or "")
-    turn.emit("status", "Apply Agent Turn started")
+    turn.emit("status", "Agent Turn started")
     subscriber_id = uuid.uuid4().hex
     buffered_events = turn.attach(subscriber_id)
     _start_turn_worker(_run_streamed_apply, chat_id=chat.id, turn=turn)

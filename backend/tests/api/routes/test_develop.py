@@ -26,6 +26,8 @@ from app.services.develop_agent import (
     AgentCommandCancelled,
     AgentCommandError,
     AgentCompletion,
+    AgentEvent,
+    AgentEventKind,
 )
 from app.services.develop_turns import (
     TurnEvent,
@@ -986,6 +988,47 @@ def test_create_proposal_uses_canonical_messages_and_persists_undecided_state(
     assert proposal.proposal_state == DevelopmentProposalState.undecided
 
 
+def test_streamed_proposal_relays_live_events_and_preserves_stored_decision_controls(
+    client: TestClient, superuser_token_headers: dict[str, str], db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    chat = DevelopmentChat(title="Stream proposal", owner_id=_superuser(db).id, workspace_ready=True)
+    db.add(chat)
+    db.add(DevelopmentMessage(role="user", content="Build this", chat_id=chat.id))
+    db.commit()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", SecretStr("provider-secret"))
+
+    def generate(**kwargs: object) -> AgentCompletion:
+        turn = develop_turn_manager.active_turn(chat.id)
+        assert turn is not None and turn.terminal_state is None
+        callback = kwargs["on_event"]
+        callback(AgentEvent(kind=AgentEventKind.activity, text="Writing proposal"))
+        callback(AgentEvent(kind=AgentEventKind.text, text="**Proposal** "))
+        assert turn.terminal_state is None
+        assert turn.replay()[-1].data == "**Proposal** "
+        callback(AgentEvent(kind=AgentEventKind.text, text="ready"))
+        return AgentCompletion(response_text="**Proposal** ready", activity=(AgentActivityPart(text="Writing proposal"),), session_id="ses_proposal")
+
+    monkeypatch.setattr("app.api.routes.develop.execute_proposal", generate)
+    response = client.post(f"{DEVELOP_CHATS_URL}/{chat.id}/messages/propose/stream", headers=superuser_token_headers)
+    assert response.status_code == 200
+    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert next(event["data"] for event in events if event["kind"] == "status") == "Agent Turn started"
+    assert [event["data"] for event in events if event["kind"] == "text"] == ["**Proposal** ", "ready"]
+    result = json.loads(next(event["data"] for event in events if event["kind"] == "result"))
+    assert result["kind"] == "proposal" and result["proposal_state"] == "undecided"
+    assert result["activity"] == [{"text": "Writing proposal"}]
+    assert result["duration_seconds"] >= 0
+    assert events[-1]["kind"] == "done"
+    db.expire_all()
+    stored = db.get(DevelopmentMessage, uuid.UUID(result["id"]))
+    assert stored is not None and stored.content == "**Proposal** ready"
+    assert stored.proposal_state == DevelopmentProposalState.undecided
+    assert develop_turn_manager.active_turn(chat.id) is None
+
+
 def test_reject_proposal_is_irreversible_and_starts_no_turn(
     client: TestClient,
     superuser_token_headers: dict[str, str],
@@ -1115,3 +1158,69 @@ def test_approve_weight_failure_keeps_proposal_undecided(
     assert response.status_code == 429
     db.refresh(proposal)
     assert proposal.proposal_state == DevelopmentProposalState.undecided
+
+
+@pytest.mark.parametrize("compose", [False, True])
+def test_context_rejects_existing_non_compose_runtime_after_checkout_conversion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, compose: bool,
+) -> None:
+    from app.api.routes import develop
+    from app.services.develop_preview_classification import PreviewClassification
+
+    chat = DevelopmentChat(title="Converted checkout", owner_id=uuid.uuid4(), workspace_ready=True)
+    monkeypatch.setattr(develop, "_get_chat", lambda **_: chat)
+    monkeypatch.setattr(develop, "workspace_path", lambda **_: tmp_path)
+    monkeypatch.setattr(develop, "documented_compose", lambda _: (tmp_path / "compose.yml", ("api",)))
+    monkeypatch.setattr(develop, "validated_graph", lambda *_: [])
+    ready = {"state": "ready", "initial_port": "8766", "initial_path": "/"}
+    if compose:
+        ready["runtime"] = "compose"
+    monkeypatch.setattr(develop, "_preview_status", lambda _: ready)
+    monkeypatch.setattr(develop, "classify_workspace", lambda **_: PreviewClassification("unknown"))
+    mutations = []
+    monkeypatch.setattr(develop.preview_controller, "start", lambda _: mutations.append("start"))
+    monkeypatch.setattr(develop.preview_controller, "restart", lambda _: mutations.append("restart"))
+
+    result = develop.development_preview_context(session=None, current_user=None, chat_id=chat.id)
+
+    assert not mutations
+    if compose:
+        assert result["state"] == "ready"
+        assert result["runtime"] == "compose"
+    else:
+        assert result["state"] == "unsupported"
+        assert result["runtime"] == "unsupported"
+        assert "non-Compose" in result["message"]
+        assert "initial_port" not in result
+
+
+@pytest.mark.parametrize(
+    "suffix,expected_path",
+    [("/", "/docs/"), ("/.", "/docs/"), ("/ ", "/docs/"),
+     ("/`", "/docs/"), ("/)", "/docs/"), ('/"', "/docs/"),
+     ("", "/docs"), (".", "/docs")],
+)
+def test_context_preserves_documented_swagger_slash_with_readme_punctuation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    suffix: str, expected_path: str,
+) -> None:
+    from app.api.routes import develop
+    from app.services.develop_preview_classification import PreviewClassification
+
+    chat = DevelopmentChat(title="Swagger checkout", owner_id=uuid.uuid4(), workspace_ready=True)
+    (tmp_path / "README.md").write_text(f"Swagger UI is at http://localhost:8766/docs{suffix}", encoding="utf-8")
+    monkeypatch.setattr(develop, "_get_chat", lambda **_: chat)
+    monkeypatch.setattr(develop, "workspace_path", lambda **_: tmp_path)
+    monkeypatch.setattr(develop, "documented_compose", lambda _: (tmp_path / "compose.yml", ("api",)))
+    monkeypatch.setattr(develop, "validated_graph", lambda *_: [])
+    monkeypatch.setattr(develop, "_preview_status", lambda _: {
+        "state": "ready", "runtime": "compose", "initial_port": "8766",
+        "initial_path": "/", "website_port": "8766",
+    })
+    monkeypatch.setattr(develop, "classify_workspace", lambda **_: PreviewClassification("api_documentation", "/docs"))
+
+    result = develop.development_preview_context(session=None, current_user=None, chat_id=chat.id)
+
+    assert result["initial_path"] == expected_path
+    assert result["api_port"] == "8766"
+    assert "website_port" not in result

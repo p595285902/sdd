@@ -64,13 +64,26 @@ export const reconcileMessages = (
   }
 }
 
+export const startAgentTurn = (
+  conversation: DevelopConversation,
+  now = Date.now(),
+): DevelopConversation => ({
+  ...conversation,
+  activity: [],
+  response: "",
+  lastSequence: 0,
+  running: true,
+  startedAt: now,
+  error: null,
+})
+
 export const startOptimisticTurn = (
   conversation: DevelopConversation,
   chatId: string,
   content: string,
   now = Date.now(),
 ): DevelopConversation => ({
-  ...conversation,
+  ...startAgentTurn(conversation, now),
   messages: [
     ...conversation.messages,
     {
@@ -81,12 +94,6 @@ export const startOptimisticTurn = (
       created_at: new Date(now).toISOString(),
     },
   ],
-  activity: [],
-  response: "",
-  lastSequence: 0,
-  running: true,
-  startedAt: now,
-  error: null,
 })
 
 export const applyStreamEvent = (
@@ -106,6 +113,19 @@ export const applyStreamEvent = (
   }
   if (event.kind === "text") {
     return { ...next, response: next.response + event.data }
+  }
+  if (event.kind === "result") {
+    const message = JSON.parse(event.data) as DevelopmentMessagePublic
+    if (typeof message.id !== "string" || message.role !== "assistant" || typeof message.content !== "string") {
+      throw new Error("Invalid Develop turn result")
+    }
+    return {
+      ...next,
+      messages: [...next.messages.filter(({ id }) => id !== message.id), message],
+      activity: [],
+      response: "",
+      startedAt: null,
+    }
   }
   if (event.kind === "error") {
     return { ...next, error: event.data, running: false }

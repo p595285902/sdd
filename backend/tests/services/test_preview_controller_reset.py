@@ -781,3 +781,22 @@ def test_conflicting_control_does_not_replace_active_reset(controller):
         assert error.value.code == 409
     finally:
         reset.operation_lock.release()
+
+
+@pytest.mark.parametrize("compose", [False, True])
+def test_status_marks_only_actual_compose_runtime(controller, monkeypatch, compose):
+    worker, _, _ = controller
+    chat_id = uuid.uuid4()
+    labels = {"sdd.preview.compose-service": "api"} if compose else {}
+    monkeypatch.setattr(worker, "inspect", lambda _: {
+        "Id": "runtime-id", "State": {"Status": "running", "Running": True},
+        "Config": {"Labels": labels},
+    })
+    worker.ready_services[chat_id] = {"initial_port": "8766", "initial_path": "/"}
+    result = worker.status(chat_id)
+    assert (result.get("runtime") == "compose") is compose
+    assert result["initial_port"] == "8766"
+    if not compose:
+        assert result == {
+            "id": "runtime-id", "state": "running", "initial_port": "8766", "initial_path": "/",
+        }

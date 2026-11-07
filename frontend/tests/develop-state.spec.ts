@@ -5,6 +5,7 @@ import {
   cacheConversation,
   emptyConversation,
   reconcileMessages,
+  startAgentTurn,
   startOptimisticTurn,
 } from "../src/features/develop/state"
 
@@ -71,6 +72,28 @@ test("deduplicates replayed stream events by sequence", () => {
   expect(replay.response).toBe("Hello")
   expect(replay).toBe(first)
 })
+
+for (const workflow of ["Explore", "Propose", "Apply"]) {
+  test(`${workflow} keeps a live partial response and retires it for its exact persisted result`, () => {
+    const running = startAgentTurn(emptyConversation(), 1000)
+    const partial = applyStreamEvent(running, { sequence: 1, kind: "text", data: "  **Ready** " })
+    expect(partial.running).toBe(true)
+    expect(partial.response).toBe("  **Ready** ")
+    const message = {
+      id: "assistant-result", chat_id: "chat-1", role: "assistant" as const,
+      content: "**Ready** now", activity: [{ text: "Inspecting repository" }],
+      duration_seconds: 2, created_at: "2026-09-24T12:00:00Z",
+      kind: workflow === "Propose" ? "proposal" : "message",
+      proposal_state: workflow === "Propose" ? "undecided" : null,
+    }
+    const result = applyStreamEvent(partial, { sequence: 2, kind: "result", data: JSON.stringify(message) })
+    const completed = applyStreamEvent(result, { sequence: 3, kind: "done", data: message.content })
+    expect(completed.running).toBe(false)
+    expect(completed.response).toBe("")
+    expect(completed.messages).toEqual([message])
+    expect(reconcileMessages(completed, [message as typeof completed.messages[number]]).messages).toEqual([message])
+  })
+}
 
 test("retires transient stream content after the assistant message persists", () => {
   const completed = {

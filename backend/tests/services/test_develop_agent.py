@@ -17,6 +17,8 @@ from app.services.develop_agent import (
     AgentEvent,
     AgentEventKind,
     BoundedAgentOutput,
+    OpenCodeEventNormalizer,
+    StreamingSecretScrubber,
     build_apply_prompt,
     build_explore_prompt,
     build_propose_prompt,
@@ -418,6 +420,142 @@ def test_exploration_rejects_missing_or_non_owning_workspace(tmp_path: Path) -> 
             max_response_characters=100,
             runner=RecordingAgentRunner(()),
         )
+
+
+def test_raw_provider_deltas_are_live_and_final_snapshots_are_not_duplicated() -> None:
+    normalizer = OpenCodeEventNormalizer(session_id="ses_live", secrets=())
+
+    def event(kind: str, **properties: object) -> tuple[AgentEvent, ...]:
+        return normalizer.normalize(json.dumps({"type": kind, "properties": {"sessionID": "ses_live", **properties}}))
+
+    assert event("message.updated", info={"id": "msg_user", "role": "user"}) == ()
+    assert event("message.part.updated", part={"id": "user_text", "messageID": "msg_user", "type": "text", "text": "prompt"}) == ()
+    event("message.updated", info={"id": "msg_assistant", "role": "assistant"})
+    event("message.part.updated", part={"id": "part_text", "messageID": "msg_assistant", "type": "text", "text": ""})
+    first = event("message.part.delta", messageID="msg_assistant", partID="part_text", field="text", delta="**Plan** ")
+    second = event("message.part.delta", messageID="msg_assistant", partID="part_text", field="text", delta="ready")
+    final = event("message.part.updated", part={"id": "part_text", "messageID": "msg_assistant", "type": "text", "text": "**Plan** ready", "time": {"end": 1}})
+    assert first == (AgentEvent(kind=AgentEventKind.text, text="**Plan** "),)
+    assert second == (AgentEvent(kind=AgentEventKind.text, text="ready"),)
+    assert final == ()
+    assert normalizer.normalize(json.dumps({"type": "message.part.delta", "properties": {"sessionID": "ses_other", "messageID": "msg_assistant", "partID": "part_text", "field": "text", "delta": "private"}})) == ()
+
+
+def test_incremental_redaction_handles_secrets_and_url_userinfo_split_across_deltas() -> None:
+    scrubber = StreamingSecretScrubber(("provider-secret",))
+    output = scrubber.push("Safe provider-")
+    assert output == "Safe "
+    output += scrubber.push("secret https://user:")
+    assert output == "Safe [REDACTED] "
+    output += scrubber.push("password@example.com/path ")
+    output += scrubber.push("done", final=True)
+    assert output == "Safe [REDACTED] https://[REDACTED]@example.com/path done"
+
+
+@pytest.mark.parametrize("workflow", ["explore", "propose", "apply"])
+def test_all_workflows_forward_only_bounded_live_output(tmp_path: Path, workflow: str) -> None:
+    chat_id = __import__("uuid").uuid4()
+    (tmp_path / str(chat_id)).mkdir()
+    emitted: list[AgentEvent] = []
+
+    class LiveRunner(RecordingAgentRunner):
+        def run(self, command, *, on_stdout_line=None, **kwargs):  # type: ignore[no-untyped-def]
+            assert on_stdout_line is not None
+            for line in self.lines:
+                on_stdout_line(line)
+                assert emitted  # Forwarded before runner completion.
+            return super().run(command, **kwargs)
+
+    arguments = {
+        "root": tmp_path, "chat_id": chat_id, "session_id": None, "provider_key": "key",
+        "provider_base_url": None, "repository_secret": None, "model": "openai/test",
+        "timeout_seconds": 2, "max_activity_parts": 1, "max_part_characters": 5,
+        "max_response_characters": 8,
+        "runner": LiveRunner((
+            '{"type":"step_start"}',
+            '{"type":"text","part":{"text":"Hello "}}',
+            '{"type":"text","part":{"text":"world"}}',
+        )), "on_event": emitted.append,
+    }
+    if workflow == "explore":
+        completion = execute_exploration(message="inspect", **arguments)
+    elif workflow == "propose":
+        completion = execute_proposal(messages=[type("Message", (), {"role": "user", "content": "inspect"})()], max_conversation_characters=100, **arguments)
+    else:
+        completion = execute_apply(**arguments)
+    assert completion.response_text == "Hello wo"
+    assert [event.text for event in emitted] == ["Think", "Hello ", "wo"]
+
+
+@pytest.mark.parametrize("session_id", [None, "ses_fixture"])
+def test_live_server_preserves_session_prompt_permissions_and_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_id: str | None,
+) -> None:
+    import subprocess
+
+    chat_id = __import__("uuid").uuid4()
+    (tmp_path / str(chat_id)).mkdir()
+    processes: list[subprocess.Popen[str]] = []
+    original_popen = subprocess.Popen
+
+    def record_process(*args, **kwargs):  # type: ignore[no-untyped-def]
+        process = original_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("app.services.develop_agent.subprocess.Popen", record_process)
+    monkeypatch.setattr(AgentCommandRunner, "_server_command", staticmethod(
+        lambda port: (sys.executable, str(PROCESS_FIXTURE), "opencode-server", str(port))
+    ))
+    events: list[tuple[AgentEvent, float]] = []
+    completion = execute_exploration(
+        root=tmp_path, chat_id=chat_id, message="inspect", session_id=session_id,
+        provider_key="key", provider_base_url=None, repository_secret=None,
+        model="openai/test", timeout_seconds=3, max_activity_parts=10,
+        max_part_characters=100, max_response_characters=100,
+        on_event=lambda event: events.append((event, time.monotonic())),
+    )
+    assert completion.session_id == "ses_fixture"
+    assert completion.response_text == "Partial response"
+    partials = [(event.text, timestamp) for event, timestamp in events if event.kind == AgentEventKind.text]
+    assert [text for text, _ in partials] == ["Partial ", "response"]
+    assert partials[1][1] - partials[0][1] >= 0.09
+    assert len(processes) == 1 and processes[0].poll() is not None
+
+
+@pytest.mark.parametrize("mode", ["cancel", "timeout", "failure"])
+def test_live_server_terminates_on_cancellation_timeout_and_startup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    import subprocess
+
+    processes: list[subprocess.Popen[str]] = []
+    original_popen = subprocess.Popen
+
+    def record_process(*args, **kwargs):  # type: ignore[no-untyped-def]
+        process = original_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("app.services.develop_agent.subprocess.Popen", record_process)
+    monkeypatch.setattr(AgentCommandRunner, "_server_command", staticmethod(
+        lambda _port: (sys.executable, str(PROCESS_FIXTURE), "failure" if mode == "failure" else "ignore-term")
+    ))
+    cancel = threading.Event()
+    timer = threading.Timer(0.1, cancel.set)
+    if mode == "cancel":
+        timer.start()
+    expected = {"cancel": AgentCommandCancelled, "timeout": AgentCommandTimeout, "failure": AgentCommandError}[mode]
+    try:
+        with pytest.raises(expected):
+            AgentCommandRunner(termination_grace_seconds=0.1).run(
+                ("opencode", "run", "--model", "openai/test", "inspect"),
+                cwd=tmp_path, env={}, timeout_seconds=0.2, cancel_event=cancel,
+                on_stdout_line=lambda _line: None,
+            )
+    finally:
+        timer.cancel()
+    assert len(processes) == 1 and processes[0].poll() is not None
 
 
 def test_minimal_agent_environment_drops_unrelated_values() -> None:
