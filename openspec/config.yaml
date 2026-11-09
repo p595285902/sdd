@@ -32,6 +32,9 @@ operations:
 #     tasks:
 #       - Break tasks into chunks of max 2 hours
 rules:
+     proposal:
+          - >-
+               Avoid repeating existing behaviors.
      specs:
           - >-
                Specs are Markdown: specs/<capability>/spec.md, with prose anywhere and 

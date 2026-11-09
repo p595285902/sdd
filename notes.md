@@ -68,6 +68,7 @@ reset checks takes around 25 secs total
 Added:
     docs(openspec): scope acceptance-only archive guidance
         -archive without sync when doing changes for acceptance-only 
+    config.yaml: avoid repeating existing behaviors
 To add:
 - a final cleanup after all the tests finishes
 - 1 stack and same docker services for the whole tests. Use reset API to reset.
