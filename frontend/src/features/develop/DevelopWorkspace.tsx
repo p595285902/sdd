@@ -8,7 +8,9 @@ import {
   GitBranch,
   History,
   Loader2,
+  Maximize2,
   MessageSquarePlus,
+  Minimize2,
   PanelRight,
   Pencil,
   Rocket,
@@ -83,6 +85,25 @@ export function DevelopWorkspace() {
   const [mobilePanel, setMobilePanel] = useState<"history" | "context" | null>(
     null,
   )
+  const [desktop, setDesktop] = useState(
+    () => window.matchMedia("(min-width: 1024px)").matches,
+  )
+  const [contextHidden, setContextHidden] = useState(false)
+  const [contextExpanded, setContextExpanded] = useState(false)
+  const contextTrigger = useRef<HTMLButtonElement>(null)
+  const contextVisible = desktop ? !contextHidden : mobilePanel === "context"
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 1024px)")
+    const update = () => setDesktop(media.matches)
+    media.addEventListener("change", update)
+    return () => media.removeEventListener("change", update)
+  }, [])
+  const closeContext = () => {
+    setContextHidden(true)
+    setContextExpanded(false)
+    setMobilePanel(null)
+    requestAnimationFrame(() => contextTrigger.current?.focus())
+  }
   const [cache, setCache] = useState<DevelopConversationCache>({})
   const [now, setNow] = useState(Date.now())
   const streams = useRef(new Map<string, AbortController>())
@@ -209,7 +230,11 @@ export function DevelopWorkspace() {
           body: content === undefined ? undefined : { content },
           signal: controller.signal,
         })) {
-          if (controller.signal.aborted || streams.current.get(chatId) !== controller) return
+          if (
+            controller.signal.aborted ||
+            streams.current.get(chatId) !== controller
+          )
+            return
           updateConversation(chatId, (current) =>
             applyStreamEvent(current, event),
           )
@@ -446,41 +471,58 @@ export function DevelopWorkspace() {
       aria-label="Development context"
       className="flex h-full min-h-0 min-w-0 flex-col border-l bg-background"
     >
-      <div className="flex h-14 items-center justify-between border-b px-4">
+      <div className="flex h-14 shrink-0 items-center justify-between gap-1 border-b px-3">
         <h2 className="text-sm font-semibold">Context</h2>
-        {mobilePanel === "context" && (
+        <div className="flex items-center gap-1">
           <Button
-            aria-label="Close panel"
-            onClick={() => setMobilePanel(null)}
+            aria-label={contextExpanded ? "Collapse Context" : "Expand Context"}
+            aria-expanded={contextExpanded}
+            disabled={!selected}
+            onClick={() => setContextExpanded((value) => !value)}
             size="icon-sm"
+            title={contextExpanded ? "Collapse Context" : "Expand Context"}
+            variant="ghost"
+          >
+            {contextExpanded ? <Minimize2 /> : <Maximize2 />}
+          </Button>
+          <Button
+            aria-label={desktop ? "Hide Context" : "Close panel"}
+            onClick={closeContext}
+            size={desktop ? "icon-sm" : "sm"}
+            title={desktop ? "Hide Context" : "Back to chat"}
             variant="ghost"
           >
             <X />
+            {!desktop && "Back to chat"}
           </Button>
-        )}
+        </div>
       </div>
       {selected ? (
         <DevelopPreview
           chatId={selected.id}
           key={selected.id}
-          open={mobilePanel === "context"}
+          open={contextVisible}
           setupPending={setupWorkspace.isPending}
-          workspaceReady={workspaceQuery.data?.ready ?? selected.workspace_ready}
+          workspaceReady={
+            workspaceQuery.data?.ready ?? selected.workspace_ready
+          }
         />
       ) : (
-        <p className="p-4 text-sm text-muted-foreground">Select a chat to open its preview.</p>
+        <p className="p-4 text-sm text-muted-foreground">
+          Select a chat to open its preview.
+        </p>
       )}
     </aside>
   )
 
   return (
-    <div className="flex min-h-[calc(100vh-7rem)] flex-col">
+    <div className="flex min-h-[calc(100vh-7rem)] flex-col lg:h-[calc(100dvh-12rem)] lg:min-h-[36rem]">
       <header className="flex items-center justify-between border-b pb-3">
         <div>
           <h1 className="text-2xl font-bold">Develop</h1>
           <p className="text-sm text-muted-foreground">Development Chats</p>
         </div>
-        <div className="flex gap-1 lg:hidden">
+        <div className={`flex gap-1 ${contextHidden ? "" : "lg:hidden"}`}>
           <Button
             className="md:hidden"
             aria-label="Open chat history"
@@ -492,7 +534,11 @@ export function DevelopWorkspace() {
           </Button>
           <Button
             aria-label="Open development context"
-            onClick={() => setMobilePanel("context")}
+            onClick={() => {
+              setContextHidden(false)
+              setMobilePanel("context")
+            }}
+            ref={contextTrigger}
             size="icon"
             variant="outline"
           >
@@ -501,7 +547,15 @@ export function DevelopWorkspace() {
         </div>
       </header>
 
-      <div className="relative grid min-h-0 flex-1 overflow-hidden md:grid-cols-[17rem_minmax(0,1fr)] lg:grid-cols-[17rem_minmax(0,1fr)_17rem]">
+      <div
+        className={`relative grid min-h-0 flex-1 overflow-hidden md:grid-cols-[17rem_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] ${
+          contextHidden
+            ? ""
+            : contextExpanded
+              ? "lg:grid-cols-[9rem_minmax(14rem,1fr)_minmax(0,2fr)] xl:grid-cols-[12rem_minmax(18rem,1fr)_minmax(0,2fr)]"
+              : "lg:grid-cols-[9rem_minmax(0,1fr)_17rem] xl:grid-cols-[17rem_minmax(0,1fr)_17rem]"
+        }`}
+      >
         <div className="hidden min-h-0 md:block">{history}</div>
         <section
           aria-label="Conversation"
@@ -863,9 +917,11 @@ export function DevelopWorkspace() {
           )}
         </section>
         <div
-          className={mobilePanel === "context"
-            ? "absolute inset-0 z-20 min-h-0 min-w-0 bg-background lg:static"
-            : "hidden min-h-0 min-w-0 lg:block"}
+          className={
+            contextVisible
+              ? `order-first col-span-full h-[36rem] min-h-0 min-w-0 w-full bg-background lg:order-none lg:col-span-1 lg:h-full lg:max-w-none ${contextExpanded ? "" : "mx-auto max-w-[17rem] lg:mx-0"}`
+              : "hidden"
+          }
         >
           {context}
         </div>

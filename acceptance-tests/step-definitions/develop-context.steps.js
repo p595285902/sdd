@@ -9,7 +9,7 @@ function contextPage(world) {
   return world.developContextPage;
 }
 
-async function prepareComposeChat(world, apiOnly = false) {
+async function prepareComposeChat(world, apiOnly = false, trackActivity = false) {
   await configureDemoRepository(true);
   world.userToken = await world.apiClient.authenticateSuperuser();
   world.previewLabel = `Compose preview ${randomUUID()}`;
@@ -19,6 +19,7 @@ async function prepareComposeChat(world, apiOnly = false) {
   await contextPage(world).prepareCompose(world.developmentChat.id, world.previewLabel, apiOnly);
   const started = await world.previewWorkloadPage.openContext(world.developmentChat.id, 120_000);
   assert.equal(started.body.state, 'ready', JSON.stringify(started.body));
+  if (trackActivity) await contextPage(world).observeActivity(world.developmentChat.id);
   await world.developPage.open(world.userToken);
   await world.developPage.selectChat(world.developmentChat.title);
 }
@@ -32,6 +33,39 @@ Given('an authenticated user has selected a Development Chat with a ready Compos
   { timeout: 150_000 }, async function () {
     await prepareComposeChat(this, true);
   });
+
+Given('an authenticated user has selected a Development Chat with a ready website preview',
+  { timeout: 150_000 }, async function () {
+    await prepareComposeChat(this);
+    await contextPage(this).expectReadyPanel(this.previewLabel);
+  });
+
+When('the user expands Context', async function () {
+  await contextPage(this).expandContext();
+});
+
+Then('the website has a wider interactive viewport', { timeout: 150_000 }, async function () {
+  await contextPage(this).expectWiderInteractiveViewports(this.previewLabel);
+});
+
+Then('the conversation controls remain accessible', async function () {
+  await contextPage(this).expectConversationControlsAccessible();
+});
+
+Given('a Development Chat has a running preview in a visible Context panel',
+  { timeout: 150_000 }, async function () {
+    await prepareComposeChat(this, false, true);
+    await contextPage(this).expectReadyPanel(this.previewLabel);
+    await contextPage(this).expectVisibleHeartbeat();
+  });
+
+When('the user hides Context or switches browser tabs', async function () {
+  await contextPage(this).hideContextAndSwitchTabs();
+});
+
+Then('Context stops reporting preview activity for that chat', async function () {
+  await contextPage(this).expectActivityStoppedForChat();
+});
 
 When('the user opens Context', async function () {
   await contextPage(this).open();

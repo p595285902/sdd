@@ -132,37 +132,44 @@ function PreviewBrowser({
         ref={bootstrap}
         title="Preview authorization"
       />
-      {error && (
-        <p className="p-2 text-xs text-destructive" role="alert">
-          {error}
-        </p>
-      )}
-      {loading && (
-        <p
-          className="flex items-center gap-2 p-2 text-xs text-muted-foreground"
-          role="status"
-        >
-          <Loader2 className="size-3 animate-spin" /> Loading preview…
-        </p>
-      )}
-      {destination.external && (
-        <p className="p-2 text-xs text-muted-foreground">
-          External pages load directly. Some sites do not allow embedding.
-        </p>
-      )}
-      {authorized && (
-        <iframe
-          className="min-h-80 w-full flex-1 border-0 bg-white"
-          key={reload}
-          onError={() => {
-            setLoading(false)
-            setError("Unable to load this preview address.")
-          }}
-          onLoad={() => setLoading(false)}
-          src={destination.src}
-          title="Development preview"
-        />
-      )}
+      <div className="relative min-h-80 flex-1">
+        {authorized && (
+          <iframe
+            className="absolute inset-0 h-full w-full border-0 bg-white"
+            key={reload}
+            onError={() => {
+              setLoading(false)
+              setError("Unable to load this preview address.")
+            }}
+            onLoad={() => setLoading(false)}
+            src={destination.src}
+            title="Development preview"
+          />
+        )}
+        <div className="pointer-events-none absolute inset-x-0 top-0">
+          {error && (
+            <p
+              className="bg-background/95 p-2 text-xs text-destructive"
+              role="alert"
+            >
+              {error}
+            </p>
+          )}
+          {loading && (
+            <p
+              className="flex items-center gap-2 bg-background/95 p-2 text-xs text-muted-foreground"
+              role="status"
+            >
+              <Loader2 className="size-3 animate-spin" /> Loading preview…
+            </p>
+          )}
+          {destination.external && (
+            <p className="bg-background/95 p-2 text-xs text-muted-foreground">
+              External pages load directly. Some sites do not allow embedding.
+            </p>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -179,24 +186,17 @@ export function DevelopPreview({
   open: boolean
 }) {
   const queryClient = useQueryClient()
-  const [desktop, setDesktop] = useState(
-    () => window.matchMedia("(min-width: 1024px)").matches,
-  )
   const [sessionGeneration, setSessionGeneration] = useState(0)
   const attemptedStart = useRef(false)
   const actionController = useRef<AbortController | null>(null)
-  const active = desktop || open
+  const active = open
   const contextKey = ["development-preview-context", chatId]
   const sessionKey = ["development-preview-session", chatId, sessionGeneration]
 
   useEffect(() => {
-    const media = window.matchMedia("(min-width: 1024px)")
-    const update = () => setDesktop(media.matches)
-    media.addEventListener("change", update)
-    return () => media.removeEventListener("change", update)
-  }, [])
-
-  useEffect(() => () => actionController.current?.abort(), [active])
+    if (!active) actionController.current?.abort()
+    return () => actionController.current?.abort()
+  }, [active])
 
   const contextQuery = useQuery({
     queryKey: contextKey,
@@ -290,14 +290,36 @@ export function DevelopPreview({
 
   useEffect(() => {
     if (!ready) return
+    let timer: number | undefined
+    let pending: AbortController | null = null
     const heartbeat = () => {
+      if (document.visibilityState !== "visible" || pending) return
+      const controller = new AbortController()
+      pending = controller
+      void requestPreview(chatId, "activity", "POST", controller.signal)
+        .catch(() => undefined)
+        .finally(() => {
+          if (pending === controller) pending = null
+        })
+    }
+    const stopHeartbeat = () => {
+      window.clearInterval(timer)
+      pending?.abort()
+      pending = null
+    }
+    const syncVisibility = () => {
+      stopHeartbeat()
       if (document.visibilityState === "visible") {
-        void requestPreview(chatId, "activity", "POST").catch(() => undefined)
+        heartbeat()
+        timer = window.setInterval(heartbeat, 30_000)
       }
     }
-    heartbeat()
-    const timer = window.setInterval(heartbeat, 30_000)
-    return () => window.clearInterval(timer)
+    syncVisibility()
+    document.addEventListener("visibilitychange", syncVisibility)
+    return () => {
+      document.removeEventListener("visibilitychange", syncVisibility)
+      stopHeartbeat()
+    }
   }, [ready, chatId])
 
   const error = action.error || contextQuery.error || sessionQuery.error

@@ -182,6 +182,185 @@ for (const width of [1440, 390, 900]) {
   })
 }
 
+for (const width of [1440, 1024, 390, 900]) {
+  test(`Context expands without losing the page or conversation controls at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await mockPreview(page)
+    await page.goto("/develop")
+    if (width < 1024)
+      await page
+        .getByRole("button", { name: "Open development context" })
+        .click()
+    await expect(
+      preview(page).getByRole("button", { name: "Add item" }),
+    ).toBeVisible()
+    await preview(page).getByRole("button", { name: "Add item" }).click()
+    const frame = panel(page).locator('iframe[title="Development preview"]')
+    const original = await frame.elementHandle()
+    const before = await frame.boundingBox()
+    expect(before).not.toBeNull()
+    const expand = panel(page).getByRole("button", { name: "Expand Context" })
+    await expand.focus()
+    await page.keyboard.press("Enter")
+    const after = await frame.boundingBox()
+    expect(after).not.toBeNull()
+    expect(after!.width).toBeGreaterThan(before!.width)
+    expect(await original!.evaluate((element) => element.isConnected)).toBe(
+      true,
+    )
+    await expect(preview(page).locator("output")).toHaveText("Items: 1")
+    await expect(
+      panel(page).getByRole("button", { name: "Collapse Context" }),
+    ).toBeFocused()
+    for (const control of [
+      page.getByRole("textbox", { name: "Exploration message" }),
+      page.getByRole("button", { name: "Send exploration" }),
+      page.getByRole("combobox", { name: "Presence Mode" }),
+      page.getByRole("button", { name: "Delete Development Chat" }),
+    ]) {
+      await expect(control).toBeVisible()
+      const box = await control.boundingBox()
+      expect(box!.x).toBeGreaterThanOrEqual(0)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width)
+    }
+    const conversation = await page
+      .getByRole("region", { name: "Conversation" })
+      .boundingBox()
+    const context = await panel(page).boundingBox()
+    expect(
+      conversation!.x + conversation!.width <= context!.x + 1 ||
+        context!.y + context!.height <= conversation!.y + 1,
+    ).toBe(true)
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true)
+    await panel(page).getByRole("button", { name: "Collapse Context" }).click()
+    expect((await frame.boundingBox())!.width).toBeCloseTo(before!.width, 0)
+    await expect(preview(page).locator("output")).toHaveText("Items: 1")
+  })
+}
+
+test("navigation and loading notices keep the embedded viewport dimensions stable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await mockPreview(page)
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route(`${origin}/details`, async (route) => {
+    await held
+    await route.fulfill({ contentType: "text/html", body: "<h1>Details</h1>" })
+  })
+  await page.goto("/develop")
+  await expect(
+    preview(page).getByRole("button", { name: "Add item" }),
+  ).toBeVisible()
+  const frame = panel(page).locator('iframe[title="Development preview"]')
+  const before = await frame.boundingBox()
+  await panel(page)
+    .getByRole("textbox", { name: "Preview address" })
+    .fill("localhost:8765/details")
+  await panel(page)
+    .getByRole("textbox", { name: "Preview address" })
+    .press("Enter")
+  await expect(panel(page).getByRole("status")).toContainText("Loading preview")
+  expect(await frame.boundingBox()).toEqual(before)
+  release()
+  await expect(
+    preview(page).getByRole("heading", { name: "Details" }),
+  ).toBeVisible()
+  expect(await frame.boundingBox()).toEqual(before)
+  await panel(page)
+    .getByRole("textbox", { name: "Preview address" })
+    .fill("https://example.com/context-preview")
+  await panel(page)
+    .getByRole("textbox", { name: "Preview address" })
+    .press("Enter")
+  await expect(
+    preview(page).getByRole("heading", { name: "External page" }),
+  ).toBeVisible()
+  expect(await frame.boundingBox()).toEqual(before)
+})
+
+for (const width of [1440, 390]) {
+  test(`visible-only activity stops on close, tab hide and chat switch at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await page.clock.install()
+    const calls = await mockPreview(page)
+    const activity = () =>
+      calls.filter((call) => call === `${first}/activity`).length
+    await page.goto("/develop")
+    if (width < 1024) {
+      await expect(
+        page.getByRole("heading", { name: "First chat" }),
+      ).toBeVisible()
+      expect(activity()).toBe(0)
+      await page
+        .getByRole("button", { name: "Open development context" })
+        .click()
+    }
+    await expect(
+      preview(page).getByRole("button", { name: "Add item" }),
+    ).toBeVisible()
+    await expect.poll(activity).toBeGreaterThan(0)
+    const initial = activity()
+    await page.clock.runFor(31_000)
+    await expect.poll(activity).toBeGreaterThan(initial)
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "hidden",
+      })
+      document.dispatchEvent(new Event("visibilitychange"))
+    })
+    const hidden = activity()
+    await page.clock.runFor(65_000)
+    expect(activity()).toBe(hidden)
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      })
+      document.dispatchEvent(new Event("visibilitychange"))
+    })
+    await expect.poll(activity).toBeGreaterThan(hidden)
+    await panel(page)
+      .getByRole("button", {
+        name: width < 1024 ? "Close panel" : "Hide Context",
+      })
+      .click()
+    const closed = activity()
+    await expect(panel(page)).toBeHidden()
+    await page.clock.runFor(65_000)
+    expect(activity()).toBe(closed)
+    await expect(
+      page.getByRole("button", { name: "Open development context" }),
+    ).toBeFocused()
+    await page.getByRole("button", { name: "Open development context" }).click()
+    await expect.poll(activity).toBeGreaterThan(closed)
+    if (width < 768) {
+      await panel(page).getByRole("button", { name: "Close panel" }).click()
+      await page.getByRole("button", { name: "Open chat history" }).click()
+    }
+    await page
+      .getByRole("navigation", { name: "Development Chats" })
+      .getByRole("button", { name: "Second chat" })
+      .click()
+    const switched = activity()
+    await page.clock.runFor(65_000)
+    expect(activity()).toBe(switched)
+    expect(calls.some((call) => call === `${second}/activity`)).toBe(false)
+  })
+}
+
 test("API-only Swagger is the initial requested page and runs scripts", async ({
   page,
 }) => {
