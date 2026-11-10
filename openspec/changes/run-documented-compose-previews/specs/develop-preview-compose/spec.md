@@ -7,6 +7,46 @@
 Reason: Per-service non-root execution and the old restricted service model conflict with native application images and sandbox-local Compose resources.
 Migration: Apply aggregate limits and platform-boundary protections to the dedicated native Compose sandbox as defined below.
 
+## MODIFIED Requirements
+
+### Requirement: Documented Compose workflows start per chat
+The system SHALL use an existing Compose file only when the selected checkout's root README calls for it, including through checkout-local linked instructions. A trusted adapter SHALL validate the resolved model and all required dependencies before building or starting any service. It SHALL start all services required by the website, including its API, under a private chat-unique project without directly published platform ports or injected platform control sockets, and MUST NOT generate or change the checkout's Compose file. Services SHALL use their chat's private network and MUST NOT be attached to platform or other chats' private networks. The explicitly configured privileged outer-sandbox exception SHALL NOT authorize project-requested host networking, platform Docker socket mounts or privileged inner services. These attachment and preflight controls MUST NOT be presented as guaranteeing that hostile code cannot reach the host from a privileged outer sandbox.
+
+#### Scenario: Website requires an API service
+
+```gherkin
+Given a Development Chat checkout has a README describing an existing Compose file with website and API services
+When that chat's preview starts
+Then the website and API start in that chat's private Compose project
+And another chat with the same repository uses a different Compose project
+```
+
+#### Scenario: Compose dependencies communicate only within their chat
+
+```gherkin
+Given a Development Chat checkout has a documented Compose website that depends on an API
+When the chat's private Compose project starts
+Then the website can reach its API by service name within that chat's network
+And neither service is attached to the platform or another chat's private network
+```
+
+#### Scenario: Compose is not documented
+
+```gherkin
+Given a Development Chat checkout has runnable README commands but no documented Compose file
+When that chat's preview starts
+Then the documented commands run without generating a Compose file
+```
+
+#### Scenario: Unsafe Compose configuration is rejected
+
+```gherkin
+Given a documented Compose file requests host networking or a Docker socket mount
+When that chat's preview starts
+Then the unsafe preview configuration is rejected
+And requested host networking and Docker socket mounts are not provisioned
+```
+
 ## ADDED Requirements
 
 ### Requirement: Native Compose executes documented initialization and startup
@@ -53,7 +93,7 @@ Then the item is saved through the application's API and database
 ```
 
 ### Requirement: Native Compose resources are bounded by their sandbox
-The system SHALL confine the native daemon, builds, application containers, networks, volumes and writable data to the owning chat's resource-bounded sandbox. Only checkout-local build/bind inputs and explicitly permitted public image, package and build sources SHALL be available; platform secrets, platform host paths/control sockets and other chats' resources MUST remain unreachable. Resource limits SHALL cover the whole sandbox and its nested processes, storage and lifetime, not only individual application containers. Native application images and their required users SHALL be supported without imposing the old Python/Node-only service whitelist; sandbox-boundary violations MUST still be rejected. Sandbox-local publication or storage MUST NOT be mistaken for publication or mounts on the platform host. Failure, restart, deletion or expiry SHALL remove only that chat's runtime resources while preserving durable launch history until chat deletion.
+The system SHALL place the native daemon, builds, application containers, networks, volumes and writable data in the owning chat's resource-bounded sandbox. Build/bind inputs SHALL be limited to the selected checkout, and image, package and build acquisition SHALL use explicitly permitted public sources. Provisioning MUST NOT inject platform secrets, platform host bind mounts/control sockets or other chats' checkouts; project requests for those resources or privileged inner services MUST be rejected. An explicitly configured privileged outer sandbox SHALL be permitted only for trusted projects on a dedicated Docker host or VM, with its private daemon still running rootless; this exception MUST NOT be represented as making platform resources unreachable to malicious or compromised code. Resource limits SHALL cover the whole sandbox and its nested processes, storage and lifetime, not only individual application containers. Native application images and their required users SHALL be supported without imposing the old Python/Node-only service whitelist; project-requested violations of the configured sandbox policy MUST still be rejected. Sandbox-local publication or storage MUST NOT be mistaken for publication or mounts on the platform host. Failure, restart, deletion or expiry SHALL remove only that chat's runtime resources while preserving durable launch history until chat deletion.
 
 #### Scenario: Nested workloads cannot exceed their sandbox budget
 
@@ -61,5 +101,5 @@ The system SHALL confine the native daemon, builds, application containers, netw
 Given a Development Chat has a running native Compose sandbox with configured resource limits
 When its project creates additional services or build processes
 Then those processes remain within the owning sandbox's aggregate resource limits
-And no additional platform resources become accessible to the project
+And no platform secrets, host bind mounts or control sockets are injected into the sandbox
 ```

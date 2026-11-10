@@ -5,7 +5,7 @@ Context rejects ordinary documented Compose workflows: the observed demo documen
 ## What Changes
 
 - Resolve a documented Compose startup sequence from the selected checkout's root README and linked checkout-local documentation, including setup commands, working directories, environment files, and the application's entry point. Do not invent commands or rewrite the project's Compose files.
-- Execute native Docker Compose inside a resource-bounded containerized sandbox owned by one Development Chat, with a dedicated Docker daemon and filesystem. Support ordinary Compose configuration, automatic override merging, documented initialization, and long-running `watch` without granting access to the platform's Docker socket or credentials.
+- Execute native Docker Compose inside a resource-bounded containerized sandbox owned by one Development Chat, with a dedicated rootless Docker daemon and filesystem. Support ordinary Compose configuration, automatic override merging, documented initialization, and long-running `watch` without injecting the platform's Docker socket or credentials. For now, deployment configuration may explicitly permit a privileged outer sandbox for trusted projects on a dedicated Docker host or VM; this weakens host isolation and is not a security boundary for hostile projects or mutually untrusted chats.
 - Allow documented project-local `.env`/environment files; isolate them from platform configuration and redact known secret values before persisting or streaming output.
 - **BREAKING:** replace automatic startup on Context opening or Agent Turn completion with a Launch button beside Expand. Clicking Launch executes immediately without a separate approval dialog; preserve existing Reload/Restart behavior without implicit launches.
 - Persist ordered commands, stdout/stderr, and run status as chat-visible execution records, independent of Agent Turns and reconnectable after refresh.
@@ -23,7 +23,7 @@ Context rejects ordinary documented Compose workflows: the observed demo documen
 - `develop-preview-compose`: Native documented multi-step Compose execution and ordinary Compose semantics inside a per-chat sandbox instead of a bespoke service subset.
 - `develop-preview-instructions`: Checkout-local linked documentation and project configuration, with actionable errors for incomplete or conflicting instructions rather than blanket rejection of Compose.
 - `develop-preview-startup`: Explicit launch only, readiness independent of a long-running startup command's exit, and no startup triggered by Context or completed turns.
-- `develop-preview-runtime`: A dedicated Docker daemon/filesystem per chat, bounded sandbox resources, and project-local secrets without platform control or credential access.
+- `develop-preview-runtime`: A dedicated rootless Docker daemon/filesystem per chat, bounded sandbox resources, project-local secrets without injected platform control or credentials, and an explicitly configured privileged outer-sandbox option for trusted deployments.
 - `develop-interface`: Launch beside Expand, persistent live execution output in the conversation, and application-only Context presentation without changing the layout.
 - `develop-preview-routing`: Register only application-facing routes, not every published sandbox port or auxiliary web service.
 

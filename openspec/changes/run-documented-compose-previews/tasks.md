@@ -2,11 +2,30 @@
 
 The JavaScript acceptance project already exists; no first-time scaffolding is needed. This is an unchecked implementation checklist, not authorization to implement or commit during proposal creation. Release the specs zone through a separately authorized commit or stash before code edits. Implement only against this active change. Run the effective acceptance suite after every code change; do not declare code work complete while any scenario fails. Commit only when authorized, with specs and code in separate commits.
 
-Each step task below means: bind the quoted pending step through an intent-level page object, observe the relevant failure, implement its product behavior, and verify it. Reuse shared step patterns/page methods without duplicate definitions. Do not satisfy a step with fixture-only assertions or disguise process output as assistant activity. The inventory comes from the planning dry-run: 173 unique undefined step texts across 43 scenarios; previously defined regression steps are reused. Unchanged requirements remain in the source specs rather than being repeated in this delta.
+Each step task below means: bind the quoted pending step through an intent-level page object, observe the relevant failure, implement its product behavior, and verify it. Reuse shared step patterns/page methods without duplicate definitions. Do not satisfy a step with fixture-only assertions or disguise process output as assistant activity. The original planning dry-run reported 173 unique undefined step texts across 43 delta scenarios; the 2026-11-10 privilege revision adds explicit privileged-deployment coverage and updates the inherited checkout/network-attachment and denied-host-option assertions. Reuse previously defined regression steps and regenerate the effective inventory after revisions. Unchanged requirements remain in the source specs rather than being repeated in this delta.
 
-- [ ] 1.1 Prove a pinned rootless Docker/Compose sandbox can build and run the demo-like workflow, named volumes, fixed sandbox-local ports/names and watch without a platform socket, privileged host access or shared-daemon fallback; document deployment prerequisites and stop if infeasible.
+- [ ] 1.1 Prove a pinned rootless Docker/Compose sandbox can build and run the demo-like workflow, named volumes, fixed sandbox-local ports/names and watch without a platform socket, injected platform credentials or shared-daemon fallback; permit an explicitly configured privileged outer container for trusted projects on a dedicated Docker host/VM, document the weakened host isolation and deployment prerequisites, and stop if infeasible within that policy.
 - [ ] 1.2 Prove aggregate resource accounting, private image/package acquisition, selected-checkout-only synchronization and complete nested-resource cleanup on the supported Docker deployment.
 - [ ] 1.3 Add deterministic native-Compose and login/item fixtures through `acceptance-tests/support/pages/preview-workload-page.js`; do not depend on the live demo container, workspace UUID, external repository branch or production credentials.
+
+### Feasibility evidence — privileged smoke test passed; full gate pending
+
+- Tested the available `rancher-desktop` Docker context: Linux/arm64 Engine 29.5.3, Alpine Linux v3.24, cgroup v2, overlay2, and the deployment's default seccomp profile. The documented production Linux Docker Engine server has not been tested; this result does not establish that every compliant deployment is infeasible.
+- Pinned probe image: `docker:28.5.1-dind-rootless@sha256:87d03cfe51f2bf87eec6dda1922dc572da4d37a1d21c5ca8e8b22c8a1fa107cc`, containing Docker Compose v2.40.3 and running as the image's `rootless` user.
+- Ran a disposable outer container with no host/socket/workspace mounts, no published ports, no added privileges, no networking, and aggregate limits of one CPU, 1 GiB memory and 256 processes. A 30-second timeout bounded daemon startup. Starting `/usr/local/bin/dockerd-entrypoint.sh dockerd --host=unix:///run/user/1000/docker.sock` exited 1 with `[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: operation not permitted`.
+- Docker's rootless-in-Docker documentation requires `--privileged` to disable seccomp, AppArmor and mount masks: <https://docs.docker.com/engine/security/rootless/tips/>. That recipe conflicted with the original no-privileged-host-access requirement and was not attempted during the initial gate. A later user-authorized diagnostic and policy revision are recorded below. No shared-daemon fallback was attempted.
+- The original unprivileged gate could not demonstrate nested user namespaces/subordinate ID mapping, rootless networking/storage or effective outer aggregate CPU/memory/process/disk/lifetime bounds. At that point builds, named volumes, fixed sandbox-local names/ports, watch, acquisition, synchronization and nested cleanup were unverified because the private daemon could not start; later privileged smoke-test evidence and the approved policy revision are recorded below.
+- Both probes used `--rm`; the exact feasibility label has no remaining containers. No application deployment was changed. Only this task note was edited; no product/test code was changed, and the acceptance gate was not run.
+- Retried at the user's request on 2026-11-09 with the same pinned image and unprivileged bounds. The context, Engine version and reported security profile were unchanged; daemon startup again exited 1 with the same RootlessKit `operation not permitted` error. Verified no containers remained under the exact feasibility label after the retry.
+- Follow-up diagnosis on 2026-11-09 isolated the first blocker to the outer container's seccomp policy, not globally disabled user namespaces: the VM reports `user.max_user_namespaces = 23826`, and its unprivileged `lima` user (no effective capabilities, `Seccomp: 0`) successfully runs `unshare -Ur id`. The image's rootless user has subordinate UID/GID mappings, but `unshare -Ur true` fails with `Operation not permitted` under `Seccomp: 2`.
+- Read-only inspection of `/etc/rancher-desktop/seccomp.json` found default `SCMP_ACT_ERRNO`/errno 1, `unshare` allowed only with `CAP_SYS_ADMIN`, and namespace-creating `clone` flags excluded from the ordinary allow rule. The sandbox does not receive `CAP_SYS_ADMIN`. No sysctls, seccomp policies, capabilities or deployment settings were changed. The diagnostic container was removed.
+- Before the privileged diagnostic was authorized, the proposed next experiment was a separately approved container-specific seccomp exception. The subsequent diagnostic and policy revision supersede that proposal. Do not disable seccomp globally or infer that removing one namespace blocker proves the full feasibility gate.
+- At the user's explicit request on 2026-11-09, ran one disposable `--privileged` diagnostic, not a product/deployment change. The same pinned rootless image started its private Engine 28.5.1 with overlay2 and Compose v2.40.3. The outer sandbox retained one CPU, 1 GiB memory and 512-process limits, `--network none`, no host/socket mounts and no published platform ports; only image-declared anonymous volumes were attached.
+- The privileged smoke test passed an offline native Compose image build using cached BusyBox image `sha256:e0e8b3cbfed68a90084781e2962f9c0deead51c5a3f11a488eef0283a4284bc2`, one-off initialization, a named volume, a fixed nested container name, detached startup, and HTTP through sandbox-local published port 18080. `compose down --volumes --rmi local` left no private containers or volumes. Outer container `sdd-privileged-probe-b3ca4741a4c1` and both anonymous volumes were removed and independently verified absent. The full demo, watch, two-chat isolation and effective resource enforcement were not tested.
+- The smoke test did not satisfy task 1.1's original no-privileged-host-access requirement. At the time only task notes changed; no product/test code or deployment configuration changed, and the acceptance gate was not run.
+- On 2026-11-10 the user approved spec-only revisions permitting an explicitly configured privileged outer sandbox for now, restricted to trusted projects on a dedicated Docker host/VM. The private daemon remains rootless; no platform socket, host bind mount, platform credential or other checkout is injected, and resource limits plus application-only forwarding remain required. Privileged mode is not protection against hostile projects or secure multi-tenancy.
+- Task 1.1 remains unchecked until the full demo-like initialization/watch workflow, normal application images and required sandbox-local behavior are proven under that policy. The basic daemon/build/volume/HTTP smoke test is partial evidence only; task 1.2's effective aggregate bounds and acquisition/synchronization/cleanup checks remain pending. The old privilege prohibition alone no longer blocks the gate. This spec revision does not implement, deploy, commit, sync or archive anything.
+- Spec-only verification on 2026-11-10: strict OpenSpec validation and extracted Gherkin lint passed. Effective dry-run `privileged-spec-final-20261110` freshly discovered 132 scenarios, including 50 from this change, with no duplicate assignment IDs or archived/backlog scenarios loaded. Superseded runtime/Compose rules are excluded, and responsive-layout/visibility scenarios remain loaded. All 183 unique undefined step texts exactly match the pending binding checklist; all 191 implementation tasks remain unchecked. HTML discovery reports are under `acceptance-tests/reports/privileged-spec-final-20261110-*.html`. This is not a passing real acceptance gate; the application was not run for this spec-only revision.
 
 ## 2. Step definitions — instruction discovery and project configuration
 
@@ -50,7 +69,7 @@ Integrate `preview_controller.py`, `develop_preview_runtime.py`, `preview_worksp
 - [ ] 3.6 Bind `a Development Chat's native Compose command executes`.
 - [ ] 3.7 Bind `Docker connection settings select only that chat's private daemon`.
 - [ ] 3.8 Bind `platform Docker configuration and credentials are absent from its execution environment`.
-- [ ] 3.9 Bind `the deployment cannot provide the required private Docker sandbox without platform host privileges`.
+- [ ] 3.9 Bind `the deployment cannot provision a private Docker sandbox within its configured privilege policy`.
 - [ ] 3.10 Bind `the user launches a preview`.
 - [ ] 3.11 Bind `launch fails with an actionable diagnostic retained in the chat`.
 - [ ] 3.12 Bind `execution does not fall back to the platform's shared Docker daemon`.
@@ -65,6 +84,14 @@ Integrate `preview_controller.py`, `develop_preview_runtime.py`, `preview_worksp
 - [ ] 3.21 Bind `execution status is reconciled`.
 - [ ] 3.22 Bind `the chat shows a terminal interrupted status for that execution`.
 - [ ] 3.23 Bind `no replacement sandbox starts without an explicit user action`.
+- [ ] 3.24 Bind `a trusted deployment explicitly enables privileged outer preview sandboxes`.
+- [ ] 3.25 Bind `the owner launches a documented Compose preview`.
+- [ ] 3.26 Bind `only that chat's outer sandbox is provisioned in privileged mode`.
+- [ ] 3.27 Bind `its private Docker daemon runs as the rootless user`.
+- [ ] 3.28 Bind `no platform socket, host bind mount, platform credential or other checkout is injected`.
+- [ ] 3.29 Bind `aggregate sandbox resource limits remain configured`.
+- [ ] 3.30 Bind `no application ports are published on the platform host`.
+- [ ] 3.31 Bind `neither workload is mounted with the other chat's checkout`.
 
 ## 4. Step definitions — durable execution and output APIs
 
@@ -135,7 +162,9 @@ Replace the restricted `preview_compose.py` execution path with source-backed na
 - [ ] 5.20 Bind `a Development Chat has a running native Compose sandbox with configured resource limits`.
 - [ ] 5.21 Bind `its project creates additional services or build processes`.
 - [ ] 5.22 Bind `those processes remain within the owning sandbox's aggregate resource limits`.
-- [ ] 5.23 Bind `no additional platform resources become accessible to the project`.
+- [ ] 5.23 Bind `no platform secrets, host bind mounts or control sockets are injected into the sandbox`.
+- [ ] 5.24 Bind `neither service is attached to the platform or another chat's private network`.
+- [ ] 5.25 Bind `requested host networking and Docker socket mounts are not provisioned`.
 
 ## 6. Step definitions — explicit startup and readiness
 
@@ -222,4 +251,4 @@ Update `DevelopWorkspace.tsx`, `DevelopPreview.tsx`, preview API clients and an 
 - [ ] 9.2 Verify composition loads no archived, duplicated or superseded auto-start/unsupported-Compose scenarios, and retains the separate responsive-layout/visibility change's scenarios.
 - [ ] 9.3 Run focused backend/frontend tests for durable events, concurrent launch, chunk-spanning redaction, stream replay, safe output, application routing, sandbox reconciliation and Launch placement.
 - [ ] 9.4 Verify the demo-like initialization/watch workflow through browser login and item creation, plus two-chat port/name isolation and five-minute cleanup retaining output.
-- [ ] 9.5 Record deployment prerequisites, output/resource bounds and rollback behavior; obtain any separately required authorization before committing code or syncing/archiving specs.
+- [ ] 9.5 Record deployment privilege policy, dedicated-host/trusted-project prerequisites, privileged-mode risks, verified output/resource bounds and rollback behavior; obtain any separately required authorization before committing code or syncing/archiving specs.

@@ -11,7 +11,9 @@ Relevant inspected integration points:
 - `backend/app/models.py:233-298` represents user/assistant messages, not independent operations. `frontend/src/features/develop/state.ts:99-134` is an Agent Turn reducer, not a generic process-output stream. Existing chat rendering/history must merge preview execution records without disguising them as assistant replies.
 - Existing acceptance fixtures in `acceptance-tests/support/pages/preview-workload-page.js` exercise the restricted runner and non-Compose fallback. They are useful integration seams but do not establish native Compose compatibility.
 
-The current specs conflict with the confirmed design: `develop-preview-startup` requires automatic Context/turn-triggered startup; `develop-preview-instructions` still contains blanket unsupported-Compose guidance; `develop-preview-compose` disallows all project environment interpolation and published ports. The deltas replace these behaviors explicitly. The active `expand-develop-preview-context` layout/visibility delta remains untouched.
+The current source specs conflict with the confirmed design: `develop-preview-startup` requires automatic Context/turn-triggered startup; `develop-preview-instructions` still contains blanket unsupported-Compose guidance; `develop-preview-compose` disallows all project environment interpolation and published ports. The deltas replace these behaviors explicitly. The active `expand-develop-preview-context` layout/visibility delta remains untouched.
+
+The initial unprivileged rootless probe failed on Rancher Desktop because its outer-container seccomp policy blocks namespace creation. A later user-authorized privileged outer-container smoke test started rootless Engine 28.5.1 and Compose v2.40.3 and passed an offline build, initialization, named-volume storage and sandbox-local HTTP; cleanup removed the outer container and its volumes. This did not test the full demo/watch workflow, two-chat isolation or effective aggregate bounds. On 2026-11-10 the user approved permitting a privileged outer sandbox for now, while retaining the private rootless daemon and other provisioning constraints. The runtime delta explicitly removes the inherited no-privileged-host-access requirement and replaces it with a chat-scoped provisioning contract rather than leaving contradictory source behavior active.
 
 ## Goals / Non-Goals
 
@@ -19,14 +21,14 @@ The current specs conflict with the confirmed design: `develop-preview-startup` 
 
 - Run documented, ordinary Compose applications end to end using their initialization and startup commands, including `run` then `watch`.
 - Require an explicit Launch or Restart action, with no second approval and no launch on Context opening, turn completion, refresh or heartbeat.
-- Give each Development Chat a containerized, resource-bounded private Docker runtime and filesystem without exposing the platform's daemon, environment or other chats.
+- Give each Development Chat a containerized, resource-bounded private rootless Docker runtime and filesystem without injecting the platform's daemon socket, credentials or other chats' checkouts; permit an explicitly configured privileged outer sandbox for trusted workloads on a dedicated Docker host or VM.
 - Persist redacted live commands/output/status in the conversation independently of Agent Turns.
 - Embed only the application, keeping supporting tools and data ports private.
 - Preserve side-by-side Chat/Context, existing explicit Reload/Restart and visible-Context/five-minute-idle behavior.
 
 **Non-Goals:**
 
-- VM/microVM provisioning or a claim of VM-grade containment against intentionally hostile code.
+- VM/microVM provisioning, a claim of VM-grade containment, or treating a privileged outer sandbox as protection against malicious/compromised projects or secure multi-tenancy.
 - Executing README snippets on the backend/platform host, exposing the platform socket to project code, or silently falling back to the shared daemon.
 - Arbitrary undocumented workflows, generated replacement Compose files, automatic repairs, auxiliary-tool navigation, or changing the workspace layout.
 - Removing supported non-Compose APIs or adding non-Compose embedding to Context.
@@ -34,15 +36,17 @@ The current specs conflict with the confirmed design: `develop-preview-startup` 
 
 ## Decisions
 
-### 1. A private native Docker runtime, not an expanded Compose reimplementation
+### 1. A private native Docker runtime with a permitted privileged outer sandbox
 
-The trusted controller continues to provision outer sandbox containers through its management connection. Each sandbox owns a private Docker daemon, its data directory, a command supervisor, a private workspace and its nested Compose resources. Project Docker CLI/Compose commands receive only that private daemon endpoint. Do not mount the platform socket, Docker client credentials, platform environment or a volume containing all Development Chats into the sandbox.
+The trusted controller continues to provision outer sandbox containers through its management connection. Each sandbox owns a private rootless Docker daemon, its data directory, a command supervisor, a private workspace and its nested Compose resources. The daemon is a process inside the outer sandbox, not an additional daemon container. Project Docker CLI/Compose commands receive only that private daemon endpoint. Do not mount the platform socket, Docker client credentials, platform environment, platform host paths or a volume containing all Development Chats into the sandbox.
 
-Use a pinned native Docker CLI/Compose/daemon toolchain. Prefer a rootless daemon and unprivileged outer sandbox. Before product implementation proceeds, prove nested builds, normal application images, volume writes, sandbox-local port publication and Compose watch on the supported Docker deployment. If that cannot work without prohibited platform privileges, fail closed with a deployment diagnostic; do not switch to privileged host access or the shared daemon. This is a specific implementation feasibility gate, not permission to change the user-selected containerized architecture.
+Use a pinned native Docker CLI/Compose/daemon toolchain. Keep the daemon rootless and prefer an unprivileged outer sandbox where supported. For now, deployment configuration may explicitly enable `--privileged` for the outer sandbox only, on a dedicated Docker host or VM running trusted projects. Project documentation/configuration cannot enable this mode or request privileged inner services. This deployment policy adds no second user approval dialog to Launch. Privileged mode relaxes outer capability, seccomp, device and mount protections; the rootless daemon does not restore the outer boundary. A malicious or compromised project could affect the Docker host, its accessible secrets/files or other workloads. Do not promise hostile-code containment or secure isolation between mutually untrusted chats in this mode.
 
-Bound aggregate CPU, memory, process count, disk consumption and startup/idle time around the outer sandbox, including nested builds and containers. Application images may use the users they require, such as a database image's initialization user; the boundary is the restricted outer sandbox, not an imposed Python/Node-only inner image/user list. Host/control escape requests, privileged platform access, platform socket mounts and sources outside the selected checkout remain unsupported.
+Before product implementation proceeds, prove nested builds, normal application images, volume writes, sandbox-local port publication and Compose watch on the supported Docker deployment under the explicitly configured privilege policy. The privileged smoke test is partial evidence, not completion of this gate. If the deployment cannot provide the private runtime within its configured policy, fail closed with a deployment diagnostic; never silently escalate an unprivileged deployment or fall back to the shared daemon.
 
-Alternatives rejected: adding individual keys to the bespoke graph parser would continue to diverge from Compose; a unique project name on the shared platform daemon would not isolate fixed container names, ports or daemon control; VM-backed execution has stronger isolation but was explicitly not selected.
+Bound aggregate CPU, memory, process count, disk consumption and startup/idle time around the outer sandbox, including nested builds and containers. Verify effective bounds in the selected privilege mode rather than assuming rootless inner cgroup support. Application images may use the users they require, such as a database image's initialization user; do not impose a Python/Node-only inner image/user list. The accepted outer-container privilege exception does not authorize project-requested host paths/control sockets, privileged inner containers, sources outside the selected checkout or direct platform port publication. These are provisioning/preflight constraints for trusted workloads, not a guarantee against escape from a privileged container.
+
+Alternatives rejected: adding individual keys to the bespoke graph parser would continue to diverge from Compose; a unique project name on the shared platform daemon would not separate fixed container names, ports or daemon control; VM-backed execution has stronger isolation but was explicitly not selected. A dedicated existing Docker host/VM is a deployment prerequisite for privileged mode, not a new VM-provisioning architecture.
 
 ### 2. A source-backed startup plan, resolved without starting anything
 
@@ -86,8 +90,8 @@ The current visible-Context heartbeat contract remains authoritative: both Conte
 
 ## Risks / Trade-offs
 
-- Rootless nested Docker may depend on host user namespaces, storage drivers and networking support → run the explicit feasibility gate on the supported deployment; publish actionable prerequisites and fail closed without a privileged fallback.
-- Containerized runtimes share a kernel and are not VM-grade hostile-code containment → state the trust boundary honestly, retain rootless/resource/network protections, and reject configurations that require crossing it.
+- Rootless nested Docker may depend on host user namespaces, storage drivers, networking and outer security policy → run the full feasibility gate with the configured privilege policy; publish prerequisites, allow the approved privileged outer mode explicitly, and fail closed rather than silently escalating or sharing the platform daemon.
+- Privileged outer containers relax host protections and can allow malicious or compromised projects to affect the Docker host and other workloads → limit this temporary mode to trusted projects on a dedicated Docker host/VM; retain the rootless private daemon, resource bounds and no socket/credential/host-bind injection, while documenting that these do not restore hostile-code containment or secure multi-tenancy.
 - Native image/build compatibility needs more sources than the old pinned Python/Node pair → configure explicit public image/package/build-source access; deny platform/private-network destinations and inherited platform registry credentials.
 - Project `.env` can contain sensitive or external-service credentials → keep it chat-local, restrict network destinations, mask known values before storage, and never describe masking as complete exfiltration prevention.
 - Persistent watch output can grow without bound or contain active markup → bounded storage/stream buffers, explicit truncation, safe text and retained terminal events.
@@ -97,7 +101,7 @@ The current visible-Context heartbeat contract remains authoritative: both Conte
 ## Migration Plan
 
 1. Add deterministic acceptance fixtures for native Compose, initialization, configuration/overrides, isolation, persistent output and manual launch. Replace superseded auto-start/blanket Compose-rejection expectations through the effective deltas.
-2. Prove the rootless sandbox/toolchain on the supported Docker deployment, including port/name collision isolation, nested resource accounting, restart and idle teardown. Record prerequisites before connecting real user launches.
+2. Prove the rootless daemon/toolchain on the supported Docker deployment with its explicitly configured outer privilege policy, including port/name collision separation, effective aggregate resource accounting, Compose watch, restart and idle teardown. Record dedicated-host/trusted-project prerequisites and privileged-mode risks before connecting real user launches.
 3. Add execution/event storage and owner-scoped APIs with additive migrations; integrate controller event delivery and reconciliation before switching UI behavior.
 4. Add native workflow resolution/runtime forwarding and explicit Launch; route native sandbox operations through the same bounded cleanup contract. Remove obsolete automatic startup and unsupported-Compose guidance.
 5. Run the effective acceptance suite after every implementation change, then verify the demo-like full stack through initialization, login and item creation. Keep all existing isolation, browser authentication, layout and heartbeat regressions green.
@@ -105,4 +109,4 @@ The current visible-Context heartbeat contract remains authoritative: both Conte
 
 ## Open Questions
 
-No unresolved product choices remain from the interview. Implementation must verify the pinned rootless Docker/Compose versions, nested storage/network support and cross-platform deployment prerequisites in the bounded feasibility task. Failure of that gate must be reported before substituting a different isolation architecture.
+No unresolved product choices remain from the interview or the 2026-11-10 privilege revision. Implementation must verify the pinned rootless Docker/Compose toolchain, full initialization/watch workflow, nested storage/network support, effective aggregate bounds and cross-platform prerequisites in the bounded feasibility task. An explicitly configured privileged outer sandbox is now permitted for trusted dedicated deployments; the successful smoke test does not complete those remaining checks. Failure of the full gate must be reported before substituting a different architecture or weakening other requirements.
