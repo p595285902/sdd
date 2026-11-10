@@ -75,6 +75,7 @@ To add:
 - often needs POC to verify behaviours or idea. This should also skip specs
 - response to be short and easy to understand
 - docker sandbox container is running with --privileged meaning it could access other chat's container and host's device. 
+- Claude Code hitting rate limits quickly- Ask the model for a quick high-level handoff summary before spinning up a brand-new session.
 
 Explore:
 - checkpoints during the AI conversation ( to rollback the stuff AI done after a turn)
