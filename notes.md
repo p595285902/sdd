@@ -74,7 +74,7 @@ To add:
 - 1 stack and same docker services for the whole tests. Use reset API to reset.
 - often needs POC to verify behaviours or idea. This should also skip specs
 - response to be short and easy to understand
-- docker sandbox container is running with --privileged meaning it could access other chat's container. 
+- docker sandbox container is running with --privileged meaning it could access other chat's container and host's device. 
 
 Explore:
 - checkpoints during the AI conversation ( to rollback the stuff AI done after a turn)
