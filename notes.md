@@ -69,6 +69,8 @@ Added:
     docs(openspec): scope acceptance-only archive guidance
         -archive without sync when doing changes for acceptance-only 
     config.yaml: avoid repeating existing behaviors
+    docker image rate limit: caused by repeated image pull from preview tests.
+        - fixed with pull-through cache
 To add:
 - a final cleanup after all the tests finishes
 - 1 stack and same docker services for the whole tests. Use reset API to reset.
