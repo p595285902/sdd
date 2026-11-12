@@ -36,20 +36,22 @@ class PreviewController:
         return self._request("POST", f"/workloads/{chat_id}/activity")
 
     def fetch(self, chat_id: uuid.UUID, path: str, query: str, port: str | None = None,
-              body: bytes | None = None, content_type: str = "", cookie: str = "") -> dict:
+              body: bytes | None = None, content_type: str = "", cookie: str = "", authorization: str = "") -> dict:
         if len(path) + len(query) > 2000 or not path.startswith("/") or path.startswith("//"):
             raise ValueError("Invalid preview path")
         if len(cookie) > 8192:
             raise ValueError("Invalid preview cookie")
+        if len(authorization) > 2048 or any(ord(char) < 32 or ord(char) == 127 for char in authorization):
+            raise ValueError("Invalid project authorization header")
         with httpx.Client(base_url=self.url, timeout=20) as client:
             destination = f"/workloads/{chat_id}/browser?path={quote(path + ('?' + query if query else ''), safe='')}"
             if port is not None:
                 destination += f"&port={quote(port, safe='')}"
             if body is None:
-                response = client.get(destination, headers={"Cookie": cookie} if cookie else {})
+                response = client.get(destination, headers={**({"Cookie": cookie} if cookie else {}), **({"X-Preview-Authorization": authorization} if authorization else {})})
             else:
                 response = client.post(destination, json={"body": base64.b64encode(body).decode(),
-                                                          "content_type": content_type, "cookie": cookie})
+                                                          "content_type": content_type, "cookie": cookie, "authorization": authorization})
             response.raise_for_status()
             result = response.json()
             return {"status": result["status"], "location": result.get("location", ""),
@@ -60,6 +62,26 @@ class PreviewController:
         workspace_path(root=self.root, chat_id=chat_id)
         with httpx.Client(base_url=self.url, timeout=180) as client:
             response = client.post(f"/workloads/{chat_id}/launch", json=plan)
+            response.raise_for_status()
+            return response.json()
+
+    def native_launch(self, chat_id: uuid.UUID, plan: dict, execution_id: str) -> dict:
+        workspace_path(root=self.root, chat_id=chat_id)
+        with httpx.Client(base_url=self.url, timeout=180) as client:
+            response = client.post(f"/workloads/{chat_id}/native-launch", json={"plan": plan, "execution_id": execution_id})
+            if response.is_error:
+                try:
+                    detail = response.json().get("error", "Private native runtime is unavailable")
+                except (ValueError, AttributeError):
+                    detail = "Private native runtime is unavailable"
+                raise RuntimeError(str(detail)[:2000])
+            return response.json()
+
+    def events(self, chat_id: uuid.UUID, after_cursor: int = 0) -> dict:
+        if after_cursor < 0:
+            raise ValueError("Invalid execution cursor")
+        with httpx.Client(base_url=self.url, timeout=20) as client:
+            response = client.get(f"/workloads/{chat_id}/events", params={"after": after_cursor})
             response.raise_for_status()
             return response.json()
 
@@ -92,7 +114,9 @@ class PreviewController:
             return result
 
     def _request(self, method: str, path: str) -> dict[str, str]:
-        timeout = 180 if method in ("POST", "PUT") and path.count("/") == 2 else 10
+        # Stop drains terminal output and removes runtime resources; native
+        # cancellation alone can consume the short observation timeout.
+        timeout = 180 if method in ("POST", "PUT", "DELETE") and path.count("/") == 2 else 10
         with httpx.Client(base_url=self.url, timeout=timeout) as client:
             response = client.request(method, path)
             response.raise_for_status()

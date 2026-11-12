@@ -3,25 +3,9 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 const net = require('node:net');
 const cheerio = require('cheerio');
+const { expect } = require('@playwright/test');
 const { runBackendPython } = require('../../features/support/app-lifecycle.js');
-
-const startScript = `
-import sys
-import uuid
-from app.core.config import settings
-from app.services.develop_preview_runtime import PreviewController
-
-controller = PreviewController(root=settings.DEVELOP_WORKSPACE_ROOT, url="http://preview-controller:8090")
-chat_id = uuid.UUID(sys.argv[1])
-try:
-  started = controller.start(chat_id)
-except Exception as error:
-  if getattr(error, "response", None) is not None:
-    print(error.response.text, file=sys.stderr)
-  raise
-assert started["state"] == "running"
-assert controller.status(chat_id) == started
-`;
+const { ACCOUNT, nativeComposeFixture } = require('../native-compose-fixture.cjs');
 
 class PreviewWorkloadPage {
   constructor(world) {
@@ -93,6 +77,29 @@ http.createServer((request, response) => {
       website: { cwd: 'site', argv: ['npm', 'run', 'start'], port: 8765, path: '/' },
       api: { cwd: 'api', argv: ['python', '-m', 'http.server', '8766'], port: 8766, path: '/' },
     };
+  }
+
+  async prepareNativeCompose(chatId, options = {}) {
+    const files = nativeComposeFixture(options);
+    await this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
+      for (const [name, content] of Object.entries(files)) {
+        await this.world.apiClient.editWorkspaceFile(chatId, name, content);
+      }
+    });
+    this.nativeFixtures ??= new Map();
+    this.nativeFixtures.set(chatId, files);
+    return files;
+  }
+
+  async loginAndCreateNativeItem(application, name = 'Acceptance saved item') {
+    await application.getByLabel('Email', { exact: true }).fill(ACCOUNT.email);
+    await application.getByLabel('Password', { exact: true }).fill(ACCOUNT.password);
+    await application.getByRole('button', { name: 'Log in', exact: true }).click();
+    await application.getByLabel('Item', { exact: true }).fill(name);
+    await application.getByRole('button', { name: 'Create item', exact: true }).click();
+    await application.getByRole('status').filter({ hasText: 'Item saved' }).waitFor();
+    assert.ok((await application.locator('#items').textContent()).includes(name));
+    this.nativeItem = name;
   }
 
   async prepareCompose(chatId) {
@@ -403,66 +410,66 @@ target.unlink()
 `, chatId);
   }
 
+  inspect(chatId) {
+    const ids = this.containerIds(chatId);
+    assert.equal(ids.length, 1, `Expected one sandbox for chat ${chatId}`);
+    return JSON.parse(this.docker('inspect', ids[0]))[0];
+  }
+
+  isNative(chatId) {
+    return this.isRunning(chatId) && Boolean(this.inspect(chatId).Config.Labels['sdd.preview.native-execution']);
+  }
+
+  nativeDocker(chatId, ...args) {
+    return this.docker('exec', this.inspect(chatId).Id, 'docker', ...args);
+  }
+
   composeContainers(chatId) {
-    const project = this.world.applicationState.projectName;
-    const output = this.docker('ps', '--filter', `label=sdd.preview.chat-id=${chatId}`,
-      '--filter', `label=sdd.preview.project=${project}`,
-      '--filter', 'label=sdd.preview.compose-service', '--format', '{{.ID}}');
+    if (!this.isRunning(chatId)) return [];
+    const output = this.nativeDocker(chatId, 'ps', '--filter', 'label=com.docker.compose.service', '--format', '{{.ID}}');
     return output ? output.split('\n') : [];
   }
 
+  composeDetails(chatId) {
+    const ids = this.composeContainers(chatId);
+    return ids.length ? JSON.parse(this.nativeDocker(chatId, 'inspect', ...ids)) : [];
+  }
+
   composeNetwork(chatId) {
-    return `${this.world.applicationState.projectName}-preview-${chatId}-compose`;
+    const service = this.composeDetails(chatId)[0];
+    assert.ok(service, 'The private Compose project must be running');
+    return Object.keys(service.NetworkSettings.Networks)[0];
   }
 
   composeNetworkDetails(chatId) {
-    return JSON.parse(this.docker('network', 'inspect', this.composeNetwork(chatId)))[0];
+    return JSON.parse(this.nativeDocker(chatId, 'network', 'inspect', this.composeNetwork(chatId)))[0];
   }
 
   assertComposeIsolation(chatId, otherChatId) {
     const network = this.composeNetworkDetails(chatId);
-    assert.equal(network.Internal, true);
-    assert.equal(network.Options['com.docker.network.bridge.gateway_mode_ipv4'], 'isolated');
-    assert.equal(network.IPAM.Config.some((item) => item.Gateway), false);
-    const backend = JSON.parse(this.docker('inspect', `${this.world.applicationState.projectName}-backend-1`))[0];
-    const backendIp = backend.NetworkSettings.Networks[`${this.world.applicationState.projectName}_default`].IPAddress;
-    const other = JSON.parse(this.docker('inspect', this.containerIds(otherChatId)[0]))[0];
-    const otherIp = other.NetworkSettings.Networks[this.composeNetwork(otherChatId)].IPAddress;
-    for (const containerId of this.composeContainers(chatId)) {
-      const container = JSON.parse(this.docker('inspect', containerId))[0];
-      const host = container.HostConfig;
-      assert.equal(host.NetworkMode, this.composeNetwork(chatId));
-      assert.equal(container.Config.User, '65534:65534');
-      assert.equal(host.Memory, 268435456);
-      assert.equal(host.NanoCpus, 1000000000);
-      assert.equal(host.PidsLimit, 64);
-      assert.equal(host.ReadonlyRootfs, true);
-      assert.deepEqual(host.CapDrop, ['ALL']);
-      assert.deepEqual(host.PortBindings, {});
-      assert.deepEqual(host.Mounts || [], []);
-      assert.deepEqual(container.Config.Env.map((entry) => entry.split('=')[0]).sort(),
-        ['HOME', 'PATH', 'PYTHON_VERSION', 'PYTHON_SHA256'].sort());
-      assert.ok(host.Tmpfs['/tmp'].includes('size=64m'));
-      for (const address of [backendIp, otherIp, backend.NetworkSettings.Networks[`${this.world.applicationState.projectName}_default`].Gateway, '1.1.1.1']) {
-        assert.throws(() => this.docker('exec', containerId, 'python', '-c',
-          'import socket,sys; socket.create_connection((sys.argv[1],8000),timeout=1)', address));
-      }
-      assert.throws(() => this.docker('exec', containerId, 'python', '-c',
-        'import socket; socket.create_connection(("host.docker.internal",8000),timeout=1)'));
+    const other = this.composeNetworkDetails(otherChatId);
+    assert.notEqual(network.Id, other.Id, 'Networks belong to different private Docker daemons');
+    const platformNetworks = this.docker('network', 'ls', '--format', '{{.ID}}').split('\n').filter(Boolean);
+    for (const id of platformNetworks) assert.ok(!network.Id.startsWith(id));
+    for (const container of this.composeDetails(chatId)) {
+      assert.notEqual(container.HostConfig.NetworkMode, 'host');
+      assert.equal(container.HostConfig.Privileged, false);
+      assert.ok(Object.values(container.NetworkSettings.Networks).every(item => item.NetworkID === network.Id));
     }
+    this.expectSandbox(this.inspect(chatId));
+    this.expectSandbox(this.inspect(otherChatId));
   }
 
   composeImages(chatId) {
-    const project = this.world.applicationState.projectName;
-    const output = this.docker('image', 'ls', '--filter', `label=sdd.preview.chat-id=${chatId}`,
-      '--filter', `label=sdd.preview.project=${project}`, '--format', '{{.ID}}');
+    if (!this.isRunning(chatId)) return [];
+    const output = this.nativeDocker(chatId, 'image', 'ls', '--format', '{{.ID}}');
     return output ? output.split('\n') : [];
   }
 
   async launch(chatId, answer) {
     this.chatIds.push(chatId);
     const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
-      `/api/v1/develop/chats/${chatId}/preview/launch`, { data: { answer: answer || null } });
+      `/api/v1/develop/chats/${chatId}/preview/launch`, { timeout: 240_000, data: { answer: answer || null } });
     this.lastLaunch = { status: response.status(), body: await response.json() };
     return this.lastLaunch;
   }
@@ -473,11 +480,42 @@ target.unlink()
     assert.equal(response.status(), 200, await response.text());
   }
 
-  async restartCompose(chatId, expectedStatus = 200, timeout = 30000) {
+  async waitForPreview(chatId, expected = 'ready', timeout = 240_000) {
+    let status;
+    try {
+      await expect.poll(async () => {
+        status = await this.contextStatus(chatId);
+        assert.equal(status.status, 200);
+        return status.body.state;
+      }, { timeout, message: `Chat ${chatId} preview should become ${expected}` }).toBe(expected);
+    } catch (error) {
+      const history = await this.executionHistory(chatId);
+      const execution = history[0];
+      let events;
+      if (execution) {
+        const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'get',
+          `/api/v1/develop/chats/${chatId}/preview/executions/${execution.id}/events?after=0`);
+        events = await response.json();
+      }
+      throw new Error(`${error.message}\nStatus: ${JSON.stringify(status)}\nExecution: ${JSON.stringify(execution)}\nPersisted output: ${JSON.stringify(events).slice(-20000)}`, { cause: error });
+    }
+    return status;
+  }
+
+  async executionHistory(chatId) {
+    const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'get',
+      `/api/v1/develop/chats/${chatId}/preview/executions`);
+    assert.equal(response.status(), 200, await response.text());
+    return (await response.json()).data;
+  }
+
+  async restartCompose(chatId, expectedStatus = 200, timeout = 240_000) {
     const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
       `/api/v1/develop/chats/${chatId}/preview/restart`, { timeout });
-    assert.equal(response.status(), expectedStatus, `${await response.text()}\n${this.controllerLogs()}`);
-    if (expectedStatus === 200) assert.equal((await response.json()).state, 'running');
+    assert.equal(response.status(), 200, await response.text());
+    const result = await response.json();
+    assert.ok(result.execution?.id, 'Restart returns a durable asynchronous execution');
+    return this.waitForPreview(chatId, expectedStatus === 200 ? 'ready' : 'failed', timeout);
   }
 
   expireCompose(chatId) {
@@ -485,11 +523,12 @@ target.unlink()
       'import sys,time,uuid; sys.path.insert(0,"/controller"); from preview_controller import activity,activity_lock,sweep; chat=uuid.UUID(sys.argv[1]); activity_lock.acquire(); activity[chat]=time.time()-301; activity_lock.release(); sweep()', chatId);
   }
 
-  async openContext(chatId, timeout = 30000) {
-    this.chatIds.push(chatId);
-    const response = await this.world.apiClient.request(this.world.apiClient.superuserToken, 'post',
-      `/api/v1/develop/chats/${chatId}/preview/start`, { timeout });
-    return { status: response.status(), body: await response.json() };
+  async openContext(chatId, timeout = 240_000) {
+    // Legacy helper name: callers explicitly request startup; opening the UI is read-only.
+    const launched = await this.launch(chatId);
+    assert.equal(launched.status, 200);
+    assert.ok(launched.body.execution?.id, 'Launch must identify a durable execution');
+    return this.waitForPreview(chatId, 'ready', timeout);
   }
 
   async contextStatus(chatId, token = this.world.apiClient.superuserToken) {
@@ -513,14 +552,28 @@ target.unlink()
     assert.equal(result.status(), 200, await result.text());
   }
 
-  serviceResponse(chatId, port) {
-    return this.docker('exec', this.containerIds(chatId)[0], 'python', '-c',
-      'import urllib.request; print(urllib.request.build_opener(urllib.request.ProxyHandler({})).open("http://127.0.0.1:' + port + '/").read().decode())');
+  serviceContainer(chatId, port) {
+    const role = { 8765: 'website', 8766: 'api', 8025: 'mail', 8080: 'admin' }[port];
+    const service = this.composeDetails(chatId).find(container => container.Config.Labels['com.docker.compose.service'] === role);
+    assert.ok(service, `Native Compose service for port ${port} must be running`);
+    return service.Id;
+  }
+
+  serviceResponse(chatId, port, path = '/') {
+    const argv = ['python', '-c',
+      'import sys,urllib.request; print(urllib.request.build_opener(urllib.request.ProxyHandler({})).open(sys.argv[1],timeout=5).read().decode())',
+      `http://127.0.0.1:${port}${path}`];
+    return this.isNative(chatId)
+      ? this.nativeDocker(chatId, 'exec', this.serviceContainer(chatId, port), ...argv)
+      : this.docker('exec', this.containerIds(chatId)[0], ...argv);
   }
 
   nodeServiceResponse(chatId, port) {
-    return this.docker('exec', this.containerIds(chatId)[0], 'node', '-e',
-      `require('http').get('http://127.0.0.1:${port}/',response=>{response.on('data',chunk=>process.stdout.write(chunk));response.on('end',()=>process.exit())})`);
+    const argv = ['node', '-e',
+      `require('http').get('http://127.0.0.1:${port}/',response=>{response.on('data',chunk=>process.stdout.write(chunk));response.on('end',()=>process.exit())})`];
+    return this.isNative(chatId)
+      ? this.nativeDocker(chatId, 'exec', this.serviceContainer(chatId, port), ...argv)
+      : this.docker('exec', this.containerIds(chatId)[0], ...argv);
   }
 
   async waitForServiceResponse(chatId, port, expected) {
@@ -552,34 +605,8 @@ target.unlink()
   }
 
   async start(chatId) {
-    this.chatIds.push(chatId);
-    try {
-      await runBackendPython(startScript, chatId);
-    } catch (error) {
-      execFileSync('docker', ['logs', `${this.world.applicationState.projectName}-preview-controller-1`],
-        { stdio: ['ignore', 'inherit', 'inherit'] });
-      throw error;
-    }
-    const ids = this.containerIds(chatId);
-    assert.equal(ids.length, 1);
-    return JSON.parse(this.docker('inspect', ids[0]))[0];
-  }
-
-  async expectRejectedCompose(chatId) {
-    await runBackendPython(`
-import sys
-import uuid
-import httpx
-from app.core.config import settings
-from app.services.develop_preview_runtime import PreviewController
-controller = PreviewController(root=settings.DEVELOP_WORKSPACE_ROOT, url="http://preview-controller:8090")
-try:
-    controller.start(uuid.UUID(sys.argv[1]))
-except httpx.HTTPStatusError as error:
-    assert error.response.status_code == 400
-else:
-    raise AssertionError("Unsafe Compose was not rejected by the trusted controller")
-`, chatId);
+    await this.openContext(chatId);
+    return this.inspect(chatId);
   }
 
   canRead(container, filename) {
@@ -592,6 +619,14 @@ else:
   }
 
   expectOnlyCheckout(container, chatId) {
+    if (container.Config.Labels['sdd.preview.native-execution']) {
+      assert.equal(container.Config.Labels['sdd.preview.chat-id'], chatId);
+      assert.ok(container.Mounts.every(mount => mount.Type !== 'bind'));
+      assert.ok(container.Mounts.filter(mount => mount.Type === 'volume').every(mount =>
+        mount.Destination === '/registry-socket' && !mount.RW && mount.Name.includes(chatId)));
+      assert.ok(!JSON.stringify(container.Mounts).includes('workspace-data'), 'Native checkout is synchronized, not a platform checkout volume mount');
+      return;
+    }
     assert.equal(container.HostConfig.Mounts.length, 2);
     assert.equal(container.HostConfig.Mounts[0].Type, 'volume');
     assert.equal(container.HostConfig.Mounts[0].VolumeOptions.Subpath, chatId);
@@ -603,6 +638,25 @@ else:
 
   expectSandbox(container) {
     const host = container.HostConfig;
+    if (container.Config.Labels['sdd.preview.native-execution']) {
+      assert.ok(host.Memory > 0 && host.NanoCpus > 0 && host.PidsLimit > 0);
+      assert.equal(host.MemorySwap, host.Memory, 'Aggregate memory includes swap');
+      assert.equal(container.Config.User, '1000:1000');
+      assert.equal(host.NetworkMode, 'none');
+      assert.equal(host.ReadonlyRootfs, true);
+      assert.deepEqual(host.PortBindings || {}, {});
+      assert.deepEqual(host.Binds || [], []);
+      for (const path of ['/workspace', '/home/rootless/.local/share/docker', '/run/user/1000']) {
+        assert.match(host.Tmpfs[path], /size=\d+[mg]/, `Writable ${path} must have a bound`);
+      }
+      const environment = Object.fromEntries(container.Config.Env.map(entry => {
+        const offset = entry.indexOf('='); return [entry.slice(0, offset), entry.slice(offset + 1)];
+      }));
+      assert.equal(environment.DOCKER_HOST, 'unix:///run/user/1000/docker.sock');
+      assert.ok(!Object.keys(environment).some(name => /SECRET|PASSWORD|TOKEN|OPENAI|POSTGRES|ACCEPTANCE_RESET|DOCKER_(CONFIG|CONTEXT|TLS_VERIFY|CERT_PATH)/i.test(name)),
+        'Platform credentials and Docker configuration must not enter the sandbox');
+      return;
+    }
     assert.equal(host.Memory, 268435456);
     assert.equal(host.NanoCpus, 1000000000);
     assert.equal(host.PidsLimit, 64);

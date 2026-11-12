@@ -56,8 +56,9 @@ def _schema_snapshot(database: Engine) -> tuple[Any, Any]:
     inspector = inspect(database)
     tables = inspector.get_table_names()
     schema = [(name, inspector.get_columns(name), inspector.get_foreign_keys(name), inspector.get_indexes(name)) for name in tables]
-    # Type objects have stable representations, not equality across inspection instances.
-    signature = repr(schema)
+    # Reflected types and partial-index predicates are freshly allocated objects.
+    # Compare their SQL text, not repr() values containing object addresses.
+    signature = json.dumps(schema, default=str, sort_keys=True)
     with database.connect() as connection:
         versions = tuple(connection.execute(text("SELECT version_num FROM alembic_version ORDER BY version_num")).scalars()) if "alembic_version" in tables else ()
     return signature, versions

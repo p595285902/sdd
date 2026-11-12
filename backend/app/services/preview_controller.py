@@ -8,6 +8,7 @@ import os
 import re
 import select
 import socket
+import sys
 import tarfile
 import threading
 import time
@@ -20,9 +21,9 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from app.services.preview_compose import (
     documented_compose,
-    staged_build,
-    validated_graph,
 )
+from app.services.preview_legacy_runtime import LegacyRuntime
+from app.services.preview_native_runtime import NATIVE_LABEL, NativeRuntime
 
 SOCKET = "/var/run/docker.sock"
 WORKSPACE_ROOT = "/develop-workspaces"
@@ -201,8 +202,19 @@ def acceptance_ownership() -> dict:
         controller.get("NetworkSettings", {}).get("Ports", {}).values()
     ):
         raise RuntimeError("Acceptance controller controls must remain unpublished")
+    native_image = None
+    if controller_env.get("PREVIEW_NATIVE_IMAGE") == f"{PROJECT}-preview-native:runtime":
+        code, candidate = docker("GET", f"/images/{quote(controller_env['PREVIEW_NATIVE_IMAGE'], safe='')}/json")
+        if code == 200:
+            build_labels = {key: value for key, value in (candidate.get("Config", {}).get("Labels") or {}).items() if key.startswith("com.docker.compose.")}
+            if build_labels and (set(build_labels) != COMPOSE_IMAGE_LABELS or build_labels.get("com.docker.compose.project") != PROJECT or build_labels.get("com.docker.compose.service") != "preview-native-image"):
+                raise RuntimeError("Native runtime image build ownership is ambiguous")
+            native_image = {"id": candidate["Id"], "build_labels": build_labels}
+        elif code != 404:
+            raise RuntimeError("Unable to verify native runtime image ownership")
     return {
         "verified": True, "project": PROJECT,
+        "native_runtime_image": native_image,
         "database": {"service": "db", "database": "app", "compose_project": PROJECT, "volume": data["volume"]},
         "workspace": workspace, "agent": agent,
         "services": {"backend": backend["Id"], "db": database["Id"], "preview_controller": controller["Id"]},
@@ -252,9 +264,14 @@ def scenario_resources(ownership: dict) -> dict[str, list[dict]]:
                 # Only the exact build metadata inherited from our pinned runtime
                 # may remain. Instance/config/network/volume labels always refuse
                 # deletion, even when a caller also supplies a valid chat UUID.
-                if (kind not in ("containers", "images")
-                        or compose_labels != ownership["runtime_image"]["build_labels"]
-                        or (kind == "containers" and entry.get("Image") != ownership["runtime_image"]["id"])):
+                allowed_images = [ownership["runtime_image"]]
+                if ownership.get("native_runtime_image"):
+                    allowed_images.append(ownership["native_runtime_image"])
+                if kind not in ("containers", "images") or not any(
+                    compose_labels == image["build_labels"]
+                    and (kind != "containers" or entry.get("Image") == image["id"])
+                    for image in allowed_images
+                ):
                     raise RuntimeError("Refusing to remove Compose-owned preview resources")
             if kind != "images":
                 name = entry.get("Name", "").lstrip("/")
@@ -268,7 +285,7 @@ def scenario_resources(ownership: dict) -> dict[str, list[dict]]:
                         if (mount.get("Name") != ownership["workspace"]["volume"]
                                 or mount.get("Destination") != "/checkout" or mount.get("RW") is not False):
                             raise RuntimeError("Refusing to remove a workload with long-lived writable storage")
-            if identifier == ownership["runtime_image"]["id"] or identifier in ownership["services"].values() or identifier in (
+            if identifier in {ownership["runtime_image"]["id"], (ownership.get("native_runtime_image") or {}).get("id")} or identifier in ownership["services"].values() or identifier in (
                 ownership["workspace"]["volume"], ownership["agent"]["volume"], ownership["database"]["volume"],
             ) or identifier in {item["id"] for item in ownership["networks"].values()}:
                 raise RuntimeError("Refusing to remove a long-lived acceptance resource")
@@ -547,6 +564,12 @@ class AcceptanceReset:
                 activity.clear()
                 ready_services.clear()
                 failed_services.clear()
+            for runtime in (native, legacy):
+                with runtime.lock:
+                    runtime.last.clear()
+                    runtime.terminal.clear()
+                    runtime.operations.clear()
+            native.previous.clear()
 
 
 acceptance_reset = AcceptanceReset()
@@ -765,6 +788,12 @@ def inspect(chat_id: uuid.UUID) -> dict | None:
 
 def status(chat_id: uuid.UUID) -> dict[str, str]:
     container = inspect(chat_id)
+    native_status = native.status(chat_id, container)
+    if native_status is not None:
+        return native_status
+    legacy_status = legacy.status(chat_id, container)
+    if legacy_status is not None:
+        return legacy_status
     if container is None:
         with activity_lock:
             if chat_id in failed_services:
@@ -783,22 +812,8 @@ def start(chat_id: uuid.UUID) -> dict[str, str]:
     checkout = os.path.join(WORKSPACE_ROOT, str(chat_id))
     if os.path.islink(checkout) or not os.path.isdir(checkout):
         raise FileNotFoundError("Development Chat checkout is not ready")
-    documented = documented_compose(Path(checkout))
-    if documented is not None:
-        graph = validated_graph(Path(checkout), *documented)
-        roots = [name for name in documented[1] if not any(
-            name in service.get("depends_on", []) for other, service in graph if other != name
-        )]
-        if len(roots) != 1:
-            raise ValueError("Document one website entry service")
-        primary = roots[0]
-        if not dict(graph)[primary].get("expose"):
-            raise ValueError("Documented website port is required")
-        staged = {
-            name: staged_build(Path(checkout), service["build"])
-            for name, service in graph if "build" in service
-        }
-        return start_compose(chat_id, graph, primary, staged)
+    if documented_compose(Path(checkout)) is not None:
+        raise RuntimeError("Compose previews require an explicit native launch plan; the shared platform daemon is not a fallback")
     existing = inspect(chat_id)
     if existing is not None:
         if existing["State"]["Running"]:
@@ -1153,6 +1168,8 @@ def create_workload(chat_id: uuid.UUID, socket_volume: str) -> dict[str, str]:
 
 def stop(chat_id: uuid.UUID) -> dict[str, str]:
     existing = inspect(chat_id)
+    native.before_stop(chat_id, existing)
+    legacy.before_stop(chat_id, existing)
     if existing is not None:
         if existing["State"]["Running"]:
             code, _ = docker("POST", f"/containers/{existing['Id']}/stop?t=1")
@@ -1250,58 +1267,8 @@ def run_command(
     raise RuntimeError("Preview command timed out")
 
 
-def launch(chat_id: uuid.UUID, plan: dict) -> dict[str, str]:
-    current = status(chat_id)
-    if current["state"] != "running":
-        raise FileNotFoundError("Preview workload not running")
-    if "initial_port" in current:
-        return current
-    try:
-        for command in plan["setup"]:
-            run_command(chat_id, command, timeout=60)
-        roles = [role for role in ("api", "website") if plan.get(role)]
-        for role in roles:
-            server = plan[role]
-            run_command(chat_id, server, timeout=5, detached=True)
-        for role in roles:
-            server = plan[role]
-            port = int(server["port"])
-            if port < 1024 or port > 65535:
-                raise RuntimeError("Unsupported preview port")
-            path = server["path"]
-            if not isinstance(path, str) or not path.startswith("/") or "//" in path:
-                raise RuntimeError("Unsupported preview health path")
-            health = {
-                "cwd": ".",
-                "argv": ["python", "-c", "import sys, urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open(sys.argv[1], timeout=2).read(1024)", f"http://127.0.0.1:{port}{path}"],
-            }
-            deadline = time.monotonic() + 12
-            while True:
-                try:
-                    run_command(chat_id, health, timeout=3)
-                    break
-                except RuntimeError:
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError("Preview startup timed out") from None
-                    time.sleep(0.25)
-        heartbeat(chat_id)
-        selected = plan.get("website") or plan["api"]
-        details = {
-            "initial_port": str(selected["port"]),
-            "initial_path": plan.get("initial_path", selected["path"]),
-            "api_port": str(plan["api"]["port"]),
-        }
-        if plan.get("website"):
-            details["website_port"] = str(plan["website"]["port"])
-        with activity_lock:
-            ready_services[chat_id] = details
-        return {"state": "running", **details}
-    except (OSError, RuntimeError, KeyError, ValueError, TypeError) as error:
-        logger.error("Preview launch failed: %s", error)
-        stop(chat_id)
-        with activity_lock:
-            failed_services.add(chat_id)
-        raise RuntimeError("Preview startup failed or timed out") from None
+def launch(chat_id: uuid.UUID, plan: dict) -> dict:
+    return legacy.launch(chat_id, plan)
 
 
 def heartbeat(chat_id: uuid.UUID) -> dict[str, str]:
@@ -1315,7 +1282,7 @@ def heartbeat(chat_id: uuid.UUID) -> dict[str, str]:
 
 def browser_resource(chat_id: uuid.UUID, path: str, requested_port: str | None = None,
                      method: str = "GET", body: bytes = b"", content_type: str = "",
-                     cookie: str = "") -> dict:
+                     cookie: str = "", authorization: str = "") -> dict:
     current = status(chat_id)
     if current.get("state") != "running" or "initial_port" not in current:
         raise FileNotFoundError("Preview is not ready")
@@ -1325,8 +1292,10 @@ def browser_resource(chat_id: uuid.UUID, path: str, requested_port: str | None =
     port = requested_port or current["initial_port"]
     if port not in (current.get("website_port"), current.get("api_port"), current["initial_port"]):
         raise ValueError("Unregistered preview port")
-    if method not in ("GET", "POST") or len(body) > 32768 or len(content_type) > 200 or len(cookie) > 8192:
+    if method not in ("GET", "POST") or len(body) > 32768 or len(content_type) > 200 or len(cookie) > 8192 or len(authorization) > 2048:
         raise ValueError("Invalid preview request")
+    if any(ord(char) < 32 or ord(char) == 127 for char in authorization):
+        raise ValueError("Invalid project authorization header")
     host = current.get("api_host", "127.0.0.1") if port == current.get("api_port") else "127.0.0.1"
     script = (
         "import base64,json,sys,urllib.request,urllib.error\n"
@@ -1335,6 +1304,7 @@ def browser_resource(chat_id: uuid.UUID, path: str, requested_port: str | None =
         " def redirect_request(self,request,fp,code,msg,headers,newurl): return None\n"
         "headers={'Content-Type':sys.argv[6]} if sys.argv[6] else {}\n"
         "if sys.argv[7]: headers['Cookie']=sys.argv[7]\n"
+        "if sys.argv[8]: headers['Authorization']=sys.argv[8]\n"
         "request=urllib.request.Request(url,data=base64.b64decode(sys.argv[5]) if sys.argv[4]=='POST' else None,headers=headers,method=sys.argv[4])\n"
         "try:\n response=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect()).open(request,timeout=5)\n"
         "except urllib.error.HTTPError as error: response=error\n"
@@ -1346,7 +1316,7 @@ def browser_resource(chat_id: uuid.UUID, path: str, requested_port: str | None =
     )
     node_script = (
         "(async()=>{const response=await fetch('http://'+process.argv[1]+':'+process.argv[2]+process.argv[3],"
-        "{method:process.argv[4],body:process.argv[4]==='POST'?Buffer.from(process.argv[5],'base64'):undefined,headers:{...(process.argv[6]?{'content-type':process.argv[6]}:{}),...(process.argv[7]?{'cookie':process.argv[7]}:{})},redirect:'manual',signal:AbortSignal.timeout(5000)});"
+        "{method:process.argv[4],body:process.argv[4]==='POST'?Buffer.from(process.argv[5],'base64'):undefined,headers:{...(process.argv[6]?{'content-type':process.argv[6]}:{}),...(process.argv[7]?{'cookie':process.argv[7]}:{}),...(process.argv[8]?{'authorization':process.argv[8]}:{})},redirect:'manual',signal:AbortSignal.timeout(5000)});"
         "const reader=response.body?.getReader(),parts=[];let size=0;"
         "while(reader){const {done,value}=await reader.read();if(done)break;size+=value.length;"
         "if(size>2097152)throw Error('Resource too large');parts.push(value)}"
@@ -1354,10 +1324,11 @@ def browser_resource(chat_id: uuid.UUID, path: str, requested_port: str | None =
         "'application/octet-stream',cookies:response.headers.getSetCookie(),body:Buffer.concat(parts).toString('base64')}))})().catch(()=>process.exit(1))"
     )
     encoded_body = base64.b64encode(body).decode()
-    for command in (["python", "-c", script, host, port, path, method, encoded_body, content_type, cookie],
-                    ["node", "-e", node_script, host, port, path, method, encoded_body, content_type, cookie]):
+    prefix, target_port = native.browser_command(current, port) if current.get("runtime") == "native-compose" else ([], port)
+    for command in ([*prefix, "python", "-c", script, host, target_port, path, method, encoded_body, content_type, cookie, authorization],
+                    [*prefix, "node", "-e", node_script, host, target_port, path, method, encoded_body, content_type, cookie, authorization]):
         code, result = docker("POST", f"/containers/{container_name(chat_id)}/exec", {
-            "Cmd": command, "User": "65534:65534", "AttachStdout": True, "AttachStderr": False,
+            "Cmd": command, "User": "1000:1000" if prefix else "65534:65534", "AttachStdout": True, "AttachStderr": False,
         })
         if code != 201:
             continue
@@ -1398,7 +1369,7 @@ def browser_socket(handler: BaseHTTPRequestHandler, chat_id: uuid.UUID, path: st
     host = current.get("api_host", "127.0.0.1") if port == current.get("api_port") else "127.0.0.1"
     script = (
         "import os,select,socket,sys,tty\n"
-        "tty.setraw(0)\n"
+        "if os.isatty(0): tty.setraw(0)\n"
         "upstream=socket.create_connection((sys.argv[1],int(sys.argv[2])),timeout=5)\n"
         "upstream.settimeout(None)\n"
         "os.write(1,b'READY\\n')\n"
@@ -1409,8 +1380,12 @@ def browser_socket(handler: BaseHTTPRequestHandler, chat_id: uuid.UUID, path: st
         "  if not data: sys.exit(0)\n"
         "  upstream.sendall(data) if source==0 else os.write(1,data)\n"
     )
+    prefix, target_port = native.browser_command(current, port) if current.get("runtime") == "native-compose" else ([], port)
+    command = [*prefix, "python", "-u", "-c", script, host, target_port]
+    if prefix:
+        command = ["python3", "-c", "import os,sys,tty; tty.setraw(0); os.execvp(sys.argv[1], sys.argv[1:])", *command]
     code, result = docker("POST", f"/containers/{container_name(chat_id)}/exec", {
-        "Cmd": ["python", "-u", "-c", script, host, port], "User": "65534:65534",
+        "Cmd": command, "User": "1000:1000" if prefix else "65534:65534",
         "AttachStdin": True, "AttachStdout": True, "AttachStderr": False, "Tty": True,
     })
     if code != 201:
@@ -1496,15 +1471,29 @@ def sweep(now: float | None = None) -> None:
             last_active = container["Created"]
         if now - last_active >= IDLE_SECONDS:
             stop(chat_id)
+        elif labels.get(NATIVE_LABEL):
+            native.events(chat_id)
+            if inspect(chat_id) is not None:
+                native.sync(chat_id)
+        else:
+            try:
+                legacy.events(chat_id)
+            except FileNotFoundError:
+                pass  # An explicit legacy workload may not have a launch yet.
 
 
 def sweep_forever() -> None:
     while True:
         try:
             sweep()
-        except OSError, RuntimeError:
-            pass
+        except (OSError, RuntimeError) as error:
+            # Never include project output or exception text in operational logs.
+            logger.warning("Preview maintenance pass failed (%s)", type(error).__name__)
         time.sleep(5)
+
+
+native = NativeRuntime(sys.modules[__name__])
+legacy = LegacyRuntime(sys.modules[__name__])
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1594,23 +1583,37 @@ class Handler(BaseHTTPRequestHandler):
                     if length <= 0 or length > 46000:
                         raise ValueError
                     payload = json.loads(self.rfile.read(length))
-                    if set(payload) != {"body", "content_type", "cookie"}:
+                    if set(payload) not in ({"body", "content_type", "cookie"}, {"body", "content_type", "cookie", "authorization"}):
                         raise ValueError
                     payload = {"body": base64.b64decode(payload["body"], validate=True),
-                               "content_type": payload["content_type"], "cookie": payload["cookie"]}
+                               "content_type": payload["content_type"], "cookie": payload["cookie"], "authorization": payload.get("authorization", "")}
                 if self.command == "GET":
                     payload["cookie"] = self.headers.get("Cookie", "")
+                    payload["authorization"] = self.headers.get("X-Preview-Authorization", "")
                 self.respond(200, browser_resource(chat_id, paths[0], ports[0] if ports else None,
                                                    self.command, **payload))
             except (ValueError, FileNotFoundError, RuntimeError, json.JSONDecodeError):
                 logger.exception("Private browser connection rejected")
                 self.respond(404, {"error": "Not found"})
             return
+        if self.command == "GET" and re.fullmatch(r"/workloads/[0-9a-f-]{36}/events(?:\?after=[0-9]+)?", self.path):
+            try:
+                request = urlsplit(self.path)
+                chat_id = uuid.UUID(request.path.split("/")[2])
+                after = int(parse_qs(request.query).get("after", ["0"])[0])
+                container = inspect(chat_id)
+                runtime = native if (container and container["Config"]["Labels"].get(NATIVE_LABEL)) or (container is None and chat_id in native.terminal) else legacy
+                self.respond(200, runtime.events(chat_id, after))
+            except FileNotFoundError:
+                self.respond(404, {"error": "Preview execution not found"})
+            except (ValueError, RuntimeError):
+                self.respond(502, {"error": "Preview execution transport is unavailable"})
+            return
         parts = self.path.split("/")
         if (
             len(parts) not in (3, 4)
             or parts[1] != "workloads"
-            or (len(parts) == 4 and parts[3] not in ("activity", "launch"))
+            or (len(parts) == 4 and parts[3] not in ("activity", "launch", "native-launch"))
         ):
             self.respond(404, {"error": "Not found"})
             return
@@ -1618,14 +1621,22 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = uuid.UUID(parts[2])
             if (
                 str(chat_id) != parts[2]
-                or (parts[-1] != "launch" and self.headers.get("Content-Length", "0") != "0")
+                or (parts[-1] not in ("launch", "native-launch") and self.headers.get("Content-Length", "0") != "0")
             ):
                 raise ValueError
         except ValueError:
             self.respond(400, {"error": "Invalid request"})
             return
         try:
-            if self.command == "POST" and len(parts) == 4 and parts[3] == "launch":
+            if self.command == "POST" and len(parts) == 4 and parts[3] == "native-launch":
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 65536:
+                    raise ValueError
+                payload = json.loads(self.rfile.read(length))
+                if set(payload) != {"plan", "execution_id"}:
+                    raise ValueError
+                result = native.launch(chat_id, payload["plan"], payload["execution_id"])
+            elif self.command == "POST" and len(parts) == 4 and parts[3] == "launch":
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0 or length > 8192:
                     raise ValueError
@@ -1651,7 +1662,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(400, {"error": "Invalid preview request"})
         except RuntimeError as error:
             logger.error("Preview request failed: %s", error)
-            self.respond(502, {"error": str(error) if os.environ.get("PREVIEW_DIAGNOSTICS") == "1" else "Preview controller unavailable"})
+            self.respond(502, {"error": str(error) if parts[-1] == "native-launch" or os.environ.get("PREVIEW_DIAGNOSTICS") == "1" else "Preview controller unavailable"})
 
     def do_POST(self) -> None:
         self.handle_workload()

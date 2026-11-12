@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useQuery } from "@tanstack/react-query"
 import { Loader2, RotateCcw, RotateCw } from "lucide-react"
 import { type FormEvent, useEffect, useRef, useState } from "react"
 
@@ -6,12 +6,14 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 
 import {
+  hasPreviewRuntime,
   initialPreviewAddress,
   type PreviewContext,
   type PreviewSession,
   requestPreview,
   resolvePreviewAddress,
 } from "./preview"
+import type { PreviewControls } from "./usePreviewExecution"
 
 function PreviewBrowser({
   chatId,
@@ -179,91 +181,28 @@ export function DevelopPreview({
   workspaceReady,
   setupPending,
   open,
+  controls,
 }: {
   chatId: string
   workspaceReady: boolean
   setupPending: boolean
   open: boolean
+  controls: PreviewControls
 }) {
-  const queryClient = useQueryClient()
-  const [sessionGeneration, setSessionGeneration] = useState(0)
-  const attemptedStart = useRef(false)
-  const actionController = useRef<AbortController | null>(null)
   const active = open
-  const contextKey = ["development-preview-context", chatId]
-  const sessionKey = ["development-preview-session", chatId, sessionGeneration]
-
-  useEffect(() => {
-    if (!active) actionController.current?.abort()
-    return () => actionController.current?.abort()
-  }, [active])
-
-  const contextQuery = useQuery({
-    queryKey: contextKey,
-    enabled: active && workspaceReady,
-    gcTime: 0,
-    retry: false,
-    queryFn: ({ signal }) =>
-      requestPreview<PreviewContext>(chatId, "context", "GET", signal),
-    refetchInterval: (query) =>
-      query.state.data?.runtime === "compose" ? 2000 : false,
-  })
-
-  const action = useMutation({
-    mutationFn: async (name: "start" | "restart") => {
-      actionController.current?.abort()
-      const controller = new AbortController()
-      actionController.current = controller
-      const result = await requestPreview<PreviewContext>(
-        chatId,
-        name,
-        "POST",
-        controller.signal,
-      )
-      if (
-        ["failed", "unavailable", "needs_instructions"].includes(result.state)
-      ) {
-        throw new Error(
-          result.message ||
-            "Compose preview startup failed. Check the checkout's startup instructions.",
-        )
-      }
-      return result
-    },
-    onMutate: async () => {
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: contextKey }),
-        queryClient.cancelQueries({ queryKey: sessionKey }),
-      ])
-      setSessionGeneration((value) => value + 1)
-    },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: contextKey })
-    },
-  })
-  const start = action.mutate
+  const { contextQuery, actionPending, actionError, sessionGeneration } =
+    controls
   const context = contextQuery.data
-  useEffect(() => {
-    if (
-      active &&
-      workspaceReady &&
-      context?.runtime === "compose" &&
-      context.state === "stopped" &&
-      !attemptedStart.current
-    ) {
-      attemptedStart.current = true
-      start("start")
-    }
-  }, [active, workspaceReady, context, start])
+  const sessionKey = ["development-preview-session", chatId, sessionGeneration]
 
   const ready =
     active &&
     workspaceReady &&
     !setupPending &&
-    context?.runtime === "compose" &&
-    context.state === "ready" &&
-    !action.isPending &&
-    !action.isError
+    hasPreviewRuntime(context) &&
+    context?.state === "ready" &&
+    !actionPending &&
+    !actionError
   const sessionQuery = useQuery({
     queryKey: sessionKey,
     enabled: ready,
@@ -322,12 +261,11 @@ export function DevelopPreview({
     }
   }, [ready, chatId])
 
-  const error = action.error || contextQuery.error || sessionQuery.error
+  const error = actionError || contextQuery.error || sessionQuery.error
   const pending =
     setupPending ||
     (active && workspaceReady && contextQuery.isPending) ||
-    action.isPending ||
-    context?.state === "starting"
+    controls.starting
   let status = "Set up the repository to preview this chat."
   if (pending)
     status = setupPending
@@ -339,20 +277,17 @@ export function DevelopPreview({
     status =
       "Compose preview failed. Check the checkout's startup instructions and try Restart."
   else if (context?.state === "stopped")
-    status = "Compose preview is stopped. Select Restart to start it again."
+    status = "Compose preview is stopped. Select Launch to start it."
   else if (ready) status = "Authorizing preview…"
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {context?.runtime === "compose" && (
+      {hasPreviewRuntime(context) && (
         <div className="border-b p-2">
           <Button
             aria-label="Restart preview"
-            disabled={action.isPending || !active || !workspaceReady}
-            onClick={() => {
-              attemptedStart.current = true
-              action.mutate("restart")
-            }}
+            disabled={actionPending || !active || !workspaceReady}
+            onClick={controls.restart}
             size="sm"
             variant="outline"
           >

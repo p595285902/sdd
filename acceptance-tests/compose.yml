@@ -5,9 +5,17 @@ services:
   db:
     ports: []
 
+  preview-native-image:
+    build:
+      dockerfile: "${ACCEPTANCE_NATIVE_DOCKERFILE:-backend/preview-native.Dockerfile}"
+
   preview-controller:
+    build:
+      dockerfile: "${ACCEPTANCE_PREVIEW_DOCKERFILE:-backend/preview.Dockerfile}"
     environment:
       PREVIEW_DIAGNOSTICS: "1"
+      # Disposable, trusted fixtures on this invocation's dedicated Docker host.
+      PREVIEW_NATIVE_PRIVILEGED: "true"
       DEVELOP_ACCEPTANCE_MODE: "${DEVELOP_ACCEPTANCE_MODE-true}"
       DEVELOP_ACCEPTANCE_RESET_ENABLED: "${DEVELOP_ACCEPTANCE_RESET_ENABLED-false}"
       ACCEPTANCE_RUN_ID: "${ACCEPTANCE_RUN_ID-}"

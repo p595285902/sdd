@@ -65,6 +65,48 @@ Extract/lint without running the application:
 npm --prefix acceptance-tests run lint:specs
 ```
 
+## Test-only Docker Hub pull-through cache
+
+The acceptance harness detects the host Docker daemon's first registry mirror
+and applies it to private preview daemons through acceptance-only image overlays.
+Production Dockerfiles, Compose configuration and preview code are unchanged.
+Without a configured mirror, the normal images and acquisition policy are used.
+
+For Rancher Desktop / Docker Desktop, a daemon mirror such as
+`http://127.0.0.1:5001/` becomes `http://host.docker.internal:5001` **only inside
+the trusted acquisition helper**. Private daemons address a synthetic mirror over
+the existing Unix-socket proxy transport; they receive no host-network attachment,
+platform socket, registry credentials or cache configuration from the platform.
+The real cache origin is stored in a root-readable-only helper image file, not
+project environment variables. The host cache containers/configuration are not
+modified, and generated Dockerfiles are removed after owned stack teardown.
+
+Only registry GET/HEAD requests under `/v2/` are forwarded. Writes, arbitrary host
+URLs and direct Docker Hub fallback are rejected when this overlay is enabled.
+Other permitted public npm/PyPI acquisition retains the production proxy checks.
+A cache outage fails the test instead of silently consuming Docker Hub quota.
+
+Override the detected origin when the host cache has a different reachable
+container address (for example on Linux Engine), or disable this test overlay:
+
+```sh
+ACCEPTANCE_DOCKER_MIRROR=http://cache.example.invalid:5000 npm --prefix acceptance-tests test
+ACCEPTANCE_DOCKER_MIRROR= npm --prefix acceptance-tests test
+```
+
+The origin must be credential-free HTTP(S), without a path prefix, query or
+fragment. Use a trusted cache; this is test infrastructure, not a production
+exception to the public-acquisition policy.
+
+Local regression tests do not start Docker:
+
+```sh
+node --test acceptance-tests/support/preview-cache.test.cjs acceptance-tests/features/support/app-lifecycle.test.cjs
+python3 -m unittest discover -s acceptance-tests/support -p test_preview_cache_proxy.py
+```
+
+These checks do not replace the real effective acceptance gate.
+
 ## Workspace fixture writes
 
 Preview instruction, Compose, routing and dependency preparation use

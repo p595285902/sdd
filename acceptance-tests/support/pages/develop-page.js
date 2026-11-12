@@ -329,8 +329,11 @@ class DevelopPage {
   }
 
   async expectOrderedActivity(expectedActivity) {
+    // Match the streaming fixture's turn budget, including real agent startup,
+    // rather than Playwright's unrelated five-second assertion default.
     await expect.poll(() =>
       this.page.evaluate(() => window.__developObservedActivity ?? []),
+      { timeout: 30_000 },
     ).toEqual(expectedActivity);
   }
 
@@ -343,6 +346,7 @@ class DevelopPage {
           ),
         text,
       ),
+      { timeout: 30_000 },
     ).toBe(true);
     await expect.poll(() =>
       this.page.evaluate(

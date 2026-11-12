@@ -107,7 +107,9 @@ async function prepareUndecidedProposal(world, titlePrefix) {
 async function startPreviewDetectionTurn(world) {
   await world.apiClient.configureFakeLlm({
     prompt: '/openspec explore Edit the checkout',
-    replies: [{ kind: 'delay', delay_seconds: 10, text: 'Turn finished' }],
+    // Keep an edit window without spending most of the 15-second turn budget
+    // on an artificial provider delay before the real agent can complete.
+    replies: [{ kind: 'delay', delay_seconds: 2, text: 'Turn finished' }],
   });
   world.previewTurn = world.apiClient.request(
     world.userToken, 'post',

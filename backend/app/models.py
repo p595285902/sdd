@@ -1,9 +1,20 @@
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 
 from pydantic import EmailStr, field_validator
-from sqlalchemy import JSON, Column, DateTime, Index, String
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Index,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -298,6 +309,109 @@ class DevelopmentMessagesPublic(SQLModel):
     data: list[DevelopmentMessagePublic]
     has_more: bool
     next_cursor: str | None = None
+
+
+class PreviewExecutionStatus(StrEnum):
+    starting = "starting"
+    running = "running"
+    failed = "failed"
+    stopped = "stopped"
+    interrupted = "interrupted"
+
+
+class PreviewExecution(SQLModel, table=True):
+    """A chat-owned operation, not a DevelopmentMessage or Agent Turn."""
+
+    __table_args__ = (
+        Index("ix_previewexecution_chat_created_id", "chat_id", "created_at", "id"),
+        Index(
+            "uq_previewexecution_active_chat",
+            "chat_id",
+            unique=True,
+            postgresql_where=text("status IN ('starting', 'running')"),
+            sqlite_where=text("status IN ('starting', 'running')"),
+        ),
+        CheckConstraint(
+            "status IN ('starting', 'running', 'failed', 'stopped', 'interrupted')",
+            name="ck_previewexecution_status",
+        ),
+        CheckConstraint(
+            "last_sequence >= 0 AND controller_cursor >= 0 "
+            "AND retained_output_bytes >= 0 AND truncated_bytes >= 0",
+            name="ck_previewexecution_counters",
+        ),
+        CheckConstraint(
+            "NOT ready OR status = 'running'", name="ck_previewexecution_ready"
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    chat_id: uuid.UUID = Field(
+        foreign_key="developmentchat.id", nullable=False, ondelete="CASCADE"
+    )
+    status: PreviewExecutionStatus = Field(
+        default=PreviewExecutionStatus.starting,
+        sa_column=Column(String(32), nullable=False),
+    )
+    ready: bool = Field(default=False, nullable=False)
+    workflow_snapshot: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    created_at: datetime = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    updated_at: datetime = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    finished_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    last_sequence: int = Field(default=0, sa_type=BigInteger, nullable=False)
+    controller_cursor: int = Field(default=0, sa_type=BigInteger, nullable=False)
+    retained_output_bytes: int = Field(default=0, sa_type=BigInteger, nullable=False)
+    truncated_bytes: int = Field(default=0, sa_type=BigInteger, nullable=False)
+    chat: DevelopmentChat | None = Relationship()
+    events: list[PreviewExecutionEvent] = Relationship(
+        back_populates="execution", cascade_delete=True
+    )
+
+
+class PreviewExecutionEvent(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id", "sequence", name="uq_previewexecutionevent_sequence"
+        ),
+        UniqueConstraint(
+            "execution_id", "controller_cursor", name="uq_previewexecutionevent_cursor"
+        ),
+        CheckConstraint(
+            "sequence > 0 AND (controller_cursor IS NULL OR controller_cursor > 0) "
+            "AND output_bytes >= 0",
+            name="ck_previewexecutionevent_counters",
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    execution_id: uuid.UUID = Field(
+        foreign_key="previewexecution.id", nullable=False, ondelete="CASCADE"
+    )
+    sequence: int = Field(sa_type=BigInteger, nullable=False)
+    # NULL for backend-generated lifecycle/truncation events. The high-water mark
+    # on PreviewExecution keeps controller retries idempotent after output eviction.
+    controller_cursor: int | None = Field(default=None, sa_type=BigInteger)
+    kind: str = Field(max_length=32)
+    payload: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    output_bytes: int = Field(default=0, sa_type=BigInteger, nullable=False)
+    created_at: datetime = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    execution: PreviewExecution | None = Relationship(back_populates="events")
 
 
 # Generic message

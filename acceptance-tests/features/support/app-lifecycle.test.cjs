@@ -15,6 +15,7 @@ let stateFailure;
 let configurationFailure;
 let misappliedConfiguration;
 let startupFailure;
+let mirrors = [];
 let previews = { containers: [], networks: [], volumes: [], images: [] };
 mock.method(childProcess, 'spawn', (command, args, options) => {
   const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
@@ -32,7 +33,7 @@ mock.method(childProcess, 'spawn', (command, args, options) => {
   return child;
 });
 mock.method(childProcess, 'execFile', (_command, args, _options, callback) => {
-  let output = '';
+  let output = args[0] === 'info' ? JSON.stringify(mirrors) : '';
   assert.notEqual(args[0], 'inspect', 'Lifecycle must not collect Docker identity snapshots');
   assert.ok(!(args.includes('compose') && args.includes('ps')), 'Lifecycle must not discover snapshot container IDs');
   if (args.includes('--filter') && args.at(-1).includes('sdd.preview.project=')) {
@@ -73,7 +74,8 @@ mock.method(globalThis, 'fetch', async (url, options = {}) => {
   return { ok: true, status: 200, json: async () => ({ ...controls }) };
 });
 const app = require('./app-lifecycle.js');
-async function fresh() {
+async function fresh(options = {}) {
+  mirrors = options.mirrors || [];
   calls = []; requests = []; resetFailure = undefined; badAck = undefined;
   removalFailure = false; stateFailure = undefined; configurationFailure = false;
   misappliedConfiguration = false; startupFailure = false;
@@ -109,6 +111,28 @@ test('one stack starts with bounded readiness and no initial or later identity s
   assertNoSnapshots();
   await app.stopApplication();
 });
+test('test-only cache overlays follow the host mirror and disappear after teardown', async () => {
+  const fs = require('node:fs');
+  await fresh({ mirrors: ['http://127.0.0.1:5001/'] });
+  const cache = app.state.previewCache;
+  assert.equal(cache.upstream, 'http://host.docker.internal:5001');
+  assert.equal(app.state.env.ACCEPTANCE_PREVIEW_DOCKERFILE, cache.controllerDockerfile);
+  assert.equal(app.state.env.ACCEPTANCE_NATIVE_DOCKERFILE, cache.nativeDockerfile);
+  assert.ok(fs.existsSync(cache.controllerDockerfile));
+  assert.ok(app.state.events.some(event => event.type === 'preview-cache-enabled'));
+  assertNoSnapshots();
+  await app.stopApplication();
+  assert.equal(fs.existsSync(cache.directory), false);
+});
+
+test('no configured mirror leaves production image definitions unchanged', async () => {
+  await fresh();
+  assert.equal(app.state.previewCache, undefined);
+  assert.equal(app.state.env.ACCEPTANCE_PREVIEW_DOCKERFILE, undefined);
+  assert.equal(app.state.env.ACCEPTANCE_NATIVE_DOCKERFILE, undefined);
+  await app.stopApplication();
+});
+
 test('browser and preview use separate same-site loopback origins at the published port', async () => {
   await fresh();
   const base = new URL(app.state.baseUrl);

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { discover, acceptanceRoot, groupPaths } = require('./support/acceptance-inventory.cjs');
+const { discover, acceptanceRoot, executionGroups, groupPaths } = require('./support/acceptance-inventory.cjs');
 
 function parseArguments(args) {
   const options = { names: [], formats: [] };
@@ -20,7 +20,7 @@ function parseArguments(args) {
       else options[{ '--group': 'group', '--spec-root': 'specRoot', '--report-prefix': 'prefix' }[argument]] = value;
     } else throw new Error(`Unsupported acceptance-gate option: ${argument}`);
   }
-  if (options.group && !['normal', 'lifecycle'].includes(options.group)) throw new Error('Acceptance group must be normal or lifecycle');
+  if (options.group && !executionGroups.includes(options.group)) throw new Error(`Acceptance group must be ${executionGroups.join(', ')}`);
   if (options.prefix && !/^[a-zA-Z0-9._-]+$/.test(options.prefix)) throw new Error('Acceptance report prefix must be a basename');
   return options;
 }
@@ -129,7 +129,7 @@ async function runGate(options = {}, executeGroup = executeCucumber) {
   let activeGroup;
   console.log(`[acceptance-gate] ${partial ? 'PARTIAL validation' : options.dryRun ? 'DRY RUN — no acceptance execution' : 'COMPLETE acceptance gate'}; freshly assigned ${assignments.length} scenarios`);
   try {
-    for (const group of ['normal', 'lifecycle']) {
+    for (const group of executionGroups) {
       const selected = assignments.filter(entry => entry.group === group);
       if (!selected.length) continue;
       console.log(`[acceptance-gate] ${group}: ${selected.length} assigned scenario(s)`);
@@ -161,7 +161,7 @@ async function runGate(options = {}, executeGroup = executeCucumber) {
     summary.status = 'failed';
     summary.error = error.message;
   } finally {
-    for (const group of ['normal', 'lifecycle']) {
+    for (const group of executionGroups) {
       const selected = assignments.filter(entry => entry.group === group);
       if (selected.length && !summary.groups.some(result => result.group === group)) {
         summary.groups.push({ group, assigned: selected.length, reported: 0, passed: 0,

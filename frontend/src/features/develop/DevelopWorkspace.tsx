@@ -54,6 +54,8 @@ import { handleError } from "@/utils"
 
 import { DevelopMarkdown } from "./DevelopMarkdown"
 import { DevelopPreview } from "./DevelopPreview"
+import { DevelopPreviewExecution } from "./DevelopPreviewExecution"
+import { previewTimeline } from "./previewExecution"
 import {
   applyStreamEvent,
   cacheConversation,
@@ -65,6 +67,7 @@ import {
   startOptimisticTurn,
 } from "./state"
 import { streamDevelopTurn } from "./stream"
+import { usePreviewControls } from "./usePreviewExecution"
 
 const formatDuration = (seconds: number) => {
   const wholeSeconds = Math.max(0, Math.floor(seconds))
@@ -161,6 +164,8 @@ export function DevelopWorkspace() {
         })
       ).data,
   })
+  const workspaceReady =
+    workspaceQuery.data?.ready ?? selected?.workspace_ready ?? false
   const messagesQuery = useInfiniteQuery({
     enabled: Boolean(selected),
     queryKey: ["development-messages", selected?.id],
@@ -308,6 +313,12 @@ export function DevelopWorkspace() {
         ["development-workspace", selected?.id],
         workspace,
       ),
+  })
+  const previewControls = usePreviewControls({
+    chatId: selected?.id,
+    workspaceReady,
+    setupPending: setupWorkspace.isPending,
+    open: contextVisible,
   })
   const presence = useMutation({
     mutationFn: async (mode: PresenceMode) =>
@@ -471,9 +482,31 @@ export function DevelopWorkspace() {
       aria-label="Development context"
       className="flex h-full min-h-0 min-w-0 flex-col border-l bg-background"
     >
-      <div className="flex h-14 shrink-0 items-center justify-between gap-1 border-b px-3">
+      <div className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-1 border-b px-3 py-2">
         <h2 className="text-sm font-semibold">Context</h2>
-        <div className="flex items-center gap-1">
+        <div className="flex max-w-full flex-wrap items-center gap-1">
+          <Button
+            aria-label={
+              previewControls.starting ? "Launching preview" : "Launch preview"
+            }
+            className="gap-1 px-2"
+            disabled={previewControls.launchDisabled}
+            onClick={previewControls.launch}
+            size="sm"
+            title={
+              previewControls.busy
+                ? "Preview is starting or running"
+                : "Launch preview"
+            }
+            variant="outline"
+          >
+            {previewControls.starting ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Rocket />
+            )}
+            {previewControls.starting ? "Launching…" : "Launch"}
+          </Button>
           <Button
             aria-label={contextExpanded ? "Collapse Context" : "Expand Context"}
             aria-expanded={contextExpanded}
@@ -500,12 +533,11 @@ export function DevelopWorkspace() {
       {selected ? (
         <DevelopPreview
           chatId={selected.id}
+          controls={previewControls}
           key={selected.id}
           open={contextVisible}
           setupPending={setupWorkspace.isPending}
-          workspaceReady={
-            workspaceQuery.data?.ready ?? selected.workspace_ready
-          }
+          workspaceReady={workspaceReady}
         />
       ) : (
         <p className="p-4 text-sm text-muted-foreground">
@@ -707,80 +739,109 @@ export function DevelopWorkspace() {
                         : "Load older messages"}
                     </Button>
                   )}
-                  {conversation.messages.map((message) => (
-                    <article
-                      aria-label={
-                        message.kind === "proposal" ? "Proposal" : undefined
-                      }
-                      className={`max-w-[88%] rounded-md px-4 py-3 text-sm ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted"}`}
-                      key={message.id}
-                    >
-                      <span className="sr-only">{message.role}: </span>
-                      {message.activity?.length ||
-                      (message.role === "assistant" &&
-                        message.duration_seconds != null) ? (
-                        <details className="mb-3 text-xs">
-                          <summary>
-                            Agent activity
-                            {message.duration_seconds != null &&
-                              ` · ${formatDuration(message.duration_seconds)}`}
-                          </summary>
-                          <ol className="mt-2 list-decimal pl-4">
-                            {message.activity?.map((part, index) => (
-                              <li key={`${message.id}-${index}`}>
-                                {part.text}
-                              </li>
-                            ))}
-                          </ol>
-                        </details>
-                      ) : null}
-                      {message.role === "assistant" ? (
-                        <DevelopMarkdown>{message.content}</DevelopMarkdown>
-                      ) : (
-                        <div className="whitespace-pre-wrap">
-                          {message.content}
-                        </div>
-                      )}
-                      {message.kind === "proposal" && (
-                        <div className="mt-4 flex flex-wrap items-center gap-2 border-t pt-3">
-                          <span className="mr-auto text-xs font-medium capitalize text-muted-foreground">
-                            {message.proposal_state}
-                          </span>
-                          <Button
-                            disabled={
-                              message.proposal_state !== "undecided" ||
-                              conversation.running ||
-                              rejectProposal.isPending
-                            }
-                            onClick={() => approveProposal(message.id)}
-                            size="sm"
-                            type="button"
-                          >
-                            Approve
-                          </Button>
-                          <Button
-                            disabled={
-                              message.proposal_state !== "undecided" ||
-                              conversation.running ||
-                              rejectProposal.isPending
-                            }
-                            onClick={() =>
-                              selected &&
-                              rejectProposal.mutate({
-                                chatId: selected.id,
-                                messageId: message.id,
-                              })
-                            }
-                            size="sm"
-                            type="button"
-                            variant="outline"
-                          >
-                            Reject
-                          </Button>
-                        </div>
-                      )}
-                    </article>
-                  ))}
+                  {previewControls.executionsQuery.error && (
+                    <p className="text-sm text-destructive" role="alert">
+                      Preview history unavailable:{" "}
+                      {previewControls.executionsQuery.error.message}
+                      <Button
+                        onClick={() =>
+                          void previewControls.executionsQuery.refetch()
+                        }
+                        size="sm"
+                        variant="ghost"
+                      >
+                        Retry history
+                      </Button>
+                    </p>
+                  )}
+                  {previewTimeline(
+                    conversation.messages,
+                    previewControls.executions,
+                  ).map((entry) => {
+                    if (entry.kind === "execution")
+                      return (
+                        <DevelopPreviewExecution
+                          chatId={selected.id}
+                          execution={entry.execution}
+                          key={`execution-${entry.id}`}
+                        />
+                      )
+                    const message = entry.message
+                    return (
+                      <article
+                        aria-label={
+                          message.kind === "proposal" ? "Proposal" : undefined
+                        }
+                        className={`max-w-[88%] rounded-md px-4 py-3 text-sm ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted"}`}
+                        key={message.id}
+                      >
+                        <span className="sr-only">{message.role}: </span>
+                        {message.activity?.length ||
+                        (message.role === "assistant" &&
+                          message.duration_seconds != null) ? (
+                          <details className="mb-3 text-xs">
+                            <summary>
+                              Agent activity
+                              {message.duration_seconds != null &&
+                                ` · ${formatDuration(message.duration_seconds)}`}
+                            </summary>
+                            <ol className="mt-2 list-decimal pl-4">
+                              {message.activity?.map((part, index) => (
+                                <li key={`${message.id}-${index}`}>
+                                  {part.text}
+                                </li>
+                              ))}
+                            </ol>
+                          </details>
+                        ) : null}
+                        {message.role === "assistant" ? (
+                          <DevelopMarkdown>{message.content}</DevelopMarkdown>
+                        ) : (
+                          <div className="whitespace-pre-wrap">
+                            {message.content}
+                          </div>
+                        )}
+                        {message.kind === "proposal" && (
+                          <div className="mt-4 flex flex-wrap items-center gap-2 border-t pt-3">
+                            <span className="mr-auto text-xs font-medium capitalize text-muted-foreground">
+                              {message.proposal_state}
+                            </span>
+                            <Button
+                              disabled={
+                                message.proposal_state !== "undecided" ||
+                                conversation.running ||
+                                rejectProposal.isPending
+                              }
+                              onClick={() => approveProposal(message.id)}
+                              size="sm"
+                              type="button"
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              disabled={
+                                message.proposal_state !== "undecided" ||
+                                conversation.running ||
+                                rejectProposal.isPending
+                              }
+                              onClick={() =>
+                                selected &&
+                                rejectProposal.mutate({
+                                  chatId: selected.id,
+                                  messageId: message.id,
+                                })
+                              }
+                              size="sm"
+                              type="button"
+                              variant="outline"
+                            >
+                              Reject
+                            </Button>
+                          </div>
+                        )}
+                      </article>
+                    )
+                  })}
                   {(conversation.running ||
                     conversation.response ||
                     conversation.activity.length > 0) && (

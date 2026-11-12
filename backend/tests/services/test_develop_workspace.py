@@ -222,8 +222,10 @@ def test_preview_worker_expires_idle_and_orphaned_chats_only(
         for chat_id in (idle, active, orphan)
     ]
     stopped: list[uuid.UUID] = []
+    collected: list[uuid.UUID] = []
     monkeypatch.setattr(worker, "docker", lambda method, path: (200, containers))
     monkeypatch.setattr(worker, "stop", lambda chat_id: stopped.append(chat_id))
+    monkeypatch.setattr(worker.legacy, "events", lambda chat_id: collected.append(chat_id))
     monkeypatch.setattr(worker, "status", lambda chat_id: {"state": "running"})
     monkeypatch.setattr(worker.time, "time", lambda: 250)
     with worker.activity_lock:
@@ -233,8 +235,30 @@ def test_preview_worker_expires_idle_and_orphaned_chats_only(
     worker.sweep(now=301)
 
     assert stopped == [idle, orphan]
+    assert collected == [active]
     with worker.activity_lock:
         worker.activity.clear()
+
+
+def test_preview_maintenance_retries_and_logs_without_exception_contents(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    worker = importlib.import_module("app.services.preview_controller")
+    attempts = []
+
+    def sweep() -> None:
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("sensitive-project-output")
+        raise StopIteration
+
+    monkeypatch.setattr(worker, "sweep", sweep)
+    monkeypatch.setattr(worker.time, "sleep", lambda _seconds: None)
+    with pytest.raises(StopIteration):
+        worker.sweep_forever()
+    assert len(attempts) == 2
+    assert "Preview maintenance pass failed (RuntimeError)" in caplog.text
+    assert "sensitive-project-output" not in caplog.text
 
 
 def test_preview_worker_restart_replaces_only_selected_chat(

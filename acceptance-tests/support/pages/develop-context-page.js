@@ -94,7 +94,7 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
       const panel = await this.panel.textContent();
       const frames = this.page.frames().map(frame => ({ name: frame.name(), url: frame.url() }));
       await this.captureLayout('develop-context-ready-failure');
-      throw new Error(`${error.message}\nContext: ${panel}\nFrames: ${JSON.stringify(frames)}`);
+      throw new Error(`${error.message}\nContext: ${panel}\nFrames: ${JSON.stringify(frames)}\nPreview requests: ${JSON.stringify(this.previewRequests || [])}`);
     }
     await expect(this.previewElement).toHaveCount(1);
     await this.expectToolbar();
@@ -420,7 +420,7 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
     } catch (error) {
       const panel = await this.panel.textContent();
       const frames = this.page.frames().map(frame => ({ name: frame.name(), url: frame.url() }));
-      throw new Error(`${error.message}\nContext: ${panel}\nFrames: ${JSON.stringify(frames)}`);
+      throw new Error(`${error.message}\nContext: ${panel}\nFrames: ${JSON.stringify(frames)}\nPreview requests: ${JSON.stringify(this.previewRequests || [])}`);
     }
     await this.frame.getByRole('button', { name: 'Add item' }).click();
     await expect(this.frame.locator('output')).toHaveText('Items: 1');
@@ -471,6 +471,16 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
   }
 
   async restartWithHeldRequest() {
+    this.previewRequests = [];
+    const record = (request, details) => {
+      const pathname = new URL(request.url()).pathname;
+      if (!pathname.includes('/preview/')) return;
+      if (details.status < 400 && !pathname.endsWith('/restart') && !pathname.endsWith('/browser-session')) return;
+      this.previewRequests.push({ method: request.method(), pathname, ...details });
+      if (this.previewRequests.length > 40) this.previewRequests.shift();
+    };
+    this.page.on('response', response => record(response.request(), { status: response.status() }));
+    this.page.on('requestfailed', request => record(request, { failure: request.failure()?.errorText }));
     await this.page.route('**/api/v1/develop/chats/*/preview/restart', async route => {
       await new Promise(resolve => { this.releaseRestart = resolve; });
       await route.continue();

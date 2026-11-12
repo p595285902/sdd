@@ -93,6 +93,37 @@ npm run test:runtime
 
 The check verifies normalized Compose storage and streaming configuration, exact executable versions, the single-worker image command, writable workspace storage, and persistence across container replacement.
 
+### Native Compose previews (explicit trusted-deployment opt-in)
+
+Native Compose is disabled by default. Launch fails closed unless the deployment explicitly sets `PREVIEW_NATIVE_PRIVILEGED=true` and builds the native runtime image. Project documentation cannot enable this policy. There is no shared-platform-daemon fallback.
+
+Use a **dedicated Docker host or VM and trusted projects only**. The outer sandbox is privileged to support rootless Docker-in-Docker; the private daemon still runs as UID 1000. Privilege weakens host isolation: malicious or compromised project code could affect the host, accessible secrets, or other workloads. This is **not hostile-code containment, VM-grade isolation, or secure multi-tenancy between mutually untrusted chats**. Do not enable it on a shared production Docker host.
+
+Build the separate, pinned Docker 28.5.1 / Compose 2.40.3 runtime before starting the controller:
+
+```bash
+# Run only after approving the dedicated host and trusted-project policy.
+export PREVIEW_NATIVE_PRIVILEGED=true
+docker compose -f compose.yml -f compose.deploy.yml --profile native-runtime-build build preview-native-image
+docker compose -f compose.yml -f compose.deploy.yml up -d --build backend preview-controller
+```
+
+The build-only service does not run with the normal deployment. The controller selects `${COMPOSE_PROJECT_NAME:-sdd}-preview-native:runtime`; its `PREVIEW_NATIVE_IMAGE` setting may instead identify an explicitly provisioned compatible image. Never substitute the platform Docker socket for a missing runtime image. The native image pins the rootless Docker base by digest in `backend/preview-native.Dockerfile`.
+
+The host must support rootless user namespaces/subordinate IDs, RootlessKit, overlay storage and cgroup-v2 aggregate accounting under this explicitly approved outer policy. The bounded feasibility and product integration were exercised on Rancher Desktop Linux/arm64; a production Linux Docker Engine deployment must verify these prerequisites and run the acceptance suite on its own host. Do not change global seccomp/sysctl policy to work around a failed launch.
+
+Each chat's outer workload has 0.5 CPU, 1536 MiB memory/swap total and 512 processes. Its read-only root filesystem uses bounded tmpfs storage: 1024 MiB private Docker data, 32 MiB home, 16 MiB runtime, 96 MiB temporary files, 96 MiB selected source and 1 MiB unused rootful Docker data. Memory-backed files consume the same aggregate memory budget as application/build processes; size capacity for concurrent chats accordingly. Inner rootless cgroups are not the authority: all nested services and builds remain subject to the outer limits.
+
+The trusted controller manages outer resources. Project commands receive only the private rootless daemon endpoint and project configuration, never platform Docker settings/credentials, backend environment, host binds, other checkouts or published platform ports. The selected checkout is copied one way into private storage; build output and private database state never synchronize back. Project-requested host namespaces, control sockets, privileged inner services and paths outside that checkout are rejected.
+
+Image/package acquisition uses the bounded trusted proxy's explicit public Docker Hub, npm and PyPI allowlist with public-address/TLS checks. Private registries, arbitrary internet destinations and platform networking are not general proxy targets. No registry login credentials are injected. Only owner-authenticated registered application/API routes reach Context; database, mail and administration ports remain sandbox-local.
+
+Owners must click **Launch**. Context open, refresh, heartbeat and completed Agent Turns do not start commands. Commands, output and lifecycle statuses are persisted independently of assistant messages. Known project secrets are masked before output persistence/delivery; this is best-effort known-value masking, not protection against deliberate encoded disclosure. Long-running watch output and output-stream connections do not extend the five-minute visible-Context idle lifetime. Expiry/restart removes the private daemon and writable runtime state but retains redacted history; chat deletion removes its history too. Back up the database as well as checkout storage.
+
+Output retention is bounded per execution: the native journal and durable database each retain at most 256 KiB and 1024 stdout/stderr events, with explicit truncation markers. Command starts/exits and terminal status survive output eviction. Database batches contain at most 100 events, output chunks are capped at 64 KiB, and workflow/event metadata is capped at 64 KiB. The browser independently caps displayed output at 1 MiB and identifies omitted text. These are output bounds, not a total-history quota: old executions remain until their chat is deleted, so monitor database growth and apply an explicitly approved retention policy rather than silently deleting history.
+
+For rollback, disable new native launches with `PREVIEW_NATIVE_PRIVILEGED=false`, replace the controller with that configuration, and stop each owned native workload through the trusted controller's `DELETE /workloads/{chat_id}` management operation. Let backend execution reconciliation retain terminal history. Keep the additive execution tables/migration and history-capable frontend/backend; do not roll back to automatic startup or shared-daemon project execution. Never use a broad Docker prune or delete the shared workspace/database volumes for preview cleanup.
+
 ## Deploy with GitHub Actions
 
 The included `.github/workflows/deploy-docker-compose.yml` workflow runs the deployment commands on the server when manually triggered from GitHub Actions.

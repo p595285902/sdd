@@ -6,7 +6,8 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from http.cookies import CookieError, SimpleCookie
@@ -42,6 +43,7 @@ from app.models import (
     DevelopmentProposalState,
     DevelopmentWorkspacePublic,
     Message,
+    PreviewExecution,
     get_datetime_utc,
 )
 from app.services.acceptance_reset import (
@@ -84,13 +86,54 @@ from app.services.develop_workspace import (
     setup_workspace,
     workspace_path,
 )
-from app.services.preview_compose import documented_compose, validated_graph
+from app.services.preview_execution_lifecycle import (
+    SECRET_KEY,
+    PreviewExecutionLifecycle,
+    event_public,
+    execution_public,
+    known_secret_redactor,
+)
+from app.services.preview_executions import (
+    ACTIVE_STATUSES,
+    MAX_BATCH_EVENTS,
+    PreviewEventInput,
+    _add_event,
+    _lock_chat,
+    append_events,
+    get_active_execution,
+    get_execution_for_chat,
+    get_or_create_active_execution,
+    list_executions,
+    read_events,
+    set_terminal_status,
+    set_workflow_snapshot,
+)
+from app.services.preview_native_plan import (
+    PreviewInstructionsError,
+    resolve_native_plan,
+)
+from app.services.preview_redaction import SecretRedactor
 
-router = APIRouter(prefix="/develop/chats", tags=["develop"])
 logger = logging.getLogger(__name__)
 preview_controller = PreviewController(
     root=settings.DEVELOP_WORKSPACE_ROOT, url="http://preview-controller:8090"
 )
+preview_lifecycle = PreviewExecutionLifecycle(
+    engine, preview_controller,
+    barrier=acceptance_reset.barrier if reset_enabled() else None,
+)
+
+
+@asynccontextmanager
+async def _preview_lifespan(_app: Any) -> AsyncIterator[None]:
+    preview_lifecycle.start()
+    try:
+        yield
+    finally:
+        await run_in_threadpool(preview_lifecycle.stop)
+
+
+router = APIRouter(prefix="/develop/chats", tags=["develop"], lifespan=_preview_lifespan)
 
 
 class PreviewLaunchRequest(BaseModel):
@@ -175,65 +218,198 @@ SSE_KIND_ALIASES = {
 }
 
 
-def _preview_status(chat_id: uuid.UUID) -> dict[str, str]:
+def _preview_status(chat_id: uuid.UUID) -> dict[str, Any]:
+    """Read-only runtime status; never resolves instructions or starts resources."""
     try:
         workload = preview_controller.status(chat_id)
     except httpx.HTTPStatusError as error:
         if error.response.status_code == 404:
             return {"state": "stopped"}
         raise
-    if workload["state"] != "running":
-        return {"state": "failed" if workload["state"] == "failed" else "stopped"}
-    if "initial_port" in workload:
+    state = workload.get("state", "stopped")
+    if state in ("starting", "failed", "stopped", "interrupted"):
+        return {**workload, "state": state}
+    if state == "ready" or (state == "running" and workload.get("ready", "initial_port" in workload)):
         return {**workload, "state": "ready"}
-    return {"state": "starting"}
+    return {**workload, "state": "starting"}
 
 
-def _start_preview(session: Session, chat: DevelopmentChat) -> dict[str, str]:
+def _saved_preview_instructions(session: Session, chat_id: uuid.UUID) -> dict[str, Any]:
+    for execution in list_executions(session, chat_id, limit=200):
+        saved = execution.workflow_snapshot.get("preview_instructions")
+        if isinstance(saved, dict):
+            return saved
+    return {}
+
+
+def _operation_response(execution: PreviewExecution, **extra: Any) -> dict[str, Any]:
+    state = "ready" if execution.ready else str(execution.status)
+    return {"state": state, "ready": execution.ready, "execution": execution_public(execution), **extra}
+
+
+def _save_preview_instructions(
+    session: Session, chat: DevelopmentChat, request: PreviewLaunchRequest, redactor: SecretRedactor
+) -> dict[str, Any]:
+    _lock_chat(session, chat.id)
+    latest = list_executions(session, chat.id, limit=1)
+    execution = latest[0] if latest and latest[0].status not in ACTIVE_STATUSES else None
+    if execution is None:
+        execution = PreviewExecution(chat_id=chat.id, status="failed", finished_at=get_datetime_utc())
+        session.add(execution)
+        session.flush()
+    snapshot = dict(execution.workflow_snapshot)
+    for match in re.finditer(r"\b([\w-]+)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s]+)", request.answer or ""):
+        if SECRET_KEY.search(match[1]):
+            redactor.update_secrets([match[2].strip("\"'")])
+    safe_answer = redactor.redact(request.answer or "")
+    snapshot["preview_instructions"] = {
+        "answer": safe_answer, "pointer": redactor.redact(request.pointer),
+        "requires_secret_reference": safe_answer != request.answer,
+    }
+    execution.workflow_snapshot = snapshot
+    _add_event(session, execution, kind="status", payload={
+        "status": str(execution.status), "ready": False,
+        "reason": "Preview instructions saved for this chat. Click Launch to run them.",
+    })
+    session.commit()
+    return _operation_response(execution, state="stopped", message="Preview instructions saved. Click Launch to run them.")
+
+
+def _drain_preview_events(session: Session, execution: PreviewExecution) -> None:
+    # The stopped journal is immutable, but can span multiple bounded pages.
+    # Finish before terminalizing/replacing its owner and clearing runtime caches.
+    for _ in range(128):
+        after = execution.controller_cursor
+        try:
+            result = preview_controller.events(execution.chat_id, after)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                return
+            raise
+        reported = result.get("execution_id")
+        if reported is not None and str(reported) != str(execution.id):
+            return
+        incoming = result.get("events", [])
+        if not isinstance(incoming, list) or len(incoming) > 1000:
+            raise ValueError("Invalid controller event batch")
+        for offset in range(0, len(incoming), MAX_BATCH_EVENTS):
+            append_events(session, execution.id, [
+                PreviewEventInput(event["cursor"], event["kind"], event.get("payload", {}))
+                for event in incoming[offset:offset + MAX_BATCH_EVENTS]
+            ])
+        target = result.get("cursor", execution.controller_cursor)
+        if not isinstance(target, int) or isinstance(target, bool) or target < 0:
+            raise ValueError("Invalid controller journal cursor")
+        if execution.controller_cursor >= target:
+            return
+        if execution.controller_cursor <= after:
+            raise RuntimeError("Stopped preview journal did not advance")
+    raise RuntimeError("Stopped preview journal exceeded its drain bound")
+
+
+def _start_preview(
+    session: Session, chat: DevelopmentChat,
+    request: PreviewLaunchRequest | None = None, *, restart: bool = False,
+) -> dict[str, Any]:
     if not chat.workspace_ready:
-        return {"state": "unavailable"}
+        raise HTTPException(status_code=409, detail="Development Workspace is not ready")
+    request = request or PreviewLaunchRequest()
+    checkout = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
     try:
-        current = _preview_status(chat.id)
-    except httpx.HTTPError:
-        logger.exception("Preview status unavailable for chat %s", chat.id)
-        return {"state": "failed"}
+        redactor = known_secret_redactor(checkout)
+    except (OSError, UnicodeError, ValueError):
+        redactor = SecretRedactor()
+        execution, created = get_or_create_active_execution(session, chat.id)
+        if created:
+            set_terminal_status(session, execution.id, "failed", reason="Project secret configuration could not be loaded safely.")
+        session.commit()
+        return _operation_response(execution, message="Project secret configuration could not be loaded safely.")
+    if request.answer is not None:
+        return _save_preview_instructions(session, chat, request, redactor)
+    saved = _saved_preview_instructions(session, chat.id)
+    if restart:
+        _lock_chat(session, chat.id)
+        previous = get_active_execution(session, chat.id)
+        try:
+            preview_controller.stop(chat.id)
+            if previous is not None:
+                _drain_preview_events(session, previous)
+                if previous.status in ACTIVE_STATUSES:
+                    set_terminal_status(session, previous.id, "stopped", reason="Explicit Restart requested by the chat owner.")
+                else:
+                    _add_event(session, previous, kind="status", payload={"status": str(previous.status), "ready": False, "reason": "Explicit Restart requested by the chat owner."})
+        except (httpx.HTTPError, RuntimeError, ValueError):
+            session.rollback()
+            raise HTTPException(status_code=502, detail="Preview workload could not be stopped for Restart") from None
+    execution, created = get_or_create_active_execution(session, chat.id)
+    execution_id = execution.id
+    session.commit()  # Durable single ownership precedes discovery or provisioning.
+    if not created:
+        return _operation_response(execution)
+    pointer = request.pointer if request.pointer != "README.md" else saved.get("pointer", "README.md")
+    answer = saved.get("answer")
+    native_runtime = False
     try:
-        checkout = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
-        if documented_compose(checkout):
+        if saved.get("requires_secret_reference"):
+            raise PreviewInstructionsError("Saved instructions contained credential values. Move those values into a checkout-local environment file and save a command or pointer without embedded credentials.")
+        native = resolve_native_plan(checkout, pointer=pointer, answer=answer)
+        if native is not None:
+            payload = native.as_dict()
+            native_runtime = True
+        else:
+            provider_key = settings.OPENAI_API_KEY
+            if provider_key is None:
+                raise PreviewInstructionsError("Please provide a complete startup command or checkout-local instruction pointer. Launch again after saving instructions.")
+            plan = resolve_preview_plan(
+                root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id,
+                provider_key=provider_key.get_secret_value(),
+                provider_base_url=str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None,
+                model=settings.DEVELOP_AGENT_MODEL, answer=answer, pointer=pointer,
+            )
+            if plan is None:
+                raise PreviewInstructionsError("Please provide a complete startup command or checkout-local instruction pointer. Launch again after saving instructions.")
+            payload = plan.model_dump()
+            classification = classify_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
+            if plan.website is None and classification.kind == "api_documentation":
+                payload["initial_path"] = classification.entry_point
+            native_runtime = False
+        redactor = known_secret_redactor(checkout, payload)
+        snapshot = {**payload, "preview_instructions": saved}
+        set_workflow_snapshot(session, execution_id, snapshot, redactor=redactor)
+        session.commit()  # Workflow/source/argv are safe and durable before execution.
+        _lock_chat(session, chat.id)
+        active = get_active_execution(session, chat.id)
+        if active is None or active.id != execution_id:
+            session.rollback()
+            session.refresh(execution)
+            return _operation_response(execution)
+        # Prevent Restart from stopping a not-yet-dispatched attempt and then
+        # allowing its stale creator to provision a runtime after the stop.
+        if native_runtime:
+            preview_controller.native_launch(chat.id, payload, str(execution_id))
+        else:
             preview_controller.start(chat.id)
-            return _preview_status(chat.id)
-    except (ValueError, FileNotFoundError, RuntimeError, httpx.HTTPError):
-        logger.exception("Compose preview startup failed for chat %s", chat.id)
-        return {"state": "failed"}
-    if current["state"] in ("ready", "starting"):
-        return current
-    provider_key = settings.OPENAI_API_KEY
-    if provider_key is None:
-        return {"state": "unavailable"}
-    answer = next((message.content for message in session.exec(
-        select(DevelopmentMessage).where(
-            DevelopmentMessage.chat_id == chat.id, DevelopmentMessage.role == "user"
-        ).order_by(col(DevelopmentMessage.created_at).desc(), col(DevelopmentMessage.id).desc())
-    ).all() if any(part.get("preview_instruction_answer") == "true" for part in message.activity)), None)
-    try:
-        plan = resolve_preview_plan(
-            root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id,
-            provider_key=provider_key.get_secret_value(),
-            provider_base_url=str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None,
-            model=settings.DEVELOP_AGENT_MODEL, answer=answer,
+            preview_controller.launch(chat.id, {**payload, "execution_id": str(execution_id)})
+        active.updated_at = get_datetime_utc()
+        session.add(active)
+        session.commit()
+    except PreviewInstructionsError as error:
+        session.rollback()
+        execution = set_terminal_status(session, execution_id, "failed", reason=str(error), redactor=redactor)
+        session.commit()
+        return _operation_response(execution, state="needs_instructions", message=redactor.redact(str(error)))
+    except (ValueError, OSError, RuntimeError, httpx.HTTPError, KeyError, StopIteration, TypeError) as error:
+        session.rollback()
+        reason = (
+            redactor.redact(str(error))[:8192]
+            if native_runtime and isinstance(error, RuntimeError)
+            else "Preview startup failed. Check the persisted command diagnostics and deployment configuration."
         )
-        if plan is None:
-            return {"state": "unavailable"}
-        payload = plan.model_dump()
-        classification = classify_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
-        if plan.website is None and classification.kind == "api_documentation":
-            payload["initial_path"] = classification.entry_point
-        preview_controller.start(chat.id)
-        preview_controller.launch(chat.id, payload)
-        return _preview_status(chat.id)
-    except (ValueError, FileNotFoundError, RuntimeError, httpx.HTTPError):
-        logger.exception("Preview startup failed for chat %s", chat.id)
-        return {"state": "failed"}
+        execution = set_terminal_status(session, execution_id, "failed", reason=reason, redactor=redactor)
+        session.commit()
+        return _operation_response(execution, message=reason)
+    session.refresh(execution)
+    return _operation_response(execution)
 
 
 def _get_chat(
@@ -527,10 +703,6 @@ def _run_streamed_exploration(
             )
             if relevant_turn_change(before, after):
                 turn.emit("preview-change", "changed")
-                try:
-                    _start_preview(session, chat)
-                except httpx.HTTPError:
-                    logger.exception("Preview startup unavailable for chat %s", chat.id)
         develop_turn_manager.finish_turn(turn, state, content)
 
 
@@ -614,10 +786,6 @@ def _run_streamed_apply(*, chat_id: uuid.UUID, turn: TurnSession) -> None:
             after = snapshot_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
             if relevant_turn_change(before, after):
                 turn.emit("preview-change", "changed")
-                try:
-                    _start_preview(session, chat)
-                except httpx.HTTPError:
-                    logger.exception("Preview startup unavailable for chat %s", chat.id)
         develop_turn_manager.finish_turn(turn, state, content)
 
 
@@ -820,7 +988,7 @@ def delete_development_chat(
     return Message(message="Development Chat deleted")
 
 
-@router.post("/{chat_id}/preview/start", response_model=dict[str, str])
+@router.post("/{chat_id}/preview/start")
 def start_development_preview(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
 ) -> Any:
@@ -931,7 +1099,7 @@ async def browser_preview_resource(
     content_type = request.headers.get("content-type", "").split(";", 1)[0]
     body = None
     if request.method == "POST":
-        if content_type not in ("application/x-www-form-urlencoded", "multipart/form-data", "text/plain"):
+        if content_type not in ("application/x-www-form-urlencoded", "multipart/form-data", "text/plain", "application/json"):
             raise HTTPException(status_code=415, detail="Unsupported preview form")
         body = await request.body()
         if len(body) > 32768:
@@ -954,8 +1122,10 @@ async def browser_preview_resource(
     if len(forwarded_cookie) > 8192:
         raise HTTPException(status_code=400, detail="Preview cookie is too large")
     try:
+        project_authorization = request.headers.get("authorization", "")
         fetch_preview = partial(preview_controller.fetch, chat_id, "/" + asset_path, request.url.query, port, body,
-                                request.headers.get("content-type", "") if body is not None else "", forwarded_cookie)
+                                request.headers.get("content-type", "") if body is not None else "", forwarded_cookie,
+                                **({"authorization": project_authorization} if project_authorization else {}))
         result = await run_in_threadpool(fetch_preview) if reset_enabled() else fetch_preview()
     except (httpx.HTTPError, FileNotFoundError, RuntimeError, ValueError):
         raise HTTPException(status_code=404, detail="Not found") from None
@@ -1083,50 +1253,35 @@ async def browser_preview_socket(
         await websocket.close(code=1008)
 
 
-@router.get("/{chat_id}/preview/context", response_model=dict[str, str])
+@router.get("/{chat_id}/preview/context")
 def development_preview_context(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
 ) -> Any:
-    """Describe Context without starting or integrating non-Compose runtimes."""
+    """Checkout-local discovery and status only: no model, preflight or launch."""
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
     if not chat.workspace_ready:
         return {"state": "unavailable", "message": "Set up the repository to preview this chat."}
     try:
         checkout = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
-        documented = documented_compose(checkout)
-        if documented is None:
+        saved = _saved_preview_instructions(session, chat.id)
+        native = resolve_native_plan(checkout, pointer=saved.get("pointer"), answer=saved.get("answer"))
+        if native is None:
             return {
                 "state": "needs_instructions", "runtime": "unsupported",
-                "message": "Context requires checkout-local Docker Compose startup instructions in README.md. Non-Compose previews are not supported in Context.",
+                "message": "Context requires checkout-local Docker Compose startup instructions. Non-Compose preview APIs remain available separately.",
             }
-        validated_graph(checkout, *documented)
-    except (ValueError, FileNotFoundError, RuntimeError):
-        return {"state": "failed", "runtime": "compose", "message": "The documented Compose project is missing, unsafe or unsupported."}
+    except (ValueError, OSError, RuntimeError):
+        return {"state": "needs_instructions", "runtime": "compose", "message": "The checkout-local startup instructions are missing, conflicting or unsafe. Provide an unambiguous local command or documentation pointer."}
     try:
         current = _preview_status(chat.id)
     except httpx.HTTPError:
         return {"state": "failed", "runtime": "compose", "message": "Preview controller unavailable."}
-    if current.get("state") == "ready" and current.get("runtime") != "compose":
-        return {
-            "state": "unsupported", "runtime": "unsupported",
-            "message": "This checkout has an existing non-Compose runtime. Context only supports Compose previews; this runtime has not been restarted.",
-        }
-    if current.get("state") == "ready" and "api_port" not in current:
-        classification = classify_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
-        if classification.kind == "api_documentation":
-            initial_path = classification.entry_point or "/docs"
-            instructions = (checkout / "README.md").read_text(encoding="utf-8")
-            if re.search(re.escape(initial_path) + r"/(?=[\s`.,;:)\]}\"']|$)", instructions):
-                initial_path += "/"
-            current = {
-                **current, "initial_path": initial_path,
-                "api_port": current["initial_port"],
-            }
-            current.pop("website_port", None)
+    if current.get("state") == "ready" and current.get("runtime") not in ("compose", "native-compose"):
+        return {"state": "unsupported", "runtime": "unsupported", "message": "An existing non-Compose runtime is not embedded in Context. It has not been restarted."}
     return {**current, "runtime": "compose"}
 
 
-@router.get("/{chat_id}/preview/status", response_model=dict[str, str])
+@router.get("/{chat_id}/preview/status")
 def development_preview_status(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
 ) -> Any:
@@ -1139,91 +1294,79 @@ def development_preview_status(
         return {"state": "failed"}
 
 
-@router.post("/{chat_id}/preview/restart", response_model=dict[str, str])
+@router.post("/{chat_id}/preview/restart")
 def restart_development_preview(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
 ) -> Any:
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
-    if not chat.workspace_ready:
-        raise HTTPException(
-            status_code=409, detail="Development Workspace is not ready"
-        )
-    try:
-        return preview_controller.restart(chat.id)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Development Workspace not found")
-    except httpx.HTTPError:
-        raise HTTPException(status_code=502, detail="Preview controller unavailable")
+    return _start_preview(session, chat, restart=True)
 
 
-@router.post("/{chat_id}/preview/launch", response_model=dict[str, str])
+@router.post("/{chat_id}/preview/launch")
 def launch_development_preview(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID,
     request: PreviewLaunchRequest,
 ) -> Any:
     chat = _get_chat(session=session, current_user=current_user, chat_id=chat_id)
-    if not chat.workspace_ready:
-        raise HTTPException(status_code=409, detail="Development Workspace is not ready")
-    try:
-        checkout = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
-        if documented_compose(checkout):
-            return preview_controller.start(chat.id)
-    except (ValueError, FileNotFoundError, RuntimeError, httpx.HTTPError):
-        prompt = "The documented Compose project is unsafe or unsupported. Please provide compatible checkout-local instructions."
-        session.add(DevelopmentMessage(role="assistant", content=prompt, chat_id=chat.id))
-        session.commit()
-        return {"state": "needs_instructions", "message": prompt}
-    provider_key = settings.OPENAI_API_KEY
-    if provider_key is None:
-        raise HTTPException(status_code=503, detail="Agent provider is not configured")
-    if request.answer:
-        session.add(DevelopmentMessage(
-            role="user", content=request.answer, chat_id=chat.id,
-            activity=[{"preview_instruction_answer": "true"}],
-        ))
-        session.commit()
-    previous = session.exec(
-        select(DevelopmentMessage)
-        .where(DevelopmentMessage.chat_id == chat.id, DevelopmentMessage.role == "user")
-        .order_by(col(DevelopmentMessage.created_at).desc(), col(DevelopmentMessage.id).desc())
-    ).all()
-    answer = request.answer or next(
-        (message.content for message in previous if any(
-            part.get("preview_instruction_answer") == "true" for part in message.activity
-        )), None,
+    return _start_preview(session, chat, request)
+
+
+@router.get("/{chat_id}/preview/executions")
+def read_preview_executions(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID,
+    before: str | None = None,
+) -> dict[str, Any]:
+    _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    executions = list_executions(session, chat_id, limit=200, before=_decode_cursor(before) if before else None)
+    data = [execution_public(execution) for execution in executions]
+    cursor = None
+    if len(executions) == 200:
+        cursor = base64.urlsafe_b64encode(json.dumps([data[-1]["created_at"], data[-1]["id"]]).encode()).decode().rstrip("=")
+    return {"data": data, "has_more": len(executions) == 200, "next_cursor": cursor}
+
+
+def _get_preview_execution(session: Session, chat_id: uuid.UUID, execution_id: uuid.UUID) -> PreviewExecution:
+    execution = get_execution_for_chat(session, chat_id, execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Preview execution not found")
+    return execution
+
+
+@router.get("/{chat_id}/preview/executions/{execution_id}/events")
+def read_preview_execution_events(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID,
+    execution_id: uuid.UUID, after: int = 0,
+) -> dict[str, Any]:
+    _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    _get_preview_execution(session, chat_id, execution_id)
+    if after < 0:
+        raise HTTPException(status_code=422, detail="Invalid preview event cursor")
+    events = read_events(session, execution_id, after_sequence=after, limit=257)
+    page = events[:256]
+    return {"data": [event_public(event) for event in page], "has_more": len(events) > 256,
+            "next_sequence": page[-1].sequence if page else after}
+
+
+@router.get("/{chat_id}/preview/executions/{execution_id}/stream", response_model=None)
+def stream_preview_execution(
+    *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID,
+    execution_id: uuid.UUID, after: int = 0,
+) -> StreamingResponse:
+    _get_chat(session=session, current_user=current_user, chat_id=chat_id)
+    _get_preview_execution(session, chat_id, execution_id)
+    if after < 0:
+        raise HTTPException(status_code=422, detail="Invalid preview event cursor")
+    # Do not keep a request transaction open while polling independent committed rows.
+    owner_id = current_user.id
+    session.commit()
+    response_class = CompletionStreamingResponse if reset_enabled() else StreamingResponse
+    return response_class(
+        preview_lifecycle.stream(chat_id, execution_id, owner_id, after=after),
+        media_type="text/event-stream", headers=SSE_HEADERS,
     )
-    try:
-        plan = resolve_preview_plan(
-            root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id,
-            provider_key=provider_key.get_secret_value(),
-            provider_base_url=str(settings.OPENAI_BASE_URL) if settings.OPENAI_BASE_URL else None,
-            model=settings.DEVELOP_AGENT_MODEL, answer=answer, pointer=request.pointer,
-        )
-    except ValueError:
-        plan = None
-    except (httpx.HTTPError, KeyError, StopIteration, TypeError):
-        raise HTTPException(status_code=502, detail="Preview instruction resolution failed") from None
-    if plan is None:
-        prompt = (
-            "Please provide non-Compose dependency and website/API startup commands "
-            "with working directories and localhost ports, or a checkout-local pointer. "
-            "Docker Compose, .env sourcing and external services are not supported."
-        )
-        session.add(DevelopmentMessage(role="assistant", content=prompt, chat_id=chat.id))
-        session.commit()
-        return {"state": "needs_instructions", "message": prompt}
-    try:
-        payload = plan.model_dump()
-        classification = classify_workspace(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=chat.id)
-        if plan.website is None and classification.kind == "api_documentation":
-            payload["initial_path"] = classification.entry_point
-        preview_controller.start(chat.id)
-        return preview_controller.launch(chat.id, payload)
-    except (httpx.HTTPError, RuntimeError, FileNotFoundError):
-        raise HTTPException(status_code=502, detail="Preview startup failed or timed out") from None
 
 
-@router.post("/{chat_id}/preview/activity", response_model=dict[str, str])
+@router.post("/{chat_id}/preview/activity", response_model=dict[str, Any])
 def record_development_preview_activity(
     *, session: SessionDep, current_user: CurrentUser, chat_id: uuid.UUID
 ) -> Any:

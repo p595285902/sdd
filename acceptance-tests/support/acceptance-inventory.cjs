@@ -10,6 +10,7 @@ const { extractAll } = require('../extract-gherkin.cjs');
 
 const acceptanceRoot = path.resolve(__dirname, '..');
 const specRoot = path.resolve(acceptanceRoot, '../openspec');
+const executionGroups = ['normal', 'lifecycle', 'preview-restart'];
 const validationRequirements = new Set([
   'Fresh-run lifecycle remains unchanged',
   'Separate validation groups retain complete effective-spec coverage',
@@ -17,6 +18,12 @@ const validationRequirements = new Set([
 ]);
 
 function executionGroup(capability, requirement, scenario) {
+  // A real controller restart intentionally invalidates the process-local reset
+  // identity. Run this one scenario in a fresh invocation, never repair/reseed
+  // that identity or allow the shared normal runner to cross the failed boundary.
+  if (capability === 'develop-preview-runtime' &&
+      requirement === 'Sandbox cleanup preserves durable launch history' &&
+      scenario === 'Controller restart reconciles a missing sandbox') return 'preview-restart';
   if ((capability === 'acceptance-stack-reuse' && validationRequirements.has(requirement)) ||
       (capability === 'acceptance-state-reset' &&
         (validationRequirements.has(requirement) || scenario === 'Reset controls are unavailable outside acceptance mode'))) {
@@ -123,4 +130,4 @@ function groupPaths(entries, group) {
   return [...paths].map(([file, lines]) => `${file}:${[...lines].sort((a, b) => a - b).join(':')}`);
 }
 
-module.exports = { acceptanceRoot, discover, executionGroup, groupPaths };
+module.exports = { acceptanceRoot, discover, executionGroup, executionGroups, groupPaths };

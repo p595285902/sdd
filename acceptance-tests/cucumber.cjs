@@ -25,11 +25,12 @@ const normalSteps = fs.readdirSync(path.join(__dirname, 'step-definitions'))
   .map(file => `step-definitions/${file}`);
 function profile(inventory, group) {
   return { paths: groupPaths(inventory.entries, group), parallel: 0, retry: 0, failFast: true,
-    import: group === 'normal' ? ['support/world.js', 'support/hooks.js', ...normalSteps]
+    import: group !== 'lifecycle' ? ['support/world.js', 'support/hooks.js', ...normalSteps]
       : ['features/lifecycle/world.js', 'features/lifecycle/hooks.js', 'step-definitions/acceptance-lifecycle.steps.js'],
     format: ['progress-bar', ['html', `reports/cucumber-${group}.html`]] };
 }
 
 module.exports = { default: profile(effective, 'normal'), normal: profile(effective, 'normal'),
-  lifecycle: profile(effective, 'lifecycle'), specs: profile(sourceOnly, 'normal'),
+  lifecycle: profile(effective, 'lifecycle'), 'preview-restart': profile(effective, 'preview-restart'),
+  specs: profile(sourceOnly, 'normal'),
   specsNormal: profile(sourceOnly, 'normal'), specsLifecycle: profile(sourceOnly, 'lifecycle') };

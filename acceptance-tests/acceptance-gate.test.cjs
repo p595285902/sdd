@@ -73,6 +73,51 @@ test('complete gate runs disjoint groups serially and reports all assigned resul
   const $ = cheerio.load(fs.readFileSync(path.join(root, 'reports', `${options.prefix}-report.html`), 'utf8'));
   assert.equal($('tbody tr').length, 2); assert.equal($('ul li').length, 2);
 });
+test('real preview restart is assigned once to a serial fresh invocation without weakening reset', async t => {
+  const options = setup(t);
+  const folder = path.join(options.specRoot, 'specs/develop-preview-runtime');
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, 'spec.md'), `# Develop preview runtime
+
+## Requirements
+
+### Requirement: Sandbox cleanup preserves durable launch history
+Missing sandboxes MUST reconcile after a real controller restart.
+
+#### Scenario: Controller restart reconciles a missing sandbox
+
+\`\`\`gherkin
+Given a persisted preview execution is active but its sandbox no longer exists after controller restart
+When execution status is reconciled
+Then the chat shows a terminal interrupted status for that execution
+And no replacement sandbox starts without an explicit user action
+\`\`\`
+`);
+  const order = [];
+  const summary = await runGate(options, async ({ group, entries }) => {
+    order.push(group);
+    if (group === 'preview-restart') {
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0].capability, 'develop-preview-runtime');
+      assert.equal(entries[0].steps.length, 4);
+    } else assert.ok(entries.every(entry => entry.capability !== 'develop-preview-runtime'));
+    return { code: 0, wallSeconds: 1, features: scenarioReport(entries) };
+  });
+  assert.deepEqual(order, ['normal', 'lifecycle', 'preview-restart']);
+  assert.equal(summary.assigned, 3);
+  assert.equal(summary.complete, true);
+  assert.equal(summary.status, 'passed');
+  assert.deepEqual(summary.groups.map(group => group.passed), [1, 1, 1]);
+  assert.equal(parseArguments(['--group', 'preview-restart']).group, 'preview-restart');
+
+  const failed = await runGate(options, async ({ group, entries }) => ({
+    code: group === 'preview-restart' ? 1 : 0, wallSeconds: 1,
+    features: scenarioReport(entries, group === 'preview-restart' ? 'failed' : 'passed'),
+  }));
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.groups.at(-1).status, 'failed');
+});
+
 test('normal failure prevents a separate group from starting and retains its incomplete assignment', async t => {
   const options = setup(t), ran = [];
   const summary = await runGate(options, async ({ group, entries }) => { ran.push(group); return { code: 1, wallSeconds: 1, features: scenarioReport(entries, 'failed') }; });

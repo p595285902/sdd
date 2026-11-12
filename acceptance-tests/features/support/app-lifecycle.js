@@ -5,6 +5,7 @@ const { randomBytes, randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
+const { preparePreviewCache } = require('../../support/preview-cache.cjs');
 
 const repoRoot = path.resolve(__dirname, '../../..');
 const composeFiles = [path.join(repoRoot, 'compose.yml'), path.join(repoRoot, 'acceptance-tests/compose.yml')];
@@ -142,6 +143,15 @@ async function startApplication(options = {}) {
     events: [], stopped: false });
   record('stack-start');
   try {
+    state.previewCache = preparePreviewCache({ repoRoot,
+      mirrors: JSON.parse(await dockerOutput(['info', '--format', '{{json .RegistryConfig.Mirrors}}'])) || [],
+      override: process.env.ACCEPTANCE_DOCKER_MIRROR });
+    if (state.previewCache) {
+      state.env.ACCEPTANCE_PREVIEW_DOCKERFILE = state.previewCache.controllerDockerfile;
+      state.env.ACCEPTANCE_NATIVE_DOCKERFILE = state.previewCache.nativeDockerfile;
+      record('preview-cache-enabled', { upstream: state.previewCache.upstream });
+    }
+    await run('docker', composeArgs(project, '--profile', 'native-runtime-build', 'build', 'preview-native-image'));
     await run('docker', composeArgs(project, 'up', '--build', '--detach', 'db'));
     await run('docker', composeArgs(project, 'run', '--build', '--rm', 'backend', 'bash', 'scripts/prestart.sh'));
     await run('docker', composeArgs(project, 'up', '--build', '--detach', '--wait', 'backend'));
@@ -215,6 +225,8 @@ async function stopApplication() {
       await assertOwnedResourcesRemoved();
       state.stopped = true;
       state.demoRepositoryAvailable = undefined;
+      state.previewCache?.cleanup();
+      state.previewCache = undefined;
       record('stack-stopped', { milliseconds: Date.now() - start, ownedResourcesEmpty: true });
     } catch (error) { errors.push(error); }
     if (errors.length) {

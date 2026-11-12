@@ -113,6 +113,17 @@ services:
       - traefik.http.routers.preview-http.entrypoints=http
       - traefik.http.routers.preview-http.service=backend
 
+  # Build explicitly on the dedicated trusted preview Docker host. This profile
+  # supplies an image, not a long-lived shared project daemon.
+  preview-native-image:
+    profiles: [native-runtime-build]
+    image: ${COMPOSE_PROJECT_NAME:-sdd}-preview-native:runtime
+    build:
+      context: .
+      dockerfile: backend/preview-native.Dockerfile
+    command: [docker, --version]
+    network_mode: none
+
   preview-controller:
     image: ${COMPOSE_PROJECT_NAME:-sdd}-preview:runtime
     build:
@@ -123,6 +134,9 @@ services:
       PREVIEW_WORKSPACE_VOLUME: ${COMPOSE_PROJECT_NAME:-sdd}_sdd-develop-workspaces
       PREVIEW_PROJECT: ${COMPOSE_PROJECT_NAME:-sdd}
       PREVIEW_IMAGE: ${COMPOSE_PROJECT_NAME:-sdd}-preview:runtime
+      PREVIEW_NATIVE_IMAGE: ${COMPOSE_PROJECT_NAME:-sdd}-preview-native:runtime
+      # Fail closed unless the operator explicitly accepts the trusted-host risk.
+      PREVIEW_NATIVE_PRIVILEGED: ${PREVIEW_NATIVE_PRIVILEGED:-false}
     networks:
       - preview-control
     volumes:

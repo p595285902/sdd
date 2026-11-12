@@ -253,6 +253,19 @@ def test_database_restoration_is_canonical_and_preserves_migration(tmp_path, del
         assert session.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "baseline-revision"
 
 
+def test_schema_snapshot_compares_partial_index_sql_not_object_identity(tmp_path):
+    database = sqlite_database(tmp_path)
+    snapshot = reset_module._schema_snapshot(database)
+    assert reset_module._schema_snapshot(database) == snapshot
+    with database.begin() as connection:
+        connection.execute(text('DROP INDEX uq_previewexecution_active_chat'))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX uq_previewexecution_active_chat ON previewexecution (chat_id) "
+            "WHERE status = 'starting'"
+        ))
+    assert reset_module._schema_snapshot(database) != snapshot
+
+
 def test_database_transaction_rolls_back_all_deletes_on_insert_failure(tmp_path):
     cfg = configuration()
     database = sqlite_database(tmp_path)

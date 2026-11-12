@@ -1,5 +1,10 @@
 import { expect, type Page, test } from "@playwright/test"
 
+import type {
+  PreviewExecution,
+  PreviewExecutionEvent,
+} from "../src/features/develop/previewExecution"
+
 const first = "00000000-0000-0000-0000-000000000011"
 const second = "00000000-0000-0000-0000-000000000012"
 const origin = `https://${first}-8765.preview.test`
@@ -20,10 +25,22 @@ async function mockPreview(
     delayContext?: Promise<void>
     delaySession?: Promise<void>
     delayRestart?: Promise<void>
+    executions?: PreviewExecution[]
+    launchExecution?: PreviewExecution
+    events?: PreviewExecutionEvent[]
+    streamEvents?: PreviewExecutionEvent[]
+    messages?: {
+      id: string
+      chat_id: string
+      role: string
+      content: string
+      created_at: string
+    }[]
   } = {},
 ) {
   const calls: string[] = []
   let current = options.context || contextReady
+  let executions = options.executions ?? []
   await page.addInitScript(() =>
     localStorage.setItem("access_token", "test-token"),
   )
@@ -60,12 +77,44 @@ async function mockPreview(
     if (path.endsWith("/workspace"))
       return route.fulfill({ json: { ready: chatId === first } })
     if (path.endsWith("/messages"))
-      return route.fulfill({ json: { data: [], has_more: false } })
+      return route.fulfill({
+        json: { data: options.messages ?? [], has_more: false },
+      })
     if (path.includes("/turns/current"))
       return route.fulfill({ status: 404, json: { detail: "No active turn" } })
     const action = path.split("/preview/")[1]
     if (action) {
-      calls.push(`${chatId}/${action}`)
+      calls.push(`${chatId}/${action}${url.search}`)
+      if (action === "executions")
+        return route.fulfill({ json: { data: executions } })
+      if (action.endsWith("/events")) {
+        const after = Number(url.searchParams.get("after") ?? 0)
+        const remaining = (options.events ?? []).filter(
+          (event) => event.sequence > after,
+        )
+        const data = remaining.slice(0, 2)
+        return route.fulfill({
+          json: {
+            data,
+            has_more: remaining.length > data.length,
+            next_sequence: data.at(-1)?.sequence ?? after,
+          },
+        })
+      }
+      if (action.endsWith("/stream")) {
+        expect(route.request().headers().authorization).toBe(
+          "Bearer test-token",
+        )
+        return route.fulfill({
+          contentType: "text/event-stream",
+          body: (options.streamEvents ?? [])
+            .map(
+              (event) =>
+                `event: preview-event\ndata: ${JSON.stringify(event)}\n\n`,
+            )
+            .join(""),
+        })
+      }
       if (action === "context") {
         await options.delayContext
         return route.fulfill({ json: current }).catch(() => undefined)
@@ -85,7 +134,17 @@ async function mockPreview(
           .catch(() => undefined)
       }
       if (action === "restart") await options.delayRestart
-      if (action === "start" || action === "restart") current = contextReady
+      if (action === "launch" || action === "restart") {
+        expect(route.request().postDataJSON()).toEqual({})
+        if (options.launchExecution) {
+          executions = [options.launchExecution]
+          current = { state: "starting", runtime: "compose" }
+          return route.fulfill({
+            json: { ...current, execution: options.launchExecution },
+          })
+        }
+        current = contextReady
+      }
       return route.fulfill({ json: { state: "ready" } })
     }
     return route.fulfill({ json: {} })
@@ -120,6 +179,35 @@ const panel = (page: Page) =>
   page.getByRole("complementary", { name: "Development context" })
 const preview = (page: Page) =>
   page.frameLocator('iframe[title="Development preview"]')
+
+test("native Compose polls startup, embeds the application and retains controls", async ({
+  page,
+}) => {
+  const calls = await mockPreview(page)
+  let statusReads = 0
+  await page.route("**/preview/context", (route) =>
+    route.fulfill({
+      json:
+        ++statusReads === 1
+          ? { state: "starting", runtime: "native-compose" }
+          : { ...contextReady, runtime: "native-compose" },
+    }),
+  )
+  await page.goto("/develop")
+  await expect(
+    preview(page).getByRole("button", { name: "Add item" }),
+  ).toBeVisible()
+  await expect(
+    panel(page).getByRole("button", { name: "Restart preview" }),
+  ).toBeVisible()
+  expect(statusReads).toBeGreaterThan(1)
+  await expect
+    .poll(() => calls.some((call) => call.endsWith("/activity")))
+    .toBe(true)
+  expect(
+    calls.some((call) => call.endsWith("/launch") || call.endsWith("/start")),
+  ).toBe(false)
+})
 
 for (const width of [1440, 390, 900]) {
   test(`interactive Compose preview, address, reload and direct external navigation at ${width}px`, async ({
@@ -384,21 +472,242 @@ test("API-only Swagger is the initial requested page and runs scripts", async ({
   ).toHaveValue("http://localhost:8765/docs/")
 })
 
-test("a stopped Compose preview starts only on first visible Context visit", async ({
+for (const width of [1440, 390]) {
+  test(`stopped preview requires explicit Launch beside Expand at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 })
+    const calls = await mockPreview(page, {
+      context: { state: "stopped", runtime: "compose" },
+    })
+    await page.goto("/develop")
+    if (width < 1024)
+      await page
+        .getByRole("button", { name: "Open development context" })
+        .click()
+    const launch = panel(page).getByRole("button", { name: "Launch preview" })
+    await expect(launch).toBeEnabled()
+    await expect(
+      panel(page).getByRole("button", { name: "Expand Context" }),
+    ).toBeVisible()
+    await panel(page).getByRole("button", { name: "Expand Context" }).click()
+    await panel(page).getByRole("button", { name: "Collapse Context" }).click()
+    expect(calls.some((call) => /\/(start|launch|restart)$/.test(call))).toBe(
+      false,
+    )
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true)
+    await launch.click()
+    await expect(
+      preview(page).getByRole("button", { name: "Add item" }),
+    ).toBeVisible()
+    expect(calls.filter((call) => call.endsWith("/launch"))).toHaveLength(1)
+    await expect(launch).toBeDisabled()
+  })
+}
+
+const savedExecution: PreviewExecution = {
+  id: "execution-one",
+  chat_id: first,
+  created_at: "2026-09-24T12:01:00Z",
+  updated_at: "2026-09-24T12:01:10Z",
+  status: "running",
+  ready: false,
+  workflow: "Documented Compose watch",
+  last_sequence: 4,
+  truncated_bytes: 12,
+}
+const outputEvent = (
+  sequence: number,
+  kind: PreviewExecutionEvent["kind"],
+  payload: PreviewExecutionEvent["payload"],
+): PreviewExecutionEvent => ({
+  execution_id: savedExecution.id,
+  sequence,
+  kind,
+  payload,
+  created_at: savedExecution.updated_at,
+})
+
+test("Launch remains pending beyond its HTTP response while the durable execution is starting", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 390, height: 900 })
+  await page.setViewportSize({ width: 1440, height: 900 })
   const calls = await mockPreview(page, {
     context: { state: "stopped", runtime: "compose" },
+    launchExecution: { ...savedExecution, status: "starting" },
+    streamEvents: [outputEvent(5, "stdout", { text: "Building application…" })],
   })
   await page.goto("/develop")
-  await expect(page.getByRole("heading", { name: "First chat" })).toBeVisible()
-  expect(calls.some((call) => call.endsWith("/start"))).toBe(false)
-  await page.getByRole("button", { name: "Open development context" }).click()
+  await panel(page).getByRole("button", { name: "Launch preview" }).click()
   await expect(
-    preview(page).getByRole("button", { name: "Add item" }),
-  ).toBeVisible()
-  expect(calls.filter((call) => call.endsWith("/start"))).toHaveLength(1)
+    page.getByRole("article", { name: "Preview execution" }),
+  ).toContainText("Building application")
+  await expect(
+    panel(page).getByRole("button", { name: "Launching preview" }),
+  ).toBeDisabled()
+  await panel(page).getByRole("button", { name: "Expand Context" }).click()
+  await expect(
+    panel(page).getByRole("button", { name: "Launching preview" }),
+  ).toBeDisabled()
+  expect(calls.filter((call) => call.endsWith("/launch"))).toHaveLength(1)
+})
+
+test("safe durable operations interleave with messages, replay pages, deduplicate SSE and reattach after refresh", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const markup =
+    '<img src=x onerror="window.outputExecuted=true"><script>window.outputExecuted=true</script>**literal output**'
+  const events = [
+    outputEvent(1, "command_start", {
+      argv: ["docker", "compose", "watch"],
+      cwd: "/workspace",
+    }),
+    outputEvent(2, "stdout", {
+      text: `\u001b[31m${markup}\u001b[0m\n`,
+      stream: "stdout",
+    }),
+    outputEvent(3, "stderr", {
+      text: "Startup diagnostic\n",
+      stream: "stderr",
+    }),
+    outputEvent(4, "output_truncated", { truncated_bytes: 12 }),
+  ]
+  const calls = await mockPreview(page, {
+    context: { state: "stopped", runtime: "compose" },
+    executions: [savedExecution],
+    events,
+    streamEvents: [
+      events[2],
+      outputEvent(5, "stdout", { text: "Fresh live output\n" }),
+      outputEvent(6, "command_exit", { exit_code: 7 }),
+      outputEvent(7, "status", {
+        status: "failed",
+        reason: "Initialization failed",
+      }),
+    ],
+    messages: [
+      {
+        id: "before",
+        chat_id: first,
+        role: "user",
+        content: "Before operation",
+        created_at: "2026-09-24T12:00:00Z",
+      },
+      {
+        id: "after",
+        chat_id: first,
+        role: "assistant",
+        content: "After operation",
+        created_at: "2026-09-24T12:02:00Z",
+      },
+    ],
+  })
+  await page.goto("/develop")
+  const operation = page.getByRole("article", { name: "Preview execution" })
+  await expect(operation).toContainText("Fresh live output")
+  await expect(operation).toContainText("failed")
+  await expect(operation.getByLabel("Preview command output")).toContainText(
+    markup,
+  )
+  await expect(operation).toContainText("Command exited (7)")
+  await expect(operation).toContainText("Output truncated: 12 bytes omitted")
+  await expect(operation.locator("script, img, strong")).toHaveCount(0)
+  await expect(operation.locator('[data-stream="stderr"]')).toHaveCount(1)
+  expect(
+    await page.evaluate(
+      () => (window as Window & { outputExecuted?: boolean }).outputExecuted,
+    ),
+  ).toBeUndefined()
+  const articles = page
+    .getByRole("region", { name: "Conversation" })
+    .getByRole("article")
+  await expect(articles).toHaveCount(3)
+  await expect(articles.nth(0)).toContainText("Before operation")
+  await expect(articles.nth(1)).toHaveAttribute(
+    "data-execution-id",
+    savedExecution.id,
+  )
+  await expect(articles.nth(2)).toContainText("After operation")
+  expect(calls).toContain(
+    `${first}/executions/${savedExecution.id}/events?after=2`,
+  )
+  expect(calls).toContain(
+    `${first}/executions/${savedExecution.id}/stream?after=4`,
+  )
+  await page.reload()
+  await expect(operation).toContainText("Fresh live output")
+  await expect(operation).toHaveCount(1)
+  await expect(operation.locator('[data-stream="stderr"]')).toHaveCount(1)
+  expect(calls.some((call) => /\/(start|launch|restart)$/.test(call))).toBe(
+    false,
+  )
+  await operation.locator("summary").click()
+  await expect(operation.getByLabel("Preview command output")).toBeHidden()
+})
+
+test("output reconnect attempts are bounded and output activity does not keep Context alive", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.clock.install()
+  const calls = await mockPreview(page, {
+    context: { state: "stopped", runtime: "compose" },
+    executions: [savedExecution],
+  })
+  await page.goto("/develop")
+  const streams = () =>
+    calls.filter((call) => call.includes("/stream?after=")).length
+  await expect.poll(streams).toBe(1)
+  for (const [delay, expected] of [
+    [600, 2],
+    [1100, 3],
+    [2100, 4],
+  ]) {
+    await page.clock.runFor(delay)
+    await expect.poll(streams).toBe(expected)
+  }
+  await expect(
+    page.getByRole("article", { name: "Preview execution" }).getByRole("alert"),
+  ).toContainText("disconnected")
+  await page.clock.runFor(30_000)
+  expect(streams()).toBe(4)
+  expect(calls.some((call) => call.endsWith("/activity"))).toBe(false)
+  expect(calls.some((call) => /\/(start|launch|restart)$/.test(call))).toBe(
+    false,
+  )
+})
+
+test("saved failed output survives cleanup without an automatic replacement launch", async ({
+  page,
+}) => {
+  const calls = await mockPreview(page, {
+    context: { state: "stopped", runtime: "compose" },
+    executions: [{ ...savedExecution, status: "failed", last_sequence: 2 }],
+    events: [
+      outputEvent(1, "command_exit", { exit_code: 1 }),
+      outputEvent(2, "status", {
+        status: "failed",
+        reason: "Documented initialization failed",
+      }),
+    ],
+  })
+  await page.goto("/develop")
+  const operation = page.getByRole("article", { name: "Preview execution" })
+  await expect(operation).toBeVisible()
+  await operation.locator("summary").click()
+  await expect(operation).toContainText("Documented initialization failed")
+  await expect(operation).toContainText("Command exited (1)")
+  await expect(
+    panel(page).getByRole("button", { name: "Launch preview" }),
+  ).toBeEnabled()
+  expect(calls.some((call) => /\/(start|launch|restart)$/.test(call))).toBe(
+    false,
+  )
 })
 
 test("Compose failures show an error instead of a stale page", async ({
@@ -494,7 +803,11 @@ for (const phase of ["context", "session"] as const) {
     release()
     await expect(panel(page)).toContainText("Set up the repository")
     await expect(panel(page).locator("iframe")).toHaveCount(0)
-    expect(calls.some((call) => call.startsWith(second))).toBe(false)
+    expect(
+      calls.some(
+        (call) => call.startsWith(second) && !call.endsWith("/executions"),
+      ),
+    ).toBe(false)
   })
 }
 

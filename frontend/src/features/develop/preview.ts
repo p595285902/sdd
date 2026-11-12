@@ -1,6 +1,6 @@
 export type PreviewContext = {
   state: string
-  runtime?: "compose" | "unsupported"
+  runtime?: "compose" | "native-compose" | "unsupported"
   message?: string
   initial_port?: string
   initial_path?: string
@@ -15,6 +15,9 @@ export type PreviewSession = {
   initial_url: string
   expires_in: number
 }
+
+export const hasPreviewRuntime = (context?: PreviewContext) =>
+  context?.runtime === "compose" || context?.runtime === "native-compose"
 
 export const initialPreviewAddress = (context: PreviewContext) =>
   `http://localhost:${context.initial_port}${context.initial_path || "/"}`
@@ -68,6 +71,7 @@ export async function requestPreview<T>(
   action: string,
   method: "GET" | "POST",
   signal?: AbortSignal,
+  payload?: unknown,
 ): Promise<T> {
   const response = await fetch(
     `${import.meta.env.VITE_API_URL ?? ""}/api/v1/develop/chats/${chatId}/preview/${action}`,
@@ -76,7 +80,11 @@ export async function requestPreview<T>(
       signal,
       headers: {
         Authorization: `Bearer ${localStorage.getItem("access_token") ?? ""}`,
+        ...(payload === undefined
+          ? {}
+          : { "Content-Type": "application/json" }),
       },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
     },
   )
   const body = await response.json()
