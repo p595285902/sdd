@@ -28,6 +28,9 @@ ENV = {
     'HOME': '/tmp', 'PATH': '/usr/local/bin:/usr/bin:/bin',
     'HTTP_PROXY': 'http://127.0.0.1:3128', 'HTTPS_PROXY': 'http://127.0.0.1:3128',
     'NO_PROXY': 'localhost,127.0.0.1', 'npm_config_cache': '/tmp/npm',
+    # npm's default second retry sleeps 60s, exhausting the entire setup bound.
+    # Keep both retries available without extending the supervisor deadline.
+    'npm_config_fetch_retry_maxtimeout': '10000',
     'UV_CACHE_DIR': '/tmp/uv', 'PYTHONUNBUFFERED': '1',
 }
 

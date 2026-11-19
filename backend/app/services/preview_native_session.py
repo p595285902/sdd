@@ -594,6 +594,42 @@ def runtime_events(after: int) -> dict:
         return current
 
 
+def serve_events() -> None:
+    """Serve bounded cursor lines on private exec pipes; never poll while idle."""
+    def timed_out(_signum, _frame):
+        raise TimeoutError
+
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    try:
+        while line := sys.stdin.buffer.readline(32):
+            if not re.fullmatch(rb'(0|[1-9][0-9]{0,18})\n', line) or int(line) > 2**63 - 1:
+                sys.stdout.buffer.write(b'{"error":"invalid_request"}\n')
+                sys.stdout.buffer.flush()
+                return
+            after = int(line)
+            signal.setitimer(signal.ITIMER_REAL, 8)
+            try:
+                try:
+                    reply = {'after': after, 'result': runtime_events(after)}
+                except FileNotFoundError:
+                    reply = {'after': after, 'error': 'not_ready'}
+                except Exception:
+                    # No exception, project output or filesystem data crosses
+                    # the protocol except the already-redacted journal result.
+                    reply = {'after': after, 'error': 'unavailable'}
+                response = json.dumps(reply).encode() + b'\n'
+                if len(response) > 1024 * 1024:
+                    response = json.dumps({'after': after, 'error': 'unavailable'}).encode() + b'\n'
+                sys.stdout.buffer.write(response)
+                sys.stdout.buffer.flush()
+            except (OSError, TimeoutError):
+                return
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+
+
 def start(execution_id: str) -> dict:
     with STATE.with_suffix('.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -626,6 +662,8 @@ if __name__ == '__main__':
         prepare_sync(Path(sys.argv[2]))
     elif sys.argv[1] == 'events':
         sys.stdout.write(json.dumps(runtime_events(int(sys.argv[2]))) + '\n')
+    elif sys.argv[1] == 'events-serve':
+        serve_events()
     elif sys.argv[1] == 'start':
         sys.stdout.write(json.dumps(start(sys.argv[2])) + '\n')
     else:

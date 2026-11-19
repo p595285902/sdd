@@ -4,8 +4,8 @@ const { randomBytes } = require('node:crypto');
 const net = require('node:net');
 const cheerio = require('cheerio');
 const { expect } = require('@playwright/test');
-const { runBackendPython } = require('../../features/support/app-lifecycle.js');
-const { ACCOUNT, nativeComposeFixture } = require('../native-compose-fixture.cjs');
+const { backendPythonOutput, runBackendPython } = require('../../features/support/app-lifecycle.js');
+const { ACCOUNT, HELPER_PYTHON, PYTHON, nativeComposeFixture } = require('../native-compose-fixture.cjs');
 
 class PreviewWorkloadPage {
   constructor(world) {
@@ -31,11 +31,25 @@ class PreviewWorkloadPage {
     return output ? output.split('\n') : [];
   }
 
-  advancePastIdle() {
-    const project = this.world.applicationState.projectName;
-    this.docker('exec', `${project}-preview-controller-1`, 'python', '-c',
-      'import sys, time; sys.path.insert(0, "/controller"); from preview_controller import sweep; sweep(now=time.time() + 301)');
+  async advanceIdleTime(seconds) {
+    const result = JSON.parse(await backendPythonOutput(`
+import json, os, sys, urllib.request
+root = 'http://preview-controller:8090/testing/acceptance/'
+run = os.environ['ACCEPTANCE_RUN_ID']
+headers = {'Authorization': 'Bearer ' + os.environ['ACCEPTANCE_RESET_TOKEN'], 'X-Acceptance-Run': run, 'Content-Type': 'application/json'}
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(urllib.request.Request(root + 'state', headers=headers), timeout=15) as response:
+    state = json.load(response)
+payload = {'run_id': run, 'expected_generation': state['generation'], 'seconds': float(sys.argv[1])}
+with opener.open(urllib.request.Request(root + 'advance-idle-time', data=json.dumps(payload).encode(), headers=headers), timeout=15) as response:
+    print(response.read().decode())
+`, String(seconds)));
+    assert.equal(result.advanced_seconds, seconds);
+    assert.equal(result.run_id, this.world.applicationState.projectName);
+    return result;
   }
+
+  async advancePastIdle() { await this.advanceIdleTime(301); }
 
   isRunning(chatId) {
     return this.containerIds(chatId).length === 1;
@@ -79,8 +93,28 @@ http.createServer((request, response) => {
     };
   }
 
+  publicPythonImage() {
+    const state = this.world.applicationState;
+    if (!state?.projectName) return HELPER_PYTHON;
+    if (!state.publicPythonImage) {
+      // Production already seeds this exact public helper image into every
+      // private daemon. Address it by content ID for fixtures that do not test
+      // acquisition; no extra image, shared daemon or project state is injected.
+      const image = spawnSync('docker', ['image', 'inspect', HELPER_PYTHON, '--format', '{{.Id}}'], { encoding: 'utf8' });
+      if (image.status === 0 && /^sha256:[a-f0-9]{64}$/.test(image.stdout.trim())) state.publicPythonImage = image.stdout.trim();
+      else {
+        this.docker('pull', HELPER_PYTHON);
+        const id = this.docker('image', 'inspect', HELPER_PYTHON, '--format', '{{.Id}}');
+        assert.match(id, /^sha256:[a-f0-9]{64}$/);
+        state.publicPythonImage = id;
+      }
+    }
+    return state.publicPythonImage || HELPER_PYTHON;
+  }
+
   async prepareNativeCompose(chatId, options = {}) {
-    const files = nativeComposeFixture(options);
+    const files = nativeComposeFixture({ ...options,
+      ...(options.build === false || options.database === 'sqlite' || options.prebuiltWatch ? { pythonImage: this.publicPythonImage() } : {}) });
     await this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
       for (const [name, content] of Object.entries(files)) {
         await this.world.apiClient.editWorkspaceFile(chatId, name, content);
@@ -102,24 +136,20 @@ http.createServer((request, response) => {
     this.nativeItem = name;
   }
 
-  async prepareCompose(chatId) {
+  async prepareCompose(chatId, { build = true } = {}) {
     return this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
-      const image = 'python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88';
+      const image = build ? PYTHON : this.publicPythonImage();
       await this.world.apiClient.editWorkspaceFile(chatId, 'README.md',
         'Run `docker compose -f compose.yml up website api` to start the website and API.');
       await this.world.apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
   website:
-    build:
-      context: site
-      dockerfile: Dockerfile
+    ${build ? 'build:\n      context: site\n      dockerfile: Dockerfile' : `image: ${image}\n    working_dir: /workspace\n    user: '65534'\n    volumes: ['./site:/workspace:ro']`}
     depends_on:
       - api
     command: ["python", "server.py"]
     expose: [8765]
   api:
-    build:
-      context: api
-      dockerfile: Dockerfile
+    ${build ? 'build:\n      context: api\n      dockerfile: Dockerfile' : `image: ${image}\n    working_dir: /workspace\n    user: '65534'\n    volumes: ['./api:/workspace:ro']`}
     command: ["python", "-m", "http.server", "8766", "--bind", "0.0.0.0"]
     expose: [8766]
 `);
@@ -143,7 +173,7 @@ HTTPServer(('0.0.0.0', 8765), Handler).serve_forever()
 
   async prepareRoutingCompose(chatId, content) {
     return this.world.apiClient.withWorkspaceFileBatch(chatId, async () => {
-      await this.prepareCompose(chatId);
+      await this.prepareCompose(chatId, { build: false });
       await this.world.apiClient.editWorkspaceFile(chatId, 'api/docs/index.html',
         `<html><script src="/swagger-ui.js"></script><a href="/openapi.json">Swagger ${content}</a></html>`);
       await this.world.apiClient.editWorkspaceFile(chatId, 'api/openapi.json', JSON.stringify({ openapi: '3.1.0', info: { title: content } }));
@@ -676,7 +706,7 @@ target.unlink()
   }
 
   async stopAll() {
-    for (const chatId of this.chatIds) {
+    for (const chatId of new Set(this.chatIds)) {
       try {
         await runBackendPython(`
 import sys

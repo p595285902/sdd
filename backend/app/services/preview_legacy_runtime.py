@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 import uuid
 from collections import OrderedDict
 
@@ -56,7 +55,7 @@ class LegacyRuntime:
             self.c.native.terminal.pop(chat_id, None)
             self.last[chat_id] = {key: value for key, value in current.items() if key != 'events'}
             with self.c.activity_lock:
-                self.c.activity[chat_id] = time.time()
+                self.c.activity[chat_id] = self.c.idle_time()
             return self.status(chat_id, container)
 
     @staticmethod

@@ -229,7 +229,7 @@ def http_request(address, method, path, payload=None, auth=True, raw=None, heade
         connection.close()
 
 
-@pytest.mark.parametrize("action,method", [("state", "GET"), ("quiesce", "POST"), ("reset", "POST"), ("resume", "POST")])
+@pytest.mark.parametrize("action,method", [("state", "GET"), ("quiesce", "POST"), ("reset", "POST"), ("resume", "POST"), ("advance-idle-time", "POST")])
 def test_controls_absent_outside_acceptance_mode(controller, action, method):
     worker, reset, engine = controller
     reset.enabled = False
@@ -240,13 +240,14 @@ def test_controls_absent_outside_acceptance_mode(controller, action, method):
     assert reset.phase == "admitting"
 
 
+@pytest.mark.parametrize("action", ["quiesce", "advance-idle-time"])
 @pytest.mark.parametrize("headers", [None, {"Authorization": "Bearer wrong", "X-Acceptance-Run": RUN},
                                     {"Authorization": f"Bearer {TOKEN}", "X-Acceptance-Run": "other-run"},
                                     {"Authorization": "Bearer é", "X-Acceptance-Run": RUN}])
-def test_invalid_auth_cannot_close_admissions_or_inspect_docker(controller, headers):
+def test_invalid_auth_cannot_close_admissions_or_inspect_docker(controller, headers, action):
     worker, reset, engine = controller
     with server(worker) as address:
-        code, _ = http_request(address, "POST", "/testing/acceptance/quiesce", request(), auth=False, headers=headers)
+        code, _ = http_request(address, "POST", f"/testing/acceptance/{action}", request(), auth=False, headers=headers)
     assert code == 403
     assert not engine.calls
     assert reset.phase == "admitting"
@@ -800,3 +801,203 @@ def test_status_marks_only_actual_compose_runtime(controller, monkeypatch, compo
         assert result == {
             "id": "runtime-id", "state": "running", "initial_port": "8766", "initial_path": "/",
         }
+
+
+def idle_request(seconds=1, generation=0, **extra):
+    return {"run_id": RUN, "expected_generation": generation, "seconds": seconds, **extra}
+
+
+def idle_workload(controller, monkeypatch):
+    worker, _, engine = controller
+    chat, owned = engine.orphan()
+    # Native nested resources live inside the outer daemon, not on this Engine.
+    for identifier in owned[2:4]:
+        engine.resources["containers"].pop(identifier)
+    engine.resources["networks"].pop(owned[4])
+    engine.resources["images"].pop(owned[6])
+    owned = [owned[0], owned[1], owned[5]]
+    isdir = worker.os.path.isdir
+    monkeypatch.setattr(worker.os.path, "isdir", lambda path: str(path).startswith("/develop-workspaces/") or isdir(path))
+    container = engine.resources["containers"][owned[0]]
+    container.update(Created=1000, State={"Running": False})
+    container["Config"]["Labels"][worker.NATIVE_LABEL] = str(uuid.uuid4())
+    monkeypatch.setattr(worker.native, "sync", lambda _chat: None)
+    monkeypatch.setattr(worker.native, "before_stop", lambda *_args: None)
+    monkeypatch.setattr(worker.legacy, "before_stop", lambda *_args: None)
+    return chat, owned
+
+
+def test_private_idle_clock_advances_real_sweep_and_heartbeat_renews(controller, monkeypatch):
+    worker, reset, engine = controller
+    finish_reset(reset)
+    monkeypatch.setattr(worker.time, "time", lambda: 1000.0)
+    chat, owned = idle_workload(controller, monkeypatch)
+    output = []
+    monkeypatch.setattr(worker.native, "events", lambda chat: output.append(chat))
+    monkeypatch.setattr(worker, "status", lambda _chat: {"state": "running"})
+    worker.heartbeat(chat)
+    real_deadline = worker.time.monotonic() + 60
+    with server(worker) as address:
+        code, result = http_request(address, "POST", "/testing/acceptance/advance-idle-time", idle_request(299, 1))
+        assert code == 200 and result["advanced_seconds"] == 299
+        assert result["idle_time_offset_seconds"] == 299 and result["idle_time"] == 1299
+        assert result["generation"] == 1 and result["boot_id"] == reset.boot_id
+        assert result["dirty"] and not result["baseline_verified"] and not result["active_work"]
+        assert output and worker.activity[chat] == 1000  # Output never renews activity.
+        assert not engine.removed and worker.IDLE_SECONDS == 300
+        worker.heartbeat(chat)
+        assert worker.activity[chat] == 1299
+        code, result = http_request(address, "POST", "/testing/acceptance/advance-idle-time", idle_request(299, 1))
+        assert code == 200 and result["idle_time"] == 1598
+        assert worker.activity[chat] == 1299 and not engine.removed
+        code, result = http_request(address, "POST", "/testing/acceptance/advance-idle-time", idle_request(1, 1))
+        assert code == 200 and result["idle_time"] == 1599
+    assert set(engine.removed) == set(owned) | {"egress-id"} and chat not in worker.activity
+    assert 0 < real_deadline - worker.time.monotonic() <= 60
+    restored = finish_reset(reset, request("after-idle", expected_generation=1))
+    assert restored["idle_time_offset_seconds"] == 0 and restored["baseline_verified"]
+    assert worker.idle_time() == 1000
+
+
+@pytest.mark.parametrize("overrides,code", [
+    ({"run_id": "other"}, 409), ({"expected_generation": 1}, 409),
+    ({"expected_generation": True}, 400), ({"expected_generation": -1}, 400),
+    ({"seconds": True}, 400), ({"seconds": "300"}, 400), ({"seconds": None}, 400),
+    ({"seconds": 0}, 400), ({"seconds": -1}, 400), ({"seconds": 3601}, 400),
+    ({"seconds": float("nan")}, 400), ({"seconds": float("inf")}, 400),
+    ({"seconds": -float("inf")}, 400), ({"root": "/"}, 400), ({"chat_id": str(uuid.uuid4())}, 400),
+])
+def test_invalid_idle_advance_cannot_mutate_or_inspect(controller, overrides, code):
+    worker, reset, engine = controller
+    before = reset.state()
+    with pytest.raises(worker.ResetControlError) as error:
+        reset.advance_idle_time({**idle_request(), **overrides})
+    assert error.value.code == code
+    assert reset.state() == before and not engine.calls
+
+
+@pytest.mark.parametrize("phase", ["quiescing", "quiesced", "cleaning_previews", "preview_reset", "failed"])
+def test_idle_advance_rejects_closed_admission(controller, phase):
+    worker, reset, engine = controller
+    reset.phase = phase
+    with pytest.raises(worker.ResetControlError) as error:
+        reset.advance_idle_time(idle_request())
+    assert error.value.code == 503
+    assert reset.idle_time_offset_seconds == 0 and not engine.calls
+    assert reset.phase == phase and reset.work_serial == 0
+
+
+def test_idle_advance_is_owned_tracked_and_serialized_with_reset(controller, monkeypatch):
+    worker, reset, _ = controller
+    entered, release = threading.Event(), threading.Event()
+    original_sweep = worker.sweep
+    def sweep():
+        entered.set()
+        assert release.wait(3)
+        assert reset.active["handler"] == 1 and reset.active["control"] == 1
+        original_sweep()
+    monkeypatch.setattr(worker, "sweep", sweep)
+    result = []
+    advancing = threading.Thread(target=lambda: result.append(reset.advance_idle_time(idle_request(300))))
+    advancing.start()
+    assert entered.wait(1)
+    try:
+        assert reset.dirty and not reset.baseline_verified and reset.work_serial == 1
+        assert reset.ownership["verified"]
+        for operation in (lambda: reset.control("quiesce", request()), lambda: reset.advance_idle_time(idle_request())):
+            with pytest.raises(worker.ResetControlError) as error:
+                operation()
+            assert error.value.code == 409
+    finally:
+        release.set()
+        advancing.join(2)
+    assert result[0]["idle_time_offset_seconds"] == 300 and not result[0]["active_work"]
+    assert finish_reset(reset)["idle_time_offset_seconds"] == 0
+
+
+def test_idle_advance_invalidates_reset_retry_and_ownership_failure_is_closed(controller):
+    worker, reset, engine = controller
+    finish_reset(reset)
+    reset.advance_idle_time(idle_request(0.5, 1))
+    with pytest.raises(worker.ResetControlError) as error:
+        reset.control("quiesce", request())
+    assert error.value.code == 409
+    engine.resources["containers"]["db-id"]["RestartCount"] += 1
+    with pytest.raises(worker.ResetControlError) as error:
+        reset.advance_idle_time(idle_request(300, 1))
+    assert error.value.code == 503 and reset.phase == "failed"
+    assert reset.idle_time_offset_seconds == 0.5 and not engine.removed
+    assert not reset.baseline_verified and not any(reset.active.values())
+
+
+def test_idle_clock_creation_fallback_handles_workloads_created_after_advancement(controller, monkeypatch):
+    worker, reset, engine = controller
+    monkeypatch.setattr(worker.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(worker.native, "events", lambda _chat: None)
+    first, owned = idle_workload(controller, monkeypatch)
+    reset.advance_idle_time(idle_request(299))
+    assert worker.activity[first] == 1000 and not engine.removed
+    second, second_owned = idle_workload(controller, monkeypatch)
+    reset.advance_idle_time(idle_request(1))
+    assert set(engine.removed) == set(owned) | {"egress-id"}
+    assert not set(engine.removed).intersection(second_owned)
+    assert worker.activity[second] == 1299 and second_owned[0] in engine.resources["containers"]
+
+
+def test_idle_clock_is_real_in_production_and_reset_requires_zero_offset(controller, monkeypatch):
+    worker, reset, _ = controller
+    monkeypatch.setattr(worker.time, "time", lambda: 1000.0)
+    reset.idle_time_offset_seconds = 500
+    reset.enabled = False
+    assert worker.idle_time() == 1000 and worker.IDLE_SECONDS == 300
+    reset.enabled = True
+    reset.control("quiesce", request())
+    reset.control("reset", request())
+    assert reset.idle_time_offset_seconds == 0
+    reset.idle_time_offset_seconds = 1
+    with pytest.raises(worker.ResetControlError):
+        reset.control("resume", request(generation=1, baseline_verified=True))
+    assert reset.phase == "failed" and not reset.baseline_verified
+
+
+def test_native_launch_initial_activity_uses_controller_idle_clock(controller, monkeypatch, tmp_path):
+    worker, reset, _ = controller
+    chat = uuid.uuid4()
+    (tmp_path / str(chat)).mkdir()
+    monkeypatch.setattr(worker, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PREVIEW_NATIVE_PRIVILEGED", "true")
+    monkeypatch.setattr(worker, "inspect", lambda _chat: None)
+    monkeypatch.setattr(worker, "ensure_outbound_network", lambda: None)
+    monkeypatch.setattr(worker, "docker", lambda method, path, *_args: (
+        200 if method == "GET" else 201 if "create" in path else 204, {"Id": "native-container"},
+    ))
+    runtime = worker.NativeRuntime(worker)
+    runtime.helper_id = "trusted-helper"
+    monkeypatch.setattr(worker, "native", runtime)
+    monkeypatch.setattr(runtime, "seed_helper", lambda _chat: None)
+    monkeypatch.setattr(runtime, "sync", lambda _chat: None)
+    monkeypatch.setattr(runtime, "upload", lambda *_args: None)
+    monkeypatch.setattr(runtime, "exec", lambda *_args, **_kwargs: b'["rootless"]')
+    monkeypatch.setattr(worker.time, "time", lambda: 1000.0)
+    reset.idle_time_offset_seconds = 321
+    runtime.launch(chat, {"runtime": "native-compose", "commands": [{}]}, str(uuid.uuid4()))
+    assert worker.activity[chat] == 1321
+
+
+def test_owned_reset_closes_native_event_readers_before_clearing_runtime_maps(controller, monkeypatch):
+    from types import SimpleNamespace
+
+    worker, reset, _ = controller
+    chat = uuid.uuid4()
+    closed = []
+    def close():
+        assert reset.phase == "cleaning_previews"
+        assert chat in worker.native.last
+        closed.append(chat)
+    monkeypatch.setattr(worker.native, "readers", {chat: SimpleNamespace(close=close)})
+    monkeypatch.setattr(worker.native, "last", {chat: {"state": "running"}})
+    monkeypatch.setattr(worker.native, "browser_helpers", {(chat, '8765'): ('application', 'trusted-forwarder')})
+    state = finish_reset(reset)
+    assert closed == [chat] and not worker.native.readers and not worker.native.last
+    assert not worker.native.browser_helpers
+    assert state["baseline_verified"] and not state["active_work"]

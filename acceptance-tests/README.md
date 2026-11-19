@@ -21,20 +21,54 @@ npm --prefix acceptance-tests run test:specs
 ```
 
 Both commands use `acceptance-gate.cjs` and freshly discover their inventory.
-They run two required groups **serially**:
+They run the nonempty required groups **serially**:
 
 1. **Normal:** one fresh real Compose stack, one scenario at a time, verified
-   state reset before every scenario, fresh browser/request contexts.
+   state reset before every scenario, and fresh browser/request contexts.
 2. **Lifecycle/command validation:** separate real, serial invocations proving
    fresh startup, teardown, failure, cancellation, closed reset failures,
    production-mode exclusion, and complete-command discovery/reporting.
+3. **Preview controller restart:** a fresh invocation for the real restart that
+   intentionally invalidates the controller's process-local reset identity.
 
-The normal runner must exit and finish owned teardown before the dedicated
-runner starts. A nonzero child exit, missing/duplicate/conflicting result,
-non-passed scenario, or changing specification fails the combined gate. A
-normal failure prevents the dedicated group from starting and explicitly marks
-its assigned cases incomplete. Both groups must pass for complete acceptance
-verification. No concurrency or automatic scenario retry is enabled.
+Each runner must exit and finish owned teardown before the next starts: only
+one test stack may be active. A nonzero child exit, missing/duplicate/conflicting
+result, non-passed scenario, or changing specification fails the combined gate.
+A normal failure prevents subsequent groups from starting and explicitly marks
+their cases incomplete. Sharding, parallel Cucumber workers and automatic
+scenario retries are disabled; there is no `--workers` override.
+
+The entire gate has a fixed **600-second (10-minute) pass/fail deadline**, starting
+before discovery and including application startup, scenarios, groups and
+teardown. This budget is not reset between groups and cannot be extended by a
+CLI option. At the deadline the gate fails, cancels the active runner and does
+not start later groups. Cancellation allows 30 seconds for ordinary owned
+teardown before killing a stuck runner and invoking the existing project-scoped
+cleanup backstop. Cleanup may finish after the failure deadline; that never
+allows more test execution or turns a timeout into a pass. JSON and HTML reports
+retain the timeout failure and incomplete coverage.
+
+Fixtures use the smallest real application needed by each scenario. Native
+configuration and full-stack login/persistence cases retain real Postgres and
+health-conditioned dependencies. Operation/routing/isolation cases use a real
+persistent SQLite database, API and website. Checkout-local source binds and the
+exact public Python helper image already seeded by production avoid redundant
+image acquisition. The dedicated build/resource case still executes real native
+builds. Prebuilt watch fixtures retain a build context, use native initial sync,
+and serve HTML from the watched destination; an actual source update must arrive
+through Compose watch. Full default fixtures also remain available. API-only scenarios open the browser UI only when a step needs it.
+Browser clients close before preview teardown so their polling/streams cannot
+compete with cleanup. Two chat workloads may launch together within one scenario;
+there is still only one application test stack and no parallel scenario workers.
+
+Idle-expiry fixtures drive the actual controller through its private authenticated
+acceptance-only `advance-idle-time` action. Production expiry remains 300 seconds;
+startup/reset deadlines and application/output processes still use real time.
+Each logical idle minute requires fresh actual watch output and an attached live
+stream before advancing time; expiry, cleanup and durable history are then
+checked normally. Wrong run/generation/authentication and closed admission fail
+closed, and verified scenario reset restores the idle-clock offset to zero.
+No external process-local activity map or skipped expiry assertions is used.
 
 Active MODIFIED/REMOVED requirements replace/exclude the source requirement
 through the existing effective composer. Exclusions are announced on stderr;
@@ -186,8 +220,9 @@ uv run --directory backend --no-sync pytest --confcutdir=tests/services \
 Every gate execution produces reports under `acceptance-tests/reports/`:
 
 - `cucumber-report.html`: combined status and complete/disjoint assignments.
-- `cucumber-normal.html`, `cucumber-lifecycle.html`: Cucumber group reports.
-- `cucumber-summary.json`: group outcomes, missing coverage, wall times.
+- `cucumber-normal.html`: the single-stack normal Cucumber report.
+- `cucumber-lifecycle.html`, `cucumber-preview-restart.html`: dedicated serial group reports.
+- `cucumber-summary.json`: group outcomes, missing coverage, wall times and timeout status.
 - `cucumber-results.json`: combined Cucumber results.
 - `cucumber-manifest.json`: freshly extracted inventory and fingerprint.
 - `cucumber-{normal,lifecycle}-events.ndjson`: startup, reset-phase timing,

@@ -6,7 +6,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { test } = require('node:test');
 const cheerio = require('cheerio');
-const { auditGroup, parseArguments, runGate } = require('./acceptance-gate.cjs');
+const { GATE_TIMEOUT_MS, auditGroup, cleanupDeadlineResources, parseArguments, runGate } = require('./acceptance-gate.cjs');
 const { AcceptanceGatePage } = require('./support/pages/acceptance-gate-page.js');
 const root = __dirname;
 function scenarioReport(entries, status = 'passed') {
@@ -33,6 +33,107 @@ test('argument parsing preserves explicit partial/dry/source choices and rejects
   assert.throws(() => parseArguments(['--group', 'other']), /group/);
   assert.throws(() => parseArguments(['--report-prefix', '../outside']), /basename/);
 });
+test('the ten-minute budget is fixed and sharding/deadline overrides are rejected', () => {
+  assert.equal(GATE_TIMEOUT_MS, 600_000);
+  for (const args of [['--workers', '1'], ['--workers', '2'], ['--timeout', '1200']]) {
+    assert.throws(() => parseArguments(args), /Unsupported/);
+  }
+});
+
+test('all normal cases stay in one serial invocation without shard manifests', async t => {
+  const options = setup(t);
+  const file = path.join(options.specRoot, 'specs/acceptance-stack-reuse/spec.md');
+  fs.appendFileSync(file, '\n### Requirement: Additional ordinary scenarios\nThese cases MUST remain independently covered.\n' +
+    [1, 2, 3].map(index => `\n#### Scenario: Additional normal ${index}\n\n\`\`\`gherkin\nGiven state ${index}\nThen operation succeeds\n\`\`\`\n`).join(''));
+  let active = false;
+  const seen = [];
+  const summary = await runGate(options, async ({ group, entries }) => {
+    assert.equal(active, false);
+    active = true;
+    seen.push([group, entries.length]);
+    await new Promise(resolve => setImmediate(resolve));
+    active = false;
+    return { code: 0, wallSeconds: 1, features: scenarioReport(entries) };
+  });
+  assert.deepEqual(seen, [['normal', 4], ['lifecycle', 1]]);
+  assert.equal(summary.groups[0].shards, undefined);
+  assert.equal(summary.status, 'passed');
+});
+
+test('one deadline spans all groups and a late success exit cannot turn a timeout green', async t => {
+  let expire, scheduled = 0, cleared = 0, sharedSignal;
+  const options = setup(t);
+  const summary = await runGate(options, async ({ group, entries, signal }) => {
+    if (!sharedSignal) sharedSignal = signal;
+    assert.equal(signal, sharedSignal);
+    if (group === 'lifecycle') expire();
+    return { code: 0, wallSeconds: 1, features: scenarioReport(entries) };
+  }, {
+    setTimeout(callback, milliseconds) {
+      assert.ok(milliseconds > 599_000 && milliseconds <= 600_000);
+      scheduled++; expire = callback; return 'deadline';
+    },
+    clearTimeout(handle) { assert.equal(handle, 'deadline'); cleared++; },
+  });
+  assert.equal(scheduled, 1);
+  assert.equal(cleared, 1);
+  assert.equal(sharedSignal.aborted, true);
+  assert.equal(summary.deadlineSeconds, 600);
+  assert.equal(summary.timedOut, true);
+  assert.equal(summary.status, 'failed');
+  assert.equal(summary.complete, false);
+  assert.match(summary.error, /10-minute/);
+  assert.equal(summary.groups[0].status, 'passed');
+  assert.equal(summary.groups[1].status, 'failed');
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'reports', `${options.prefix}-summary.json`)));
+  assert.equal(saved.timedOut, true);
+  assert.equal(saved.status, 'failed');
+  assert.match(fs.readFileSync(path.join(root, 'reports', `${options.prefix}-report.html`), 'utf8'), /600s/);
+});
+
+test('deadline aborts in-flight execution, waits for cleanup and blocks later groups', async t => {
+  let expire, cleaned = false;
+  const ran = [];
+  const summary = await runGate(setup(t), async ({ group, entries, signal }) => {
+    ran.push(group);
+    queueMicrotask(expire);
+    await new Promise(resolve => signal.addEventListener('abort', () => {
+      setImmediate(() => { cleaned = true; resolve(); });
+    }, { once: true }));
+    return { code: 1, wallSeconds: 1, features: scenarioReport(entries, 'failed') };
+  }, { setTimeout(callback) { expire = callback; return 'deadline'; }, clearTimeout() {} });
+  assert.equal(cleaned, true);
+  assert.deepEqual(ran, ['normal']);
+  assert.equal(summary.status, 'failed');
+  assert.equal(summary.timedOut, true);
+  assert.equal(summary.groups[1].status, 'not-run-after-failure');
+});
+
+test('timeout backstop only cleans verified invocation projects not already torn down', async t => {
+  const options = setup(t);
+  const events = path.join(root, 'reports', `${options.prefix}-events.ndjson`);
+  const pending = 'sdd-acceptance-123-0123abcd', stopped = 'sdd-acceptance-456-4567abcd';
+  fs.writeFileSync(events, [
+    { type: 'stack-start', project: pending },
+    { type: 'stack-start', project: stopped },
+    { type: 'stack-stopped', project: stopped, ownedResourcesEmpty: true },
+    { type: 'stack-start', project: 'docker-hub-cache' },
+  ].map(event => JSON.stringify(event)).join('\n') + '\n');
+  const state = { projectName: 'previous', stopped: true, env: { previous: true } };
+  const saved = { ...state }, cleaned = [];
+  await cleanupDeadlineResources(events, { state, async stopApplication() {
+    assert.equal(state.env.COMPOSE_PROJECT_NAME, pending);
+    cleaned.push(state.projectName);
+    state.stopped = true;
+  } });
+  assert.deepEqual(cleaned, [pending]);
+  assert.deepEqual(state, saved);
+  const proof = JSON.parse(fs.readFileSync(events, 'utf8').trim().split('\n').at(-1));
+  assert.equal(proof.ownedResourcesEmpty, true);
+  assert.equal(proof.deadlineCleanup, true);
+  assert.equal(proof.project, pending);
+});
+
 test('result audit rejects missing, duplicate, unassigned and truncated scenario coverage', () => {
   const entries = [{ id: 'case', uri: path.join(root, 'fixture.feature'), line: 4, name: 'Case', steps: ['state', 'operation', 'result'] }];
   assert.equal(auditGroup(entries, scenarioReport(entries)).allPassed, true);

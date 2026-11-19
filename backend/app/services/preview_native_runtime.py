@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import selectors
 import shutil
 import stat
 import subprocess
@@ -24,7 +25,7 @@ from urllib.parse import quote
 
 from app.services.preview_workspace_sync import IGNORED
 
-HELPER_IMAGE = 'python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88'
+HELPER_IMAGE = 'python:3.14-alpine3.22@sha256:6b91e66ab2a880ce9ca5a1b91c70f45963ff71ff68268df056336e1a657d5efd'
 NATIVE_LABEL = 'sdd.preview.native-execution'
 PLATFORM_DOCKER = shutil.which('docker') or '/usr/local/bin/docker'
 RUNNER = '/opt/preview/preview_native_session.py'
@@ -224,6 +225,129 @@ def replay_events(events: list[dict], after: int, *, limit: int = 100) -> list[d
     return result
 
 
+class EventJournalNotReady(RuntimeError):
+    pass
+
+
+class _EventReaderExited(RuntimeError):
+    pass
+
+
+class EventReader:
+    """One bounded request/reply pipe to a trusted, unprivileged journal reader."""
+
+    def __init__(self, argv, env, *, timeout=10.0, limit=1024 * 1024):
+        self.timeout, self.limit = timeout, limit
+        try:
+            self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                            stderr=subprocess.DEVNULL, env=env, bufsize=0)
+            for stream in (self.process.stdin, self.process.stdout):
+                os.set_blocking(stream.fileno(), False)
+        except OSError:
+            if hasattr(self, 'process'):
+                self.close()
+            raise RuntimeError('Native preview event reader could not start; check the configured runtime image') from None
+
+    @staticmethod
+    def validate_cursor(after):
+        if type(after) is not int or not 0 <= after <= 2**63 - 1:
+            raise ValueError('Invalid native preview event cursor')
+
+    def read(self, after):
+        self.validate_cursor(after)
+        deadline = time.monotonic() + self.timeout
+        if self.process.poll() is not None:
+            raise _EventReaderExited('Native preview event reader exited')
+        request = memoryview(f'{after}\n'.encode())
+        response = bytearray()
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(self.process.stdin, selectors.EVENT_WRITE)
+                while request:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise RuntimeError('Native preview event reader timed out')
+                    try:
+                        written = os.write(self.process.stdin.fileno(), request)
+                        request = request[written:]
+                    except BlockingIOError:
+                        continue
+                selector.unregister(self.process.stdin)
+                selector.register(self.process.stdout, selectors.EVENT_READ)
+                while b'\n' not in response:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise RuntimeError('Native preview event reader timed out')
+                    try:
+                        chunk = os.read(self.process.stdout.fileno(), min(65536, self.limit + 1 - len(response)))
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        raise _EventReaderExited('Native preview event reader exited')
+                    response.extend(chunk)
+                    if len(response) > self.limit:
+                        raise RuntimeError('Native preview event reader response exceeded its limit')
+        except (BrokenPipeError, OSError):
+            raise _EventReaderExited('Native preview event reader disconnected') from None
+        try:
+            if response[-1:] != b'\n' or response.count(b'\n') != 1:
+                raise ValueError
+            def unique_object(pairs):
+                value = {}
+                for key, item in pairs:
+                    if key in value:
+                        raise ValueError
+                    value[key] = item
+                return value
+            reply = json.loads(response, object_pairs_hook=unique_object)
+            if not isinstance(reply, dict) or type(reply.get('after')) is not int or reply['after'] != after:
+                raise ValueError
+            if set(reply) == {'after', 'error'}:
+                if reply['error'] == 'not_ready':
+                    raise EventJournalNotReady('Native preview event journal is not ready')
+                raise RuntimeError('Native preview event journal is unavailable; check the private sandbox')
+            if set(reply) != {'after', 'result'}:
+                raise ValueError
+            current = reply['result']
+            if (not isinstance(current, dict) or not isinstance(current.get('execution_id'), str)
+                    or current.get('state') not in ('starting', 'running', 'failed', 'stopped', 'interrupted')
+                    or type(current.get('ready')) is not bool or not isinstance(current.get('details'), dict)
+                    or type(current.get('cursor')) is not int or current['cursor'] < 0
+                    or not isinstance(current.get('events'), list) or len(current['events']) > 100):
+                raise ValueError
+            cursor = after
+            for event in current['events']:
+                if (not isinstance(event, dict) or set(event) != {'cursor', 'kind', 'payload'}
+                        or type(event['cursor']) is not int or not cursor < event['cursor'] <= current['cursor']
+                        or event['kind'] not in ('command_start', 'stdout', 'stderr', 'command_exit', 'status', 'gap')
+                        or not isinstance(event['payload'], dict)):
+                    raise ValueError
+                cursor = event['cursor']
+                if event['kind'] == 'gap':
+                    through = event['payload'].get('through_cursor')
+                    if type(through) is not int or not cursor <= through <= current['cursor']:
+                        raise ValueError
+                    cursor = through
+            return current
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            raise RuntimeError('Native preview event reader returned an invalid protocol response') from None
+
+    def close(self):
+        for stream in (self.process.stdin, self.process.stdout):
+            if stream is not None:
+                stream.close()
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        try:
+            self.process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError('Native preview event reader did not stop') from None
+
+
 class NativeRuntime:
     def __init__(self, controller):
         self.c = controller
@@ -233,6 +357,8 @@ class NativeRuntime:
         self.last: dict[uuid.UUID, dict] = {}
         self.terminal: OrderedDict[uuid.UUID, dict] = OrderedDict()
         self.helper_id: str | None = None
+        self.readers: dict[uuid.UUID, EventReader] = {}
+        self.browser_helpers: dict[tuple[uuid.UUID, str], tuple[str, str]] = {}
 
     def operation(self, chat_id):
         with self.lock:
@@ -343,6 +469,7 @@ class NativeRuntime:
                 if existing['Config']['Labels'].get(NATIVE_LABEL) == execution_id:
                     return self.status(chat_id, existing)
                 raise RuntimeError('Stop the previous preview before starting a new execution')
+            self.close_reader(chat_id)
             image = os.environ.get('PREVIEW_NATIVE_IMAGE', self.c.PROJECT + '-preview-native:runtime')
             if self.c.docker('GET', f'/images/{quote(image, safe="")}/json')[0] != 200:
                 raise RuntimeError('The configured native preview image is missing. Build backend/preview-native.Dockerfile and configure PREVIEW_NATIVE_IMAGE before launching.')
@@ -401,7 +528,7 @@ class NativeRuntime:
                 self.upload(chat_id, {'preview-plan.json': (json.dumps(plan).encode(), 0o600)}, '/run/user/1000')
                 self.exec(chat_id, ['env', 'PREVIEW_HELPER_IMAGE=' + self.helper_id, 'python3', RUNNER, 'start', execution_id])
                 with self.c.activity_lock:
-                    self.c.activity[chat_id] = time.time()
+                    self.c.activity[chat_id] = self.c.idle_time()
                 value = {'execution_id': execution_id, 'state': 'starting', 'ready': False, 'details': {}, 'cursor': 0}
                 self.last[chat_id] = value
                 return {'runtime': 'native-compose', **value}
@@ -420,7 +547,41 @@ class NativeRuntime:
         return None if container else self.terminal.get(chat_id)
 
     def read(self, chat_id, after):
-        return json.loads(self.exec(chat_id, ['python3', RUNNER, 'events', str(after)], limit=1024 * 1024))
+        EventReader.validate_cursor(after)
+        with self.operation(chat_id):
+            for attempt in range(2):
+                with self.lock:
+                    reader = self.readers.get(chat_id)
+                    if reader is None:
+                        reader = EventReader(
+                            [PLATFORM_DOCKER, 'exec', '-i', '--user', '1000:1000', self.c.container_name(chat_id),
+                             'python3', '-u', RUNNER, 'events-serve'], self.management_env(),
+                        )
+                        self.readers[chat_id] = reader
+                try:
+                    return reader.read(after)
+                except EventJournalNotReady:
+                    raise
+                except _EventReaderExited:
+                    self.close_reader(chat_id)
+                    if attempt:
+                        raise RuntimeError('Native preview event reader exited; check the private sandbox') from None
+                except RuntimeError:
+                    self.close_reader(chat_id)
+                    raise
+
+    def close_reader(self, chat_id):
+        with self.operation(chat_id):
+            with self.lock:
+                reader = self.readers.pop(chat_id, None)
+            if reader is not None:
+                reader.close()
+
+    def close_readers(self):
+        with self.lock:
+            chats = list(self.readers)
+        for chat_id in chats:
+            self.close_reader(chat_id)
 
     def events(self, chat_id, after=0):
         with self.operation(chat_id):
@@ -428,9 +589,12 @@ class NativeRuntime:
             if container and container['Config']['Labels'].get(NATIVE_LABEL):
                 try:
                     current = self.read(chat_id, after)
-                except RuntimeError:
+                except EventJournalNotReady:
                     # A fresh detached supervisor may not have created its journal.
                     return {**self.status(chat_id, container), 'events': []}
+                if current['execution_id'] != container['Config']['Labels'][NATIVE_LABEL]:
+                    self.close_reader(chat_id)
+                    raise RuntimeError('Native preview event reader execution identity changed')
                 self.last[chat_id] = current
                 if current['state'] in ('failed', 'stopped', 'interrupted'):
                     self.preserve(chat_id, current)
@@ -466,33 +630,78 @@ class NativeRuntime:
             self.terminal.popitem(last=False)
 
     def before_stop(self, chat_id, container):
-        if not container or not container['Config']['Labels'].get(NATIVE_LABEL):
-            return
         with self.operation(chat_id):
-            if chat_id not in self.terminal:
-                try:
-                    self.exec(chat_id, ['python3', '-c', "import os,signal; from pathlib import Path; p=Path('/run/user/1000/preview-supervisor.pid'); os.kill(int(p.read_text()),signal.SIGTERM) if p.exists() else None"])
-                    deadline = time.monotonic() + 10
-                    while True:
-                        current = self.read(chat_id, 0)
-                        if current['state'] in ('failed', 'stopped', 'interrupted') or time.monotonic() >= deadline:
-                            break
-                        time.sleep(0.1)
-                    if current['state'] not in ('failed', 'stopped', 'interrupted'):
-                        current = {**current, 'state': 'stopped', 'ready': False}
-                    self.preserve(chat_id, current)
-                except RuntimeError:
-                    self.terminal[chat_id] = {'execution_id': container['Config']['Labels'][NATIVE_LABEL], 'state': 'interrupted', 'ready': False, 'details': {}, 'events': [], 'cursor': 0}
-            self.previous.pop(chat_id, None)
-            self.last.pop(chat_id, None)
+            try:
+                if not container or not container['Config']['Labels'].get(NATIVE_LABEL):
+                    return
+                if chat_id not in self.terminal:
+                    try:
+                        self.exec(chat_id, ['python3', '-c', "import os,signal; from pathlib import Path; p=Path('/run/user/1000/preview-supervisor.pid'); os.kill(int(p.read_text()),signal.SIGTERM) if p.exists() else None"])
+                        deadline = time.monotonic() + 10
+                        while True:
+                            current = self.read(chat_id, 0)
+                            if current['state'] in ('failed', 'stopped', 'interrupted') or time.monotonic() >= deadline:
+                                break
+                            time.sleep(0.1)
+                        if current['state'] not in ('failed', 'stopped', 'interrupted'):
+                            current = {**current, 'state': 'stopped', 'ready': False}
+                        self.preserve(chat_id, current)
+                    except RuntimeError:
+                        self.terminal[chat_id] = {'execution_id': container['Config']['Labels'][NATIVE_LABEL], 'state': 'interrupted', 'ready': False, 'details': {}, 'events': [], 'cursor': 0}
+                self.previous.pop(chat_id, None)
+                self.last.pop(chat_id, None)
+            finally:
+                with self.lock:
+                    for key in list(self.browser_helpers):
+                        if key[0] == chat_id:
+                            self.browser_helpers.pop(key)
+                self.close_reader(chat_id)
 
-    def browser_command(self, current, port):
+    def browser_command(self, current, port, chat_id):
         route = current.get('details', {}).get('routes', {}).get(port)
-        if not route or not isinstance(route.get('container'), str) or not route['container'].isalnum():
+        if (not route or not isinstance(route.get('container'), str)
+                or not re.fullmatch(r'[a-f0-9]{12,64}', route['container'])
+                or not isinstance(port, str) or not port.isdecimal() or not 1 <= int(port) <= 65535
+                or type(route.get('target')) is not int or not 1 <= route['target'] <= 65535):
             raise ValueError('Unregistered application route')
-        if self.helper_id is None:
-            code, image = self.c.docker('GET', f'/images/{quote(HELPER_IMAGE, safe="")}/json')
-            if code != 200:
-                raise RuntimeError('The fixed trusted forwarding image is not available')
-            self.helper_id = image['Id']
-        return ['docker', 'run', '--rm', '-i', '--pull=never', '--network=container:' + route['container'], '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=32', self.helper_id], str(route['target'])
+        execution = uuid.UUID(current['execution_id']).hex
+        with self.operation(chat_id):
+            if self.helper_id is None:
+                code, image = self.c.docker('GET', f'/images/{quote(HELPER_IMAGE, safe="")}/json')
+                if code != 200:
+                    raise RuntimeError('The fixed trusted forwarding image is not available')
+                self.helper_id = image['Id']
+            key = (chat_id, port)
+            name = f'trusted-app-forwarder-{execution}-{port}'
+            with self.lock:
+                cached = self.browser_helpers.get(key)
+            valid = False
+            if cached == (route['container'], name):
+                try:
+                    helper = json.loads(self.exec(chat_id, ['docker', 'inspect', '--format', '{{json .}}', name]))
+                    host = helper['HostConfig']
+                    valid = (helper['State']['Running'] and helper['Image'] == self.helper_id
+                             and host['NetworkMode'].startswith('container:' + route['container'])
+                             and host['ReadonlyRootfs'] and not host['Privileged']
+                             and host['CapDrop'] == ['ALL'] and 'no-new-privileges:true' in host['SecurityOpt']
+                             and host['PidsLimit'] == 128 and not helper['Mounts'])
+                except (RuntimeError, ValueError, KeyError, TypeError):
+                    pass
+            if not valid:
+                # This exact execution/port name is reserved for a trusted helper
+                # inside this chat's private daemon, never a project/host resource.
+                try:
+                    self.exec(chat_id, ['docker', 'rm', '-f', name])
+                except RuntimeError:
+                    pass
+                self.exec(chat_id, ['docker', 'run', '-d', '--name', name, '--pull=never',
+                    '--network=container:' + route['container'], '--read-only', '--cap-drop=ALL',
+                    '--security-opt=no-new-privileges:true', '--pids-limit=128', self.helper_id,
+                    'python', '-c', 'import signal; signal.pause()'])
+                with self.lock:
+                    self.browser_helpers[key] = (route['container'], name)
+            # Keep only the network namespace/image alive. Every HTTP/WebSocket
+            # request still receives a fresh isolated Python process and pipes;
+            # no cookies, credentials, request data or writable files are shared.
+            # The shared helper is bounded, as is the unchanged outer PID budget.
+            return ['docker', 'exec', '-i', name], str(route['target'])

@@ -49,10 +49,12 @@ class AcceptanceWorld extends World {
   }
 
   async dispose() {
+    // Stop browser polling, streams and iframe forwarding before draining the
+    // preview. Teardown must not compete with clients creating fresh requests.
     try {
-      if (!state.fatal) await this.previewWorkloadPage.stopAll();
-    } finally {
       await this.disposeContexts();
+    } finally {
+      if (!state.fatal) await this.previewWorkloadPage.stopAll();
     }
   }
 }

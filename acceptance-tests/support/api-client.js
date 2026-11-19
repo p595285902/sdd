@@ -133,6 +133,7 @@ with Session(engine) as session:
 class ApiClient {
   constructor(world) {
     this.world = world;
+    this.requestContexts = new Map();
   }
 
   uniqueEmail(prefix = 'acceptance') {
@@ -160,9 +161,20 @@ class ApiClient {
   }
 
   async request(token, method, path, options = {}) {
-    const api = await this.world.openApiContext({
-      Authorization: `Bearer ${token}`,
-    });
+    const headers = { Authorization: `Bearer ${token}` };
+    // Pool only ordinary stateless bearer requests within this ApiClient/world.
+    // Browser, cookie and explicit-header probes retain fresh isolated contexts.
+    let pending = options.headers ? undefined : this.requestContexts.get(token);
+    if (!pending) {
+      pending = Promise.resolve(this.world.openApiContext(headers));
+      if (!options.headers) {
+        this.requestContexts.set(token, pending);
+        pending.catch(() => {
+          if (this.requestContexts.get(token) === pending) this.requestContexts.delete(token);
+        });
+      }
+    }
+    const api = await pending;
     return api[method](path, options);
   }
 
@@ -382,6 +394,7 @@ class ApiClient {
 
   async resetScenarioState() {
     const acknowledgement = await resetScenarioState();
+    this.requestContexts.clear();
     this.superuserToken = undefined;
     return acknowledgement;
   }

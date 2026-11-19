@@ -172,6 +172,7 @@ def test_environment_is_allowlisted_and_has_no_docker_settings(session_module, m
     m = session_module
     monkeypatch.setenv('PLATFORM_TOKEN', 'must-not-be-inherited')
     monkeypatch.setenv('DOCKER_HOST', 'unix:///platform.sock')
+    monkeypatch.setenv('npm_config_fetch_retry_maxtimeout', '60000')
     setup = command("import os,json; print(json.dumps(dict(os.environ))); raise SystemExit(4)")
     supervisor, thread = launch_supervisor(m, plan([setup]))
     thread.join(5)
@@ -182,6 +183,11 @@ def test_environment_is_allowlisted_and_has_no_docker_settings(session_module, m
         assert 'DOCKER_HOST' not in text
         assert 'npm_config_cache' in text
         assert 'UV_CACHE_DIR' in text
+        environment = json.loads(''.join(
+            event['payload']['text'] for event in all_events(m) if event['kind'] == 'stdout'
+        ))
+        assert environment['npm_config_fetch_retry_maxtimeout'] == '10000'
+        assert 2 * int(environment['npm_config_fetch_retry_maxtimeout']) / 1000 < supervisor.setup_timeout
     finally:
         supervisor.journal.db.close()
 

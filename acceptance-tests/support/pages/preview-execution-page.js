@@ -4,6 +4,7 @@ const { spawnSync } = require('node:child_process');
 const { expect } = require('@playwright/test');
 const { configureDemoRepository } = require('../../features/support/app-lifecycle.js');
 const { DevelopContextPage } = require('./develop-context-page.js');
+const { initializationFixture } = require('../native-compose-fixture.cjs');
 
 const WAIT = 240_000;
 const TERMINAL = new Set(['failed', 'stopped', 'interrupted']);
@@ -77,7 +78,7 @@ class PreviewExecutionPage extends DevelopContextPage {
     return observed;
   }
 
-  async prepare({ mode = 'normal', selected = false } = {}) {
+  async prepare({ mode = 'normal', selected = false, build = false, buildApi = build, watch = build, prebuiltWatch = false, database = 'sqlite', ui = true } = {}) {
     await configureDemoRepository(true);
     this.world.userToken ??= await this.world.apiClient.authenticateSuperuser();
     if (!selected || !this.world.developmentChat) {
@@ -90,24 +91,13 @@ class PreviewExecutionPage extends DevelopContextPage {
       const setup = await this.world.apiClient.setupDevelopmentWorkspace(this.token, this.chat.id);
       assert.equal(setup.status(), 200, await setup.text());
     }
-    const files = await this.world.previewWorkloadPage.prepareNativeCompose(this.chat.id);
+    const files = await this.world.previewWorkloadPage.prepareNativeCompose(this.chat.id, { build, buildApi, watch, prebuiltWatch, database });
     this.secret = `acceptance-project-secret-${randomUUID()}`;
     this.markup = '<img src=x onerror="window.__previewOutputExecuted=true"><script>window.__previewOutputExecuted=true</script>**literal preview output**';
-    const before = `import os, sys, time\nprint('acceptance initialization entered', flush=True)\n`;
-    const live = `for index in range(${mode === 'live' ? 48 : 12}):\n    print(f'acceptance stdout tick {index:03d}', flush=True)\n    print(f'acceptance stderr tick {index:03d}', file=sys.stderr, flush=True)\n    time.sleep(0.5)\n`;
-    const variants = {
-      normal: before + live + files['api/init.py'],
-      live: before + live + files['api/init.py'],
-      failed: before + "print('acceptance initialization diagnostic ' + os.environ['PREVIEW_EXECUTION_SECRET'], file=sys.stderr, flush=True)\nsys.exit(17)\n",
-      retention: before + "for index in range(1024):\n    print('retention output ' + str(index) + ' ' + 'x' * 2048, flush=True)\nprint('acceptance retained final diagnostic', file=sys.stderr, flush=True)\nsys.exit(23)\n",
-      secret: before + "secret = os.environ['PREVIEW_EXECUTION_SECRET']\ncut = len(secret) // 2\nsys.stdout.write('split secret: ' + secret[:cut]); sys.stdout.flush()\ntime.sleep(0.5)\nsys.stdout.write(secret[cut:] + '\\n'); sys.stdout.flush()\nsys.exit(29)\n",
-      markup: before + `print(${JSON.stringify(`\u001b[31m${this.markup}\u001b[0m\u001b]52;c;ignored\u0007`)}, flush=True)\nsys.exit(31)\n`,
-      missing: before + files['api/init.py'],
-    };
-    assert.ok(variants[mode], `Unknown real-project fixture mode: ${mode}`);
+    const initialization = initializationFixture(files['api/init.py'], { mode, markup: this.markup });
     await this.world.apiClient.withWorkspaceFileBatch(this.chat.id, async () => {
       await this.world.apiClient.editWorkspaceFile(this.chat.id, '.env', files['.env'] + `PREVIEW_EXECUTION_SECRET=${this.secret}\n`);
-      await this.world.apiClient.editWorkspaceFile(this.chat.id, 'api/init.py', variants[mode]);
+      await this.world.apiClient.editWorkspaceFile(this.chat.id, 'api/init.py', initialization);
       if (mode === 'missing') {
         await this.world.apiClient.editWorkspaceFile(this.chat.id, 'README.md', '# Project overview\nStartup instructions have not been documented.\n');
       }
@@ -123,8 +113,10 @@ class PreviewExecutionPage extends DevelopContextPage {
       if (request.method() === 'POST' && path === `/api/v1/develop/chats/${this.chat.id}/preview/launch`) this.launchRequests.push(request);
       if (path.startsWith(`/api/v1/develop/chats/${this.chat.id}/preview/executions/`) && path.endsWith('/stream')) this.outputRequests.push(request);
     });
-    await this.world.developPage.open(this.token);
-    if ((this.page.viewportSize()?.width ?? 1440) >= 768) await this.world.developPage.selectChat(this.chat.title);
+    if (ui) {
+      await this.world.developPage.open(this.token);
+      if ((this.page.viewportSize()?.width ?? 1440) >= 768) await this.world.developPage.selectChat(this.chat.title);
+    }
     this.mode = mode;
   }
 
@@ -160,6 +152,14 @@ class PreviewExecutionPage extends DevelopContextPage {
     assert.ok(chat && panel);
     if ((this.page.viewportSize()?.width ?? 1440) >= 1024) assert.ok(chat.x + chat.width <= panel.x + 1);
     await expect(this.conversation.getByRole('textbox', { name: 'Exploration message' })).toBeVisible();
+  }
+
+  async launchApi() {
+    const response = await this.request('launch', 'post', this.token, { data: {} });
+    assert.equal(response.status(), 200, await response.text());
+    const result = await response.json();
+    assert.ok(result.execution?.id);
+    this.execution = result.execution;
   }
 
   async launch() {
@@ -303,8 +303,8 @@ class PreviewExecutionPage extends DevelopContextPage {
   }
 
   async prepareFailed() {
-    await this.prepare({ mode: 'failed' });
-    await this.launch();
+    await this.prepare({ mode: 'failed', ui: false });
+    await this.launchApi();
     await this.waitForExecution(execution => execution.status === 'failed');
     await expect.poll(() => this.world.previewWorkloadPage.isRunning(this.chat.id), { timeout: WAIT }).toBe(false);
   }
@@ -312,6 +312,7 @@ class PreviewExecutionPage extends DevelopContextPage {
   async revisit() {
     this.savedLaunchCount = this.launchRequests.length;
     await this.world.developPage.open(this.token);
+    await this.world.developPage.selectChat(this.chat.title);
     await this.expandOperation();
   }
 
@@ -359,7 +360,9 @@ class PreviewExecutionPage extends DevelopContextPage {
   }
 
   async prepareOtherOwnerOutput() {
-    await this.prepareActive();
+    // This Given needs persisted output, not a running watch or an open UI.
+    // Produce genuine durable failure output through the normal launch path.
+    await this.prepareFailed();
     const user = await this.world.apiClient.createUser();
     this.otherToken = await this.world.apiClient.authenticate(user.email, user.password);
   }
@@ -380,7 +383,8 @@ class PreviewExecutionPage extends DevelopContextPage {
   expectDenied() { assert.ok(this.denied.every(response => [403, 404].includes(response.status))); }
   expectNoDisclosure() {
     assert.ok(this.denied.every(response => !response.body.includes(this.execution.id) &&
-      !response.body.includes('acceptance stdout') && !response.body.includes('docker compose')));
+      !response.body.includes('acceptance stdout') && !response.body.includes('acceptance initialization') &&
+      !response.body.includes('docker compose')));
   }
 
   async expectDisplayedDurable() {
@@ -461,8 +465,8 @@ class PreviewExecutionPage extends DevelopContextPage {
   }
 
   async prepareRetention() {
-    await this.prepare({ mode: 'retention' });
-    await this.launch();
+    await this.prepare({ mode: 'retention', ui: false });
+    await this.launchApi();
     await this.waitForExecution(execution => TERMINAL.has(execution.status));
     this.retainedEvents = await this.events();
     assert.ok(this.retainedEvents.some(event => TRUNCATED.has(event.kind)), 'The real command must exceed actual retention bounds');

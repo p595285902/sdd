@@ -19,8 +19,8 @@ Given('a Development Chat has a running preview workload', runtime, async functi
   await nativePage(this).page.goto('about:blank');
 });
 When('five minutes pass without visible Context activity', runtime, async function () {
-  if (nativePage(this).fixtureKind === 'output-idle') await nativePage(this).waitForRealIdle();
-  else this.previewWorkloadPage.advancePastIdle();
+  if (nativePage(this).fixtureKind === 'output-idle') await nativePage(this).waitForIdleExpiry();
+  else await this.previewWorkloadPage.advancePastIdle();
 });
 Then('its preview workload is stopped', runtime, async function () { await nativePage(this).expectRemoved(); });
 Then('its Development Chat remains available', runtime, async function () { await nativePage(this).expectChatAvailable(); });
@@ -55,7 +55,7 @@ Given('a Development Chat has a running Compose preview and persisted launch out
 Then('its sandbox and command sessions are stopped and removed', runtime, async function () { await nativePage(this).expectRemoved(); });
 Then('its chat retains the redacted commands, output and stopped status', runtime, async function () { await nativePage(this).expectIdleHistory(); });
 Given('a Development Chat has a running preview with no visible Context activity', runtime, async function () { await nativePage(this).prepareIdle(); });
-When('its watch command continues emitting output for five minutes', runtime, async function () { await nativePage(this).waitForRealIdle(); });
+When('its watch command continues emitting output for five minutes', runtime, async function () { await nativePage(this).waitForIdleExpiry(); });
 Then('the output does not keep the preview workload alive', runtime, async function () { await nativePage(this).expectRemoved(); });
 Then('the chat retains the final stopped status', runtime, async function () { await nativePage(this).expectIdleHistory(); });
 Given('a persisted preview execution is active but its sandbox no longer exists after controller restart', runtime, async function () { await nativePage(this).removeAndRestartController(); });

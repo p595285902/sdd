@@ -8,7 +8,7 @@ Given('an authenticated user owns a Development Chat with a ready preview', asyn
   await this.apiClient.authenticateSuperuser();
   this.browserChat = await this.apiClient.createDevelopmentChat(this.apiClient.superuserToken, `Browser ${randomUUID()}`);
   assert.equal((await this.apiClient.setupDevelopmentWorkspace(this.apiClient.superuserToken, this.browserChat.id)).status(), 200);
-  await this.previewWorkloadPage.prepareCompose(this.browserChat.id);
+  await this.previewWorkloadPage.prepareCompose(this.browserChat.id, { build: false });
   assert.equal((await this.previewWorkloadPage.openContext(this.browserChat.id)).body.state, 'ready');
 });
 
@@ -54,7 +54,7 @@ Given('a Development Chat has a browser preview session', async function () {
   await this.apiClient.authenticateSuperuser();
   this.browserChat = await this.apiClient.createDevelopmentChat(this.apiClient.superuserToken, `Browser ${randomUUID()}`);
   assert.equal((await this.apiClient.setupDevelopmentWorkspace(this.apiClient.superuserToken, this.browserChat.id)).status(), 200);
-  await this.previewWorkloadPage.prepareCompose(this.browserChat.id);
+  await this.previewWorkloadPage.prepareCompose(this.browserChat.id, { build: false });
   assert.equal((await this.previewWorkloadPage.openContext(this.browserChat.id)).body.state, 'ready');
   const response = await this.apiClient.request(this.apiClient.superuserToken, 'post',
     `/api/v1/develop/chats/${this.browserChat.id}/preview/browser-session`);

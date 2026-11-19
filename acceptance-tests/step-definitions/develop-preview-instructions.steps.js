@@ -38,7 +38,7 @@ Then('the user is asked in chat for a command or a checkout-local pointer', runt
 When('the user provides startup instructions', runtime, async function () { await nativePage(this).saveClarification(); });
 Then('those instructions are saved only for that chat\'s preview', runtime, async function () { await nativePage(this).expectClarificationScoped(); });
 Then('the project remains stopped until the user launches it again', runtime, async function () { await nativePage(this).expectSavedStopped(); });
-Given('a Development Chat README documents Compose initialization followed by Compose watch', runtime, async function () { await nativePage(this).prepareNative(); });
+Given('a Development Chat README documents Compose initialization followed by Compose watch', runtime, async function () { await nativePage(this).prepareNative('watch'); });
 Then('the native Compose workflow is executed in that chat\'s sandbox', runtime, async function () { await nativePage(this).expectNativeWorkflow(); });
 Then('the user is not asked to provide non-Compose commands', runtime, async function () { await nativePage(this).expectNoAlternativePrompt(); });
 Given('a Development Chat\'s documentation contains conflicting full-stack Docker startup instructions with no documented selection', runtime, async function () { await nativePage(this).prepareNative('conflicting'); });

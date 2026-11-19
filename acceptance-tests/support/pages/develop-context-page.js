@@ -26,15 +26,16 @@ class DevelopContextPage {
   async prepareCompose(chatId, label, apiOnly = false) {
     const { apiClient, previewWorkloadPage } = this.world;
     await apiClient.withWorkspaceFileBatch(chatId, async () => {
-      await previewWorkloadPage.prepareCompose(chatId);
+      await previewWorkloadPage.prepareCompose(chatId, { build: false });
       if (apiOnly) {
         await apiClient.editWorkspaceFile(chatId, 'README.md',
           'Run `docker compose -f compose.yml up api`. API Swagger UI is at http://localhost:8766/docs/.');
         await apiClient.editWorkspaceFile(chatId, 'compose.yml', `services:
   api:
-    build:
-      context: api
-      dockerfile: Dockerfile
+    image: ${previewWorkloadPage.publicPythonImage()}
+    working_dir: /workspace
+    user: '65534'
+    volumes: ['./api:/workspace:ro']
     command: ["python", "-m", "http.server", "8766", "--bind", "0.0.0.0"]
     expose: [8766]
 `);

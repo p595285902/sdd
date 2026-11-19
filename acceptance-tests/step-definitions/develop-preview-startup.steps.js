@@ -19,7 +19,7 @@ Then('that chat\'s preview remains stopped', runtime, async function () { await 
 Then('no startup command is executed', runtime, async function () { await nativePage(this).expectNoCommands(); });
 
 Given('an authenticated user has selected a Development Chat with a ready checkout and documented Compose workflow', runtime, async function () {
-  await nativePage(this).prepareNative();
+  await nativePage(this).prepareNative('live');
   nativePage(this).otherChat = await nativePage(this).createOther();
 });
 When('the user clicks Launch beside Expand', runtime, async function () { await nativePage(this).launch(); });

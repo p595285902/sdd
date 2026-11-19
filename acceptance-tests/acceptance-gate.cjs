@@ -6,6 +6,9 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { discover, acceptanceRoot, executionGroups, groupPaths } = require('./support/acceptance-inventory.cjs');
 
+const GATE_TIMEOUT_MS = 600_000;
+const CLEANUP_GRACE_MS = 30_000;
+
 function parseArguments(args) {
   const options = { names: [], formats: [] };
   for (let index = 0; index < args.length; index++) {
@@ -54,8 +57,35 @@ function auditGroup(entries, features, { dryRun = false } = {}) {
     allPassed: observed.size === expected.size && (dryRun || passed === expected.size) };
 }
 
-function executeCucumber({ group, manifestPath, reports, dryRun }) {
+async function cleanupDeadlineResources(eventsPath, lifecycle = require('./features/support/app-lifecycle.js')) {
+  const pending = new Set();
+  for (const line of fs.readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean)) {
+    const event = JSON.parse(line);
+    if (!/^sdd-acceptance-\d+-[a-f0-9]{8}$/.test(event.project || '')) continue;
+    if (event.type === 'stack-start') pending.add(event.project);
+    if (event.type === 'stack-stopped' && event.ownedResourcesEmpty === true) pending.delete(event.project);
+  }
+  // The ordinary signal handler normally completes teardown. If a stalled
+  // runner had to be killed, reuse the existing ownership-scoped final cleanup,
+  // never a global Docker prune or an unverified project name.
+  for (const project of pending) {
+    const previous = { ...lifecycle.state };
+    try {
+      Object.assign(lifecycle.state, { projectName: project, stopped: false, extraComposeFiles: [],
+        env: { ...process.env, COMPOSE_PROJECT_NAME: project, ACCEPTANCE_PORT: '0' } });
+      await lifecycle.stopApplication();
+      fs.appendFileSync(eventsPath, JSON.stringify({ type: 'stack-stopped', project, at: Date.now(),
+        ownedResourcesEmpty: true, deadlineCleanup: true }) + '\n');
+    } finally {
+      for (const key of Object.keys(lifecycle.state)) if (!Object.hasOwn(previous, key)) delete lifecycle.state[key];
+      Object.assign(lifecycle.state, previous);
+    }
+  }
+}
+
+function executeCucumber({ group, manifestPath, reports, dryRun, signal }) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason); return; }
     const started = process.hrtime.bigint();
     const args = [path.join(acceptanceRoot, 'node_modules/@cucumber/cucumber/bin/cucumber.js'),
       '--config', 'cucumber.cjs', '--profile', group,
@@ -68,16 +98,27 @@ function executeCucumber({ group, manifestPath, reports, dryRun }) {
     const cancel = signal => child.kill(signal);
     const interrupt = () => cancel('SIGINT');
     const terminate = () => cancel('SIGTERM');
+    let cleanupTimer;
+    const timeout = () => {
+      terminate(); // Allow the existing signal handler to audit owned teardown.
+      cleanupTimer = setTimeout(() => cancel('SIGKILL'), CLEANUP_GRACE_MS);
+    };
+    signal?.addEventListener('abort', timeout, { once: true });
     process.once('SIGINT', interrupt);
     process.once('SIGTERM', terminate);
-    function unlisten() { process.removeListener('SIGINT', interrupt); process.removeListener('SIGTERM', terminate); }
+    function unlisten() {
+      clearTimeout(cleanupTimer);
+      signal?.removeEventListener('abort', timeout);
+      process.removeListener('SIGINT', interrupt); process.removeListener('SIGTERM', terminate);
+    }
     child.once('error', error => { unlisten(); reject(error); });
-    child.once('close', (code, signal) => {
+    child.once('close', async (code, exitSignal) => {
       unlisten();
       try {
+        if (signal?.aborted) await cleanupDeadlineResources(reports.events);
         const features = fs.existsSync(reports.json) ? JSON.parse(fs.readFileSync(reports.json, 'utf8')) : [];
-        resolve({ code: code ?? 1, signal, wallSeconds: Number(process.hrtime.bigint() - started) / 1e9, features });
-      } catch { reject(new Error(`Acceptance ${group} report is malformed or incomplete`)); }
+        resolve({ code: code ?? 1, signal: exitSignal, wallSeconds: Number(process.hrtime.bigint() - started) / 1e9, features });
+      } catch (error) { reject(new Error(`Acceptance ${group} report or owned cleanup failed: ${error.message}`)); }
     });
   });
 }
@@ -100,7 +141,7 @@ function htmlReport(summary) {
     `${summary.error ? `<p><strong>Failure:</strong> ${escapeHtml(summary.error)}</p>` : ''}</body></html>`;
 }
 
-async function runGate(options = {}, executeGroup = executeCucumber) {
+async function runGate(options = {}, executeGroup = executeCucumber, timers = { setTimeout, clearTimeout }) {
   const start = process.hrtime.bigint();
   const prefix = options.prefix || (options.sourceOnly ? 'cucumber-specs' : 'cucumber');
   const reportRoot = path.join(acceptanceRoot, 'reports');
@@ -123,17 +164,34 @@ async function runGate(options = {}, executeGroup = executeCucumber) {
   const summary = { version: 1, complete: !partial && !options.dryRun, dryRun: Boolean(options.dryRun),
     sourceOnly: Boolean(options.sourceOnly), specRoot: inventory.specRoot, fingerprint: inventory.fingerprint,
     assigned: assignments.length, assignments: assignments.map(({ id, capability, requirement, name, group }) => ({ id, capability, requirement, name, group })),
-    status: 'running', groups: [] };
+    deadlineSeconds: GATE_TIMEOUT_MS / 1000, timedOut: false, status: 'running', groups: [] };
   const allFeatures = [];
   let aborted = false;
   let activeGroup;
+  const deadline = new AbortController();
+  const expire = () => {
+    if (deadline.signal.aborted) return;
+    summary.timedOut = true;
+    summary.status = 'failed';
+    summary.complete = false;
+    summary.error = 'Acceptance gate exceeded the 10-minute (600s) limit';
+    console.error(`[acceptance-gate] ${summary.error}; cancelling execution and cleaning up`);
+    deadline.abort(new Error(summary.error));
+  };
+  const checkDeadline = () => {
+    if (Number(process.hrtime.bigint() - start) / 1e6 >= GATE_TIMEOUT_MS) expire();
+  };
+  // One budget for the entire invocation, including discovery, startup, all
+  // scenarios/groups and teardown; never a fresh ten minutes for each group.
+  const timeout = timers.setTimeout(expire, Math.max(0, GATE_TIMEOUT_MS - Number(process.hrtime.bigint() - start) / 1e6));
   console.log(`[acceptance-gate] ${partial ? 'PARTIAL validation' : options.dryRun ? 'DRY RUN — no acceptance execution' : 'COMPLETE acceptance gate'}; freshly assigned ${assignments.length} scenarios`);
   try {
     for (const group of executionGroups) {
       const selected = assignments.filter(entry => entry.group === group);
       if (!selected.length) continue;
       console.log(`[acceptance-gate] ${group}: ${selected.length} assigned scenario(s)`);
-      if (aborted) {
+      checkDeadline();
+      if (aborted || deadline.signal.aborted) {
         summary.groups.push({ group, assigned: selected.length, status: 'not-run-after-failure', missing: selected.map(entry => entry.id) });
         continue;
       }
@@ -143,10 +201,11 @@ async function runGate(options = {}, executeGroup = executeCucumber) {
       fs.writeFileSync(reports.events, '');
       activeGroup = group;
       const result = await executeGroup({ group, manifestPath, reports, dryRun: options.dryRun,
-        paths: groupPaths(assignments, group), entries: selected });
+        paths: groupPaths(assignments, group), entries: selected, signal: deadline.signal });
       allFeatures.push(...result.features);
       const audit = auditGroup(selected, result.features, { dryRun: options.dryRun });
-      const success = result.code === 0 && audit.allPassed;
+      checkDeadline();
+      const success = result.code === 0 && audit.allPassed && !deadline.signal.aborted;
       summary.groups.push({ group, ...audit, code: result.code, signal: result.signal,
         wallSeconds: result.wallSeconds, status: success ? (options.dryRun ? 'dry-run' : 'passed') : 'failed', report: reports.html });
       activeGroup = undefined;
@@ -156,11 +215,15 @@ async function runGate(options = {}, executeGroup = executeCucumber) {
     }
     const finalInventory = discover({ sourceOnly: options.sourceOnly, specRoot: options.specRoot, extractedRoot: inventory.extractedRoot });
     if (finalInventory.fingerprint !== inventory.fingerprint) throw new Error('Acceptance specification changed during validation; discovery is incomplete');
-    summary.status = aborted ? 'failed' : options.dryRun ? 'dry-run' : partial ? 'partial-pass' : 'passed';
+    checkDeadline();
+    summary.status = aborted || deadline.signal.aborted ? 'failed' : options.dryRun ? 'dry-run' : partial ? 'partial-pass' : 'passed';
   } catch (error) {
     summary.status = 'failed';
-    summary.error = error.message;
+    summary.error = deadline.signal.aborted ? `${deadline.signal.reason.message}; ${error.message}` : error.message;
   } finally {
+    checkDeadline();
+    timers.clearTimeout(timeout);
+    if (deadline.signal.aborted) summary.status = 'failed';
     for (const group of executionGroups) {
       const selected = assignments.filter(entry => entry.group === group);
       if (selected.length && !summary.groups.some(result => result.group === group)) {
@@ -182,7 +245,7 @@ async function runGate(options = {}, executeGroup = executeCucumber) {
   return summary;
 }
 
-module.exports = { auditGroup, htmlReport, parseArguments, readScenarios, runGate };
+module.exports = { GATE_TIMEOUT_MS, auditGroup, cleanupDeadlineResources, htmlReport, parseArguments, readScenarios, runGate };
 if (require.main === module) {
   runGate(parseArguments(process.argv.slice(2))).then(summary => {
     process.exitCode = summary.status === 'failed' ? 1 : 0;

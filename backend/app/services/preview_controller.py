@@ -4,6 +4,7 @@ import http.client
 import io
 import json
 import logging
+import math
 import os
 import re
 import select
@@ -325,6 +326,7 @@ class AcceptanceReset:
         self.operation_kind = "reset"
         self.deadline = None
         self.ownership = None
+        self.idle_time_offset_seconds = 0.0
 
     def authenticate(self, headers) -> None:
         if not self.enabled:
@@ -363,7 +365,47 @@ class AcceptanceReset:
                     "boot_id": self.boot_id, "baseline_verified": self.baseline_verified,
                     "active_work": sum(self.active.values()), "ownership": self.ownership or {"verified": False},
                     "reset_id": self.reset_id, "expected_generation": self.expected_generation,
-                    "operation": self.operation_kind, "dirty": self.dirty}
+                    "operation": self.operation_kind, "dirty": self.dirty,
+                    "idle_time_offset_seconds": self.idle_time_offset_seconds}
+
+    def advance_idle_time(self, payload: dict) -> dict:
+        if not isinstance(payload, dict) or set(payload) != {"run_id", "expected_generation", "seconds"}:
+            raise ResetControlError(400, "Invalid acceptance idle-time request")
+        if payload["run_id"] != self.run_id:
+            raise ResetControlError(409, "Acceptance run identity mismatch")
+        seconds = payload["seconds"]
+        if (type(payload["expected_generation"]) is not int or payload["expected_generation"] < 0
+                or type(seconds) not in (int, float) or not 0 < seconds <= 3600 or not math.isfinite(seconds)):
+            raise ResetControlError(400, "Invalid acceptance idle-time request")
+        if not self.operation_lock.acquire(blocking=False):
+            raise ResetControlError(409, "Acceptance control operation already in progress")
+        try:
+            with self.condition:
+                if payload["expected_generation"] != self.generation:
+                    raise ResetControlError(409, "Acceptance generation mismatch")
+                if self.phase not in ("admitting", "ready"):
+                    raise ResetControlError(503, "Acceptance workload admissions are closed")
+            deadline = time.monotonic() + self.timeout
+            try:
+                self.verify_ownership(deadline)
+                with self.work("handler"):
+                    def advance():
+                        # Seed creation-time fallbacks in the current idle-clock
+                        # domain before changing it, without fabricating activity.
+                        sweep()
+                        with self.condition:
+                            if self.phase not in ("admitting", "ready") or time.monotonic() >= deadline:
+                                raise RuntimeError("Acceptance idle-time advance is no longer admitted")
+                            with activity_lock:
+                                self.idle_time_offset_seconds += seconds
+                        sweep()
+                    self.bounded(advance, deadline)
+            except Exception:
+                self.fail()
+                raise ResetControlError(503, "Acceptance idle-time advance failed; admissions remain closed") from None
+            return {**self.state(), "advanced_seconds": seconds, "idle_time": idle_time()}
+        finally:
+            self.operation_lock.release()
 
     def bounded(self, callback, deadline: float):
         """Return by the total deadline even if an Engine read cannot be interrupted.
@@ -516,8 +558,8 @@ class AcceptanceReset:
                         if any(resources.values()):
                             raise RuntimeError("Acceptance preview baseline is not empty")
                         with activity_lock:
-                            if activity or ready_services or failed_services:
-                                raise RuntimeError("Acceptance controller maps are not empty")
+                            if activity or ready_services or failed_services or self.idle_time_offset_seconds != 0:
+                                raise RuntimeError("Acceptance controller baseline is not empty")
                     with self.condition:
                         if (self.phase == "failed" or time.monotonic() >= deadline
                                 or self.active["handler"] or self.active["maintenance"]):
@@ -562,17 +604,25 @@ class AcceptanceReset:
                 raise RuntimeError("Acceptance map cleanup is not quiescent")
             with activity_lock:
                 activity.clear()
+                self.idle_time_offset_seconds = 0.0
                 ready_services.clear()
                 failed_services.clear()
+            native.close_readers()
             for runtime in (native, legacy):
                 with runtime.lock:
                     runtime.last.clear()
                     runtime.terminal.clear()
                     runtime.operations.clear()
             native.previous.clear()
+            native.browser_helpers.clear()
 
 
 acceptance_reset = AcceptanceReset()
+
+
+def idle_time() -> float:
+    """Only the idle lease clock is controllable, and only in acceptance mode."""
+    return time.time() + (acceptance_reset.idle_time_offset_seconds if acceptance_reset.enabled else 0)
 
 
 def tracked_maintenance(function):
@@ -1276,7 +1326,7 @@ def heartbeat(chat_id: uuid.UUID) -> dict[str, str]:
     if current["state"] != "running":
         raise FileNotFoundError("Preview workload not running")
     with activity_lock:
-        activity[chat_id] = time.time()
+        activity[chat_id] = idle_time()
     return current
 
 
@@ -1324,7 +1374,7 @@ def browser_resource(chat_id: uuid.UUID, path: str, requested_port: str | None =
         "'application/octet-stream',cookies:response.headers.getSetCookie(),body:Buffer.concat(parts).toString('base64')}))})().catch(()=>process.exit(1))"
     )
     encoded_body = base64.b64encode(body).decode()
-    prefix, target_port = native.browser_command(current, port) if current.get("runtime") == "native-compose" else ([], port)
+    prefix, target_port = native.browser_command(current, port, chat_id) if current.get("runtime") == "native-compose" else ([], port)
     for command in ([*prefix, "python", "-c", script, host, target_port, path, method, encoded_body, content_type, cookie, authorization],
                     [*prefix, "node", "-e", node_script, host, target_port, path, method, encoded_body, content_type, cookie, authorization]):
         code, result = docker("POST", f"/containers/{container_name(chat_id)}/exec", {
@@ -1380,7 +1430,7 @@ def browser_socket(handler: BaseHTTPRequestHandler, chat_id: uuid.UUID, path: st
         "  if not data: sys.exit(0)\n"
         "  upstream.sendall(data) if source==0 else os.write(1,data)\n"
     )
-    prefix, target_port = native.browser_command(current, port) if current.get("runtime") == "native-compose" else ([], port)
+    prefix, target_port = native.browser_command(current, port, chat_id) if current.get("runtime") == "native-compose" else ([], port)
     command = [*prefix, "python", "-u", "-c", script, host, target_port]
     if prefix:
         command = ["python3", "-c", "import os,sys,tty; tty.setraw(0); os.execvp(sys.argv[1], sys.argv[1:])", *command]
@@ -1444,7 +1494,7 @@ def browser_socket(handler: BaseHTTPRequestHandler, chat_id: uuid.UUID, path: st
 
 @tracked_maintenance
 def sweep(now: float | None = None) -> None:
-    now = time.time() if now is None else now
+    now = idle_time() if now is None else now
     code, containers = docker(
         "GET",
         f"/containers/json?all=1&filters={quote(json.dumps({'label': [f'sdd.preview.project={PROJECT}']}))}",
@@ -1467,8 +1517,13 @@ def sweep(now: float | None = None) -> None:
             continue
         with activity_lock:
             last_active = activity.get(chat_id)
-        if last_active is None:
-            last_active = container["Created"]
+            if last_active is None:
+                last_active = container["Created"]
+                if acceptance_reset.enabled:
+                    # Newly created workloads without a first heartbeat must use
+                    # the same clock domain as ones created before an advance.
+                    last_active += acceptance_reset.idle_time_offset_seconds
+                    activity[chat_id] = last_active
         if now - last_active >= IDLE_SECONDS:
             stop(chat_id)
         elif labels.get(NATIVE_LABEL):
@@ -1506,7 +1561,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def handle_acceptance_control(self) -> None:
-        actions = {"/testing/acceptance/" + action: action for action in ("state", "quiesce", "reset", "resume")}
+        actions = {"/testing/acceptance/" + action: action for action in ("state", "quiesce", "reset", "resume", "advance-idle-time")}
         action = actions.get(self.path)
         if action is None or self.command != ("GET" if action == "state" else "POST"):
             self.respond(404, {"error": "Not found"})
@@ -1530,7 +1585,7 @@ class Handler(BaseHTTPRequestHandler):
                         value[key] = item
                     return value
                 payload = json.loads(self.rfile.read(length), object_pairs_hook=unique_object)
-                result = acceptance_reset.control(action, payload)
+                result = acceptance_reset.advance_idle_time(payload) if action == "advance-idle-time" else acceptance_reset.control(action, payload)
             self.respond(200, result)
         except ResetControlError as error:
             self.respond(error.code, {"error": str(error), "phase": acceptance_reset.phase})

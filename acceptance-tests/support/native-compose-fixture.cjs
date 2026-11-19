@@ -1,6 +1,8 @@
-// An entirely local, disposable application: real Postgres, API, website and
-// first-user initialization. It never uses the live demo or real credentials.
+// Entirely local disposable applications with a real database, API, website and
+// first-user initialization. Full-stack/configuration cases retain Postgres;
+// operation/isolation cases can use persistent SQLite. No live demo credentials.
 const PYTHON = 'python:3.14-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88';
+const HELPER_PYTHON = 'python:3.14-alpine3.22@sha256:6b91e66ab2a880ce9ca5a1b91c70f45963ff71ff68268df056336e1a657d5efd';
 const POSTGRES = 'postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea';
 const ACCOUNT = Object.freeze({ email: 'preview@example.invalid', password: 'disposable-preview-password' });
 
@@ -43,6 +45,16 @@ def query(sql):
                 rows.append(body[6:6 + size].decode())
             if kind == b'Z':
                 return rows
+
+def quoted(value):
+    return "'" + value.replace("'", "''") + "'"
+`;
+
+const sqliteClient = String.raw`import os, sqlite3
+
+def query(sql):
+    with sqlite3.connect(os.environ.get('PREVIEW_DATABASE_PATH', '/data/preview.sqlite3'), timeout=5) as connection:
+        return [str(row[0]) for row in connection.execute(sql).fetchall()]
 
 def quoted(value):
     return "'" + value.replace("'", "''") + "'"
@@ -132,19 +144,45 @@ document.querySelector('#create').onsubmit = async event => {
 };
 </script></body></html>`;
 
-function nativeComposeFixture({ linked = false, failInitialization = false } = {}) {
+function initializationFixture(script, { mode = 'normal', markup = '' } = {}) {
+  const before = "import os, sys, time\nprint('acceptance initialization entered', flush=True)\n";
+  const live = "for index in range(48):\n    print(f'acceptance stdout tick {index:03d}', flush=True)\n    print(f'acceptance stderr tick {index:03d}', file=sys.stderr, flush=True)\n    time.sleep(0.5)\n";
+  const variants = {
+    normal: before + script,
+    live: before + live + script,
+    failed: before + "print('acceptance initialization diagnostic ' + os.environ['PREVIEW_EXECUTION_SECRET'], file=sys.stderr, flush=True)\nsys.exit(17)\n",
+    retention: before + "for index in range(1024):\n    print('retention output ' + str(index) + ' ' + 'x' * 2048, flush=True)\nprint('acceptance retained final diagnostic', file=sys.stderr, flush=True)\nsys.exit(23)\n",
+    secret: before + "secret = os.environ['PREVIEW_EXECUTION_SECRET']\ncut = len(secret) // 2\nsys.stdout.write('split secret: ' + secret[:cut]); sys.stdout.flush()\ntime.sleep(0.5)\nsys.stdout.write(secret[cut:] + '\\n'); sys.stdout.flush()\nsys.exit(29)\n",
+    markup: before + `print(${JSON.stringify(`\u001b[31m${markup}\u001b[0m\u001b]52;c;ignored\u0007`)}, flush=True)\nsys.exit(31)\n`,
+    missing: before + script,
+  };
+  if (!Object.hasOwn(variants, mode)) throw new Error(`Unknown real-project fixture mode: ${mode}`);
+  return variants[mode];
+}
+
+function nativeComposeFixture({ linked = false, failInitialization = false, build = true, buildApi = build, watch = build, prebuiltWatch = false,
+  database = 'postgres', pythonImage = database === 'postgres' ? PYTHON : HELPER_PYTHON } = {}) {
+  if (!['postgres', 'sqlite'].includes(database)) throw new Error('Unsupported fixture database');
+  if (watch && !build) throw new Error('Watch fixtures require a genuine website build context');
+  const postgres = database === 'postgres';
+  if (prebuiltWatch && (!watch || !build || buildApi)) throw new Error('Invalid prebuilt watch fixture');
+  const buildImage = postgres && !prebuiltWatch ? PYTHON : HELPER_PYTHON;
+  // Most API/UI/isolation scenarios need a running real application, not a
+  // fresh BuildKit instance. Confined checkout binds avoid COPY-only builds;
+  // explicit full-stack/configuration and build-resource cases retain builds.
+  const startup = prebuiltWatch ? 'docker compose up --watch' : watch ? 'docker compose watch' : 'docker compose up';
   const instructions = '# Full-stack Docker development\n\n'
     + 'Initialize the database and first account:\n\n```sh\ndocker compose run --rm api python init.py\n```\n\n'
-    + 'Start the complete application and keep source synchronization running:\n\n```sh\ndocker compose watch\n```\n\n'
+    + `Start the complete application${watch ? ' and keep source synchronization running' : ''}:\n\n\`\`\`sh\n${startup}\n\`\`\`\n\n`
     + 'Application: http://localhost:8765/ . The website proxies its required API requests.\n';
   return {
     'README.md': linked
       ? '# Preview fixture\n\nFollow [Docker development](docs/development.md#full-stack-docker-development).\n\n## Alternative host-local development\nRun `python site/server.py` and `python api/server.py` only when not using Docker.\n'
       : instructions,
     ...(linked ? { 'docs/development.md': instructions } : {}),
-    '.env': `FIRST_EMAIL=${ACCOUNT.email}\nFIRST_PASSWORD=${ACCOUNT.password}\n`,
+    '.env': `FIRST_EMAIL=${ACCOUNT.email}\nFIRST_PASSWORD=${ACCOUNT.password}\n${postgres ? '' : 'PREVIEW_DATABASE_PATH=/data/configured-preview.sqlite3\n'}`,
     'compose.yml': `services:
-  db:
+${postgres ? `  db:
     image: ${POSTGRES}
     container_name: fixed-preview-database
     environment:
@@ -156,24 +194,24 @@ function nativeComposeFixture({ linked = false, failInitialization = false } = {
       interval: 1s
       timeout: 1s
       retries: 30
-  api:
-    build: ./api
-    container_name: fixed-preview-api
+` : ''}  api:
+    ${buildApi ? 'build: ./api' : `image: ${pythonImage}\n    working_dir: /app\n    volumes: ['./api:/app:ro'${postgres ? '' : ', database:/data'}]`}
+${buildApi && !postgres ? '    volumes: [database:/data]\n' : ''}    container_name: fixed-preview-api
     env_file: .env
     command: [python, -u, server.py]
-    depends_on:
+${postgres ? `    depends_on:
       db:
         condition: service_healthy
-  website:
-    build: ./site
+` : ''}  website:
+    ${prebuiltWatch ? `build: ./site\n    image: ${pythonImage}\n    pull_policy: never\n    working_dir: /app\n    volumes: ['./site:/app:rw']` : build ? 'build: ./site' : `image: ${pythonImage}\n    working_dir: /app\n    volumes: ['./site:/app:ro']`}
     container_name: fixed-preview-website
     command: [python, -u, server.py]
     depends_on: [api]
   mail:
-    image: ${PYTHON}
+    image: ${pythonImage}
     command: [python, -m, http.server, '8025']
   admin:
-    image: ${PYTHON}
+    image: ${pythonImage}
     command: [python, -m, http.server, '8080']
 volumes:
   database:
@@ -181,25 +219,26 @@ volumes:
     'compose.override.yml': `services:
   website:
     ports: ['8765:8765']
-    develop:
+${watch ? `    develop:
       watch:
         - action: sync
-          path: ./site
-          target: /app
+          path: ${prebuiltWatch ? './watched-site' : './site'}
+          target: ${prebuiltWatch ? '/tmp/watched-inputs' : '/app'}
+          initial_sync: true
           ignore: [Dockerfile]
-  api:
+` : ''}  api:
     ports: ['8766:8766']
-  db:
+${postgres ? `  db:
     ports: ['15432:5432']
-  mail:
+` : ''}  mail:
     ports: ['8025:8025']
   admin:
     ports: ['8080:8080']
 `,
-    'api/Dockerfile': `FROM ${PYTHON}\nWORKDIR /app\nCOPY . .\n`,
-    'site/Dockerfile': `FROM ${PYTHON}\nWORKDIR /app\nCOPY . .\n`,
-    'api/db.py': databaseClient,
-    'api/server.py': api,
+    'api/Dockerfile': `FROM ${buildImage}\nWORKDIR /app\nCOPY . .\n`,
+    'site/Dockerfile': `FROM ${buildImage}\nWORKDIR /app\nCOPY . .\n`,
+    'api/db.py': postgres ? databaseClient : sqliteClient,
+    'api/server.py': postgres ? api : api.replace('json_agg(name)::text', 'json_group_array(name)'),
     'api/init.py': failInitialization
       ? 'import sys\nprint("fixture initialization failed", file=sys.stderr, flush=True)\nsys.exit(17)\n'
       : String.raw`from db import query, quoted
@@ -209,9 +248,10 @@ query('CREATE TABLE IF NOT EXISTS items(name text)')
 query('INSERT INTO users VALUES (' + quoted(os.environ['FIRST_EMAIL']) + ', ' + quoted(os.environ['FIRST_PASSWORD']) + ') ON CONFLICT DO NOTHING')
 print('first user initialized', flush=True)
 `,
-    'site/server.py': website,
+    'site/server.py': prebuiltWatch ? website.replace("Path('/app/index.html')", "Path('/tmp/watched-inputs/index.html')") : website,
     'site/index.html': html,
+    ...(prebuiltWatch ? { 'watched-site/index.html': html } : {}),
   };
 }
 
-module.exports = { ACCOUNT, nativeComposeFixture };
+module.exports = { ACCOUNT, HELPER_PYTHON, PYTHON, initializationFixture, nativeComposeFixture };

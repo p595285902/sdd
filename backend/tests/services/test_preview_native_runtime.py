@@ -1,12 +1,19 @@
 import importlib
 import json
+import os
+import subprocess
+import sys
+import time
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from app.services.preview_native_runtime import (
     APPLY_SOURCE,
     UPLOAD,
+    EventReader,
     NativeRuntime,
     archive_files,
     replay_events,
@@ -22,6 +29,96 @@ def session_module(monkeypatch, tmp_path):
     monkeypatch.setattr(module, 'ROOT', tmp_path)
     monkeypatch.setattr(module, 'STATE', tmp_path / 'journal.sqlite')
     return module
+
+
+@pytest.fixture
+def route_runtime(monkeypatch):
+    runtime = NativeRuntime(SimpleNamespace())
+    runtime.helper_id = 'sha256:trusted-public-helper'
+    helpers, calls = {}, []
+
+    def execute(chat, argv, **_kwargs):
+        calls.append((chat, argv))
+        if argv[:2] == ['docker', 'inspect']:
+            helper = helpers.get((chat, argv[-1]))
+            if helper is None:
+                raise RuntimeError('No such helper')
+            return json.dumps(helper).encode()
+        if argv[:3] == ['docker', 'rm', '-f']:
+            helpers.pop((chat, argv[-1]), None)
+            return b''
+        assert argv[:3] == ['docker', 'run', '-d']
+        name = argv[argv.index('--name') + 1]
+        helpers[(chat, name)] = {'State': {'Running': True}, 'Image': runtime.helper_id,
+            'HostConfig': {'NetworkMode': next(value.split('=', 1)[1] for value in argv if value.startswith('--network=')),
+                           'ReadonlyRootfs': True, 'Privileged': False, 'CapDrop': ['ALL'],
+                           'SecurityOpt': ['no-new-privileges:true'], 'PidsLimit': 128}, 'Mounts': []}
+        return b'fixed-helper-container'
+
+    monkeypatch.setattr(runtime, 'exec', execute)
+    current = {'execution_id': str(uuid.uuid4()), 'details': {'routes': {
+        '8765': {'container': 'a' * 64, 'target': 8765, 'role': 'website'},
+    }}}
+    return runtime, current, helpers, calls
+
+
+def test_forwarding_reuses_only_the_readonly_namespace_not_request_processes(route_runtime):
+    runtime, current, helpers, calls = route_runtime
+    chat = uuid.uuid4()
+    first = runtime.browser_command(current, '8765', chat)
+    second = runtime.browser_command(current, '8765', chat)
+    assert first == second and first[0][:3] == ['docker', 'exec', '-i']
+    assert first[1] == '8765'
+    runs = [argv for _, argv in calls if argv[:3] == ['docker', 'run', '-d']]
+    assert len(runs) == 1
+    assert '--read-only' in runs[0] and '--cap-drop=ALL' in runs[0]
+    assert '--security-opt=no-new-privileges:true' in runs[0] and '--pids-limit=128' in runs[0]
+    assert all(owner == chat for owner, _ in calls)
+    assert next(iter(helpers.values()))['Mounts'] == []
+
+
+@pytest.mark.parametrize('change', ['recreated-app', 'stopped-helper', 'wrong-image', 'wrong-network', 'writable-helper'])
+def test_forwarding_rebuilds_stale_or_modified_helpers_before_any_request(route_runtime, change):
+    runtime, current, helpers, calls = route_runtime
+    chat = uuid.uuid4()
+    prefix, _ = runtime.browser_command(current, '8765', chat)
+    helper = helpers[(chat, prefix[-1])]
+    if change == 'recreated-app':
+        current['details']['routes']['8765']['container'] = 'b' * 64
+    elif change == 'stopped-helper':
+        helper['State']['Running'] = False
+    elif change == 'wrong-image':
+        helper['Image'] = 'project-image'
+    elif change == 'wrong-network':
+        helper['HostConfig']['NetworkMode'] = 'host'
+    else:
+        helper['HostConfig']['ReadonlyRootfs'] = False
+    runtime.browser_command(current, '8765', chat)
+    assert len([argv for _, argv in calls if argv[:3] == ['docker', 'run', '-d']]) == 2
+    fresh = helpers[(chat, prefix[-1])]
+    assert fresh['HostConfig']['NetworkMode'] == 'container:' + current['details']['routes']['8765']['container']
+    assert fresh['Image'] == runtime.helper_id and fresh['HostConfig']['ReadonlyRootfs']
+
+
+def test_forwarding_helpers_stay_chat_scoped_and_terminal_cleanup_forgets_only_owner(route_runtime):
+    runtime, current, _helpers, _calls = route_runtime
+    first, second = uuid.uuid4(), uuid.uuid4()
+    runtime.browser_command(current, '8765', first)
+    runtime.browser_command({**current, 'execution_id': str(uuid.uuid4())}, '8765', second)
+    assert set(runtime.browser_helpers) == {(first, '8765'), (second, '8765')}
+    runtime.terminal[first] = {}
+    runtime.before_stop(first, {'Config': {'Labels': {'sdd.preview.native-execution': current['execution_id']}}})
+    assert set(runtime.browser_helpers) == {(second, '8765')}
+
+
+def test_unregistered_or_invalid_routes_never_create_a_forwarder(route_runtime):
+    runtime, current, helpers, calls = route_runtime
+    with pytest.raises(ValueError):
+        runtime.browser_command(current, '8025', uuid.uuid4())
+    current['details']['routes']['8765']['container'] = '../other-chat'
+    with pytest.raises(ValueError):
+        runtime.browser_command(current, '8765', uuid.uuid4())
+    assert not calls and not helpers
 
 
 def test_selected_checkout_snapshot_is_read_only_and_excludes_outside_inputs(tmp_path):
@@ -408,3 +505,230 @@ def test_preparation_does_not_allow_host_paths_or_run_privileges(session_module)
     for argv in (['cp', '/etc/passwd', '.env'], ['docker', 'compose', 'run', '--privileged', 'api'], ['docker', 'compose', '-f', '/etc/compose.yml', 'watch']):
         with pytest.raises(ValueError):
             session_module.validate_command({'cwd': '.', 'argv': argv, 'env': {}})
+
+
+def event_server_command(session_module, state, *, setup=''):
+    script = (
+        'import sys; from pathlib import Path; '
+        'sys.path.insert(0,sys.argv[1]); import preview_native_session as session; '
+        'session.STATE=Path(sys.argv[2]); ' + (setup + '; ' if setup else '') + 'session.serve_events()'
+    )
+    return [sys.executable, '-I', '-u', '-c', script, str(Path(session_module.__file__).parent), str(state)]
+
+
+@pytest.fixture
+def event_transport(session_module, monkeypatch):
+    from app.services import preview_native_runtime as module
+
+    states, spawned = {}, []
+    popen = subprocess.Popen
+    def launch(argv, **kwargs):
+        assert argv[1:5] == ['exec', '-i', '--user', '1000:1000']
+        assert argv[-4:] == ['python3', '-u', module.RUNNER, 'events-serve']
+        process = popen(event_server_command(session_module, states[argv[5]]), **kwargs)
+        spawned.append(process)
+        return process
+    monkeypatch.setattr(module.subprocess, 'Popen', launch)
+    controller = SimpleNamespace(SOCKET='/never-open-docker.sock', container_name=lambda chat: chat.hex)
+    runtime = NativeRuntime(controller)
+    try:
+        yield runtime, states, spawned
+    finally:
+        runtime.close_readers()
+        for process in spawned:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=2)
+
+
+def test_persistent_event_reader_reads_fresh_redacted_pages_without_respawning(session_module, event_transport):
+    from preview_redaction import SecretRedactor
+
+    runtime, states, spawned = event_transport
+    chat = uuid.uuid4()
+    states[chat.hex] = session_module.STATE
+    journal = session_module.Journal('execution-a', SecretRedactor(['private-secret']))
+    try:
+        first = runtime.read(chat, 0)
+        assert len(spawned) == 1 and first['cursor'] == 1
+        journal.emit('stdout', {'text': 'new private-secret output'})
+        second = runtime.read(chat, first['cursor'])
+        assert second['events'][0]['payload']['text'] == 'new [REDACTED] output'
+        assert second['cursor'] == 2 and len(spawned) == 1
+        assert runtime.read(chat, second['cursor'])['events'] == []
+        assert len(spawned) == 1 and spawned[0].poll() is None
+        runtime.close_reader(chat)
+        assert spawned[0].poll() is not None and not runtime.readers
+        assert runtime.read(chat, 0) == runtime.read(chat, 0)
+        assert len(spawned) == 2  # Reopened read, never a repeated project command.
+    finally:
+        journal.db.close()
+
+
+def test_event_reader_chat_separation_and_serialized_concurrent_requests(session_module, event_transport, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from preview_redaction import SecretRedactor
+
+    runtime, states, spawned = event_transport
+    chats = [uuid.uuid4(), uuid.uuid4()]
+    for index, chat in enumerate(chats):
+        state = session_module.STATE.parent / f'chat-{index}.sqlite'
+        states[chat.hex] = state
+        monkeypatch.setattr(session_module, 'STATE', state)
+        journal = session_module.Journal(f'execution-{index}', SecretRedactor())
+        journal.emit('stdout', {'text': f'chat {index} only'})
+        journal.db.close()
+    requests = chats * 8
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        pages = list(pool.map(lambda chat: runtime.read(chat, 1), requests))
+    assert len(spawned) == 2
+    for chat, page in zip(requests, pages, strict=True):
+        index = chats.index(chat)
+        assert page['execution_id'] == f'execution-{index}'
+        assert page['events'][0]['payload']['text'] == f'chat {index} only'
+
+
+def test_event_reader_eof_restarts_only_the_idempotent_read(session_module, event_transport):
+    from preview_redaction import SecretRedactor
+
+    runtime, states, spawned = event_transport
+    chat = uuid.uuid4()
+    states[chat.hex] = session_module.STATE
+    journal = session_module.Journal('retry-read', SecretRedactor())
+    journal.db.close()
+    assert runtime.read(chat, 0)['execution_id'] == 'retry-read'
+    spawned[0].kill()
+    spawned[0].wait(timeout=2)
+    assert runtime.read(chat, 1)['events'] == []
+    assert len(spawned) == 2 and spawned[1].poll() is None
+
+
+@pytest.mark.parametrize('cursor', [-1, True, 0.1, '1', 2**63])
+def test_runtime_rejects_bad_event_cursor_before_starting_process(event_transport, cursor):
+    runtime, _, spawned = event_transport
+    with pytest.raises(ValueError, match='cursor'):
+        runtime.read(uuid.uuid4(), cursor)
+    assert not spawned
+
+
+@pytest.mark.parametrize('script,expected', [
+    ("import sys; sys.stdin.buffer.readline(); sys.stdout.write('project-secret\\n'); sys.stdout.flush()", 'invalid protocol'),
+    ("import sys; sys.stdin.buffer.readline(); sys.stdout.write('{\\\"after\\\":999,\\\"result\\\":{}}\\n'); sys.stdout.flush()", 'invalid protocol'),
+    ("import sys; sys.stdin.buffer.readline(); sys.stdout.buffer.write(b'x'*4097); sys.stdout.flush()", 'exceeded'),
+    ("import sys,threading; sys.stdin.buffer.readline(); threading.Event().wait()", 'timed out'),
+    ("import sys; sys.stdin.buffer.readline(); sys.stdout.write('{partial'); sys.stdout.flush()", 'exited'),
+])
+def test_event_reader_rejects_malformed_oversized_hung_or_eof_process(script, expected):
+    reader = EventReader([sys.executable, '-I', '-u', '-c', script], os.environ, timeout=1, limit=4096)
+    started = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match=expected) as error:
+            reader.read(0)
+        assert 'project-secret' not in str(error.value)
+    finally:
+        reader.close()
+    assert reader.process.poll() is not None and time.monotonic() - started < 3
+
+
+@pytest.mark.parametrize('cursor_line', [b'-1\n', b'true\n', b'1.0\n', b'01\n', b'9223372036854775808\n', b'1'*33, b'2'])
+def test_event_server_rejects_invalid_cursor_protocol_and_eof(session_module, cursor_line):
+    result = subprocess.run(event_server_command(session_module, session_module.STATE), input=cursor_line,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {'error': 'invalid_request'}
+    assert not result.stderr
+
+
+def test_event_server_missing_journal_can_recover_and_errors_are_sanitized(session_module, event_transport):
+    from app.services.preview_native_runtime import EventJournalNotReady
+    from preview_redaction import SecretRedactor
+
+    runtime, states, spawned = event_transport
+    chat = uuid.uuid4()
+    states[chat.hex] = session_module.STATE
+    with pytest.raises(EventJournalNotReady):
+        runtime.read(chat, 0)
+    journal = session_module.Journal('late-journal', SecretRedactor())
+    journal.db.close()
+    assert runtime.read(chat, 0)['execution_id'] == 'late-journal' and len(spawned) == 1
+
+
+def test_event_server_empty_eof_and_unavailable_errors_do_not_expose_exception_text(session_module):
+    command = event_server_command(session_module, session_module.STATE)
+    empty = subprocess.run(command, input=b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+    assert empty.returncode == 0 and not empty.stdout and not empty.stderr
+    command = event_server_command(session_module, session_module.STATE,
+        setup="session.runtime_events=lambda _after: (_ for _ in ()).throw(RuntimeError('project-secret'))")
+    result = subprocess.run(command, input=b'0\n', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+    assert result.returncode == 0 and json.loads(result.stdout) == {'after': 0, 'error': 'unavailable'}
+    assert b'project-secret' not in result.stdout + result.stderr
+
+
+def test_native_stop_preserves_all_terminal_pages_then_closes_reader_even_without_container(session_module, event_transport, monkeypatch):
+    from preview_redaction import SecretRedactor
+    from app.services.preview_native_runtime import NATIVE_LABEL
+
+    runtime, states, spawned = event_transport
+    chat = uuid.uuid4()
+    states[chat.hex] = session_module.STATE
+    journal = session_module.Journal('terminal-execution', SecretRedactor(['private-secret']))
+    for index in range(120):
+        journal.emit('stdout', {'text': f'{index}: private-secret'})
+    journal.status('stopped')
+    journal.db.close()
+    monkeypatch.setattr(runtime, 'exec', lambda *_args: b'')
+    container = {'Config': {'Labels': {NATIVE_LABEL: 'terminal-execution'}}}
+    runtime.read(chat, 0)
+    runtime.before_stop(chat, container)
+    assert not runtime.readers and spawned[0].poll() is not None
+    retained = runtime.terminal[chat]
+    assert len(retained['events']) == 122 and retained['events'][-1]['payload']['status'] == 'stopped'
+    assert all('private-secret' not in json.dumps(event) for event in retained['events'])
+    runtime.read(chat, 0)
+    runtime.before_stop(chat, None)
+    assert not runtime.readers and spawned[1].poll() is not None
+    assert runtime.terminal[chat] == retained
+
+
+def test_event_transport_failure_is_closed_actionable_and_reaped(session_module, event_transport):
+    from app.services.preview_native_runtime import NATIVE_LABEL
+
+    runtime, states, spawned = event_transport
+    chat = uuid.uuid4()
+    states[chat.hex] = session_module.STATE
+    session_module.STATE.write_text('project-secret invalid database')
+    runtime.c.inspect = lambda _chat: {'Config': {'Labels': {NATIVE_LABEL: 'execution-a'}}}
+    with pytest.raises(RuntimeError, match='journal is unavailable') as error:
+        runtime.events(chat)
+    assert 'project-secret' not in str(error.value)
+    assert not runtime.readers and spawned[0].poll() is not None
+    assert chat not in runtime.last and chat not in runtime.terminal
+
+
+def test_event_transport_rejects_execution_identity_mismatch(session_module, event_transport):
+    from app.services.preview_native_runtime import NATIVE_LABEL
+    from preview_redaction import SecretRedactor
+
+    runtime, states, spawned = event_transport
+    chat = uuid.uuid4()
+    states[chat.hex] = session_module.STATE
+    journal = session_module.Journal('different-execution', SecretRedactor())
+    journal.db.close()
+    runtime.c.inspect = lambda _chat: {'Config': {'Labels': {NATIVE_LABEL: 'owned-execution'}}}
+    with pytest.raises(RuntimeError, match='identity changed'):
+        runtime.events(chat)
+    assert not runtime.readers and spawned[0].poll() is not None
+    assert chat not in runtime.last
+
+
+def test_event_server_bounds_a_hung_runtime_read_without_polling(session_module):
+    command = event_server_command(session_module, session_module.STATE, setup=(
+        "import time; original=session.signal.setitimer; "
+        "session.signal.setitimer=lambda kind,seconds: original(kind,0.1 if seconds else 0); "
+        "session.runtime_events=lambda _after: time.sleep(3600)"
+    ))
+    started = time.monotonic()
+    result = subprocess.run(command, input=b'0\n', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+    assert result.returncode == 0 and not result.stderr
+    assert json.loads(result.stdout) == {'after': 0, 'error': 'unavailable'}
+    assert time.monotonic() - started < 3

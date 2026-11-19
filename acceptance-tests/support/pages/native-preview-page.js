@@ -6,13 +6,21 @@ const { nativeComposeFixture, ACCOUNT } = require('../native-compose-fixture.cjs
 const { PreviewExecutionPage } = require('./preview-execution-page.js');
 
 const WAIT = 240_000;
-const IDLE_WAIT = 360_000;
+const isWatchCommand = event => event.kind === 'command_start' &&
+  event.payload.argv?.some(argument => argument === 'watch' || argument === '--watch');
 
 class NativePreviewPage extends PreviewExecutionPage {
   get workload() { return this.world.previewWorkloadPage; }
 
   async prepareNative(kind = 'normal') {
-    await this.prepare({ mode: kind === 'failed' ? 'failed' : kind === 'missing' ? 'missing' : 'normal' });
+    this.nativeWatch = ['watch', 'full', 'build', 'linked', 'failed', 'missing', 'output-idle', 'conflicting'].includes(kind);
+    this.nativeBuild = this.nativeWatch;
+    this.nativeBuildApi = kind === 'build';
+    this.nativePrebuiltWatch = this.nativeWatch && !this.nativeBuildApi;
+    this.nativeDatabase = kind === 'full' ? 'postgres' : 'sqlite';
+    const mode = ['failed', 'missing', 'live'].includes(kind) ? kind : 'normal';
+    await this.prepare({ mode, build: this.nativeBuild, buildApi: this.nativeBuildApi,
+      watch: this.nativeWatch, prebuiltWatch: this.nativePrebuiltWatch, database: this.nativeDatabase, ui: false });
     this.fixtureKind = kind;
     if (kind === 'linked') {
       const files = nativeComposeFixture({ linked: true });
@@ -20,7 +28,7 @@ class NativePreviewPage extends PreviewExecutionPage {
     }
     if (kind === 'slow-application') {
       const files = this.workload.nativeFixtures.get(this.chat.id);
-      await this.writeFiles({ 'site/server.py': 'import time\ntime.sleep(45)\n' + files['site/server.py'] });
+      await this.writeFiles({ 'site/server.py': "import time\nfrom pathlib import Path\nwhile not Path('/app/application-ready.flag').exists():\n    time.sleep(0.02)\n" + files['site/server.py'] });
     }
     if (kind === 'output-idle') {
       const files = this.workload.nativeFixtures.get(this.chat.id);
@@ -35,7 +43,7 @@ def periodic_output():
     while True:
         print('native watch activity tick ' + str(index), flush=True)
         index += 1
-        time.sleep(2)
+        time.sleep(0.05)
 threading.Thread(target=periodic_output, daemon=True).start()
 ` + files['site/server.py'] });
     }
@@ -75,6 +83,17 @@ root = workspace_path(root=settings.DEVELOP_WORKSPACE_ROOT, chat_id=uuid.UUID(sy
     this.savedFiles = await this.checkoutFiles(['compose.yml', 'compose.override.yml', '.env']);
   }
 
+  async open() {
+    if (new URL(this.page.url()).pathname !== '/develop') {
+      await this.world.developPage.open(this.token);
+      await this.world.developPage.selectChat(this.chat.title);
+    }
+    await super.open();
+  }
+
+  async expandOperation() { await this.open(); await super.expandOperation(); }
+  async waitUntilReady() { await this.open(); await super.waitUntilReady(); }
+
   async writeFiles(files) {
     await this.world.apiClient.withWorkspaceFileBatch(this.chat.id, async () => {
       for (const [name, content] of Object.entries(files)) await this.world.apiClient.editWorkspaceFile(this.chat.id, name, content);
@@ -113,7 +132,9 @@ print(json.dumps({name: (root / name).read_text() if (root / name).is_file() els
   async createOther(native = true) {
     const chat = await this.world.apiClient.createDevelopmentChat(this.token, `Other preview ${randomUUID()}`);
     assert.equal((await this.world.apiClient.setupDevelopmentWorkspace(this.token, chat.id)).status(), 200);
-    if (native) await this.workload.prepareNativeCompose(chat.id);
+    if (native) await this.workload.prepareNativeCompose(chat.id, { build: this.nativeBuild ?? false,
+      buildApi: this.nativeBuildApi ?? false, watch: this.nativeWatch ?? false,
+      prebuiltWatch: this.nativePrebuiltWatch ?? false, database: this.nativeDatabase ?? 'sqlite' });
     else await this.workload.prepareInstructions(chat.id, 'website');
     this.workload.chatIds.push(chat.id);
     return chat;
@@ -214,7 +235,8 @@ except (ValueError, OSError) as error:
   }
 
   async saveClarification() {
-    this.clarification = 'docker compose run --rm api python init.py\ndocker compose watch\nApplication: http://localhost:8765/';
+    const startup = this.nativePrebuiltWatch ? 'docker compose up --watch' : 'docker compose watch';
+    this.clarification = `docker compose run --rm api python init.py\n${startup}\nApplication: http://localhost:8765/`;
     const response = await this.request('launch', 'post', this.token, { data: { answer: this.clarification } });
     assert.equal(response.status(), 200);
     const saved = await response.json();
@@ -242,10 +264,11 @@ except (ValueError, OSError) as error:
   async expectNativeWorkflow() {
     await this.expectReady();
     assert.ok(this.workload.isNative(this.chat.id));
-    assert.ok((await this.events()).some(event => event.kind === 'command_start' && event.payload.argv?.includes('watch')));
+    assert.ok((await this.events()).some(event => isWatchCommand(event)));
   }
 
   async expectNoAlternativePrompt() {
+    await this.open();
     assert.equal(this.execution.status, 'running');
     await expect(this.operation).not.toContainText(/provide non-Compose|unsupported Compose/i);
   }
@@ -261,6 +284,7 @@ except (ValueError, OSError) as error:
     const api = this.workload.serviceContainer(this.chat.id, 8766);
     const environment = JSON.parse(this.workload.nativeDocker(this.chat.id, 'inspect', api))[0].Config.Env;
     assert.ok(environment.includes(`FIRST_EMAIL=${ACCOUNT.email}`) && environment.includes(`FIRST_PASSWORD=${ACCOUNT.password}`));
+    if (this.nativeDatabase === 'sqlite') assert.ok(environment.includes('PREVIEW_DATABASE_PATH=/data/configured-preview.sqlite3'));
     assert.ok(this.workload.nativeDocker(this.chat.id, 'exec', api, 'python', '-c', "from db import query; print(query('SELECT count(*) FROM users'))").includes('1'));
   }
 
@@ -320,7 +344,8 @@ except (ValueError, OSError) as error:
 
   async prepareDuplicate() {
     await this.prepareNative();
-    await this.launch();
+    await this.launchApi();
+    await this.waitForEvents(events => events.some(event => event.kind === 'command_start'));
     this.firstExecution = this.execution.id;
     this.firstSandbox = this.workload.inspect(this.chat.id).Id;
   }
@@ -369,16 +394,17 @@ except (ValueError, OSError) as error:
 
   async prepareExpired() {
     await this.prepareIdle();
-    await this.waitForRealIdle();
+    await this.waitForIdleExpiry();
     this.previousEvents = await this.events();
   }
 
-  async waitForRealIdle() {
+  async waitForIdleExpiry() {
     const began = this.idleBeganAt;
     assert.ok(began, 'A real visible Context heartbeat must establish the running preview idle window');
     const initial = await this.events();
     let last = initial.at(-1)?.sequence || 0;
     const outputMinutes = new Set();
+    let advanced = 0;
     const abort = new AbortController();
     const response = await fetch(new URL(`/api/v1/develop/chats/${this.chat.id}/preview/executions/${this.execution.id}/stream?after=${last}`,
       this.world.applicationState.baseUrl), { headers: { Authorization: `Bearer ${this.token}`, Accept: 'text/event-stream' }, signal: abort.signal });
@@ -394,16 +420,23 @@ except (ValueError, OSError) as error:
       }
     })().catch(error => { streamError = error; });
     try {
-      await expect.poll(async () => {
-        const rows = await this.executions();
-        this.execution = rows.find(row => row.id === this.execution.id);
-        const events = await this.events();
-        if (events.some(event => event.sequence > last && event.payload.text?.includes('native watch activity tick'))) {
-          outputMinutes.add(Math.floor((Date.now() - began) / 60_000));
+      for (let minute = 0; minute < 5; minute++) {
+        const beforeBytes = liveBytes;
+        await expect.poll(async () => {
+          const events = await this.events(last);
+          last = events.at(-1)?.sequence || last;
+          return events.some(event => event.payload.text?.includes('native watch activity tick'));
+        }, { timeout: 15_000, intervals: [50, 100], message: `Actual watch output in logical idle minute ${minute + 1}` }).toBe(true);
+        await expect.poll(() => liveBytes, { timeout: 15_000 }).toBeGreaterThan(beforeBytes);
+        outputMinutes.add(minute);
+        const clock = await this.workload.advanceIdleTime(60);
+        advanced += clock.advanced_seconds;
+        assert.equal(clock.idle_time_offset_seconds, advanced, 'Each verified reset must start with an unadvanced controller clock');
+        if (minute < 4) {
+          assert.ok(this.workload.isRunning(this.chat.id), 'Less than five idle minutes must not remove the sandbox');
         }
-        last = events.at(-1)?.sequence || last;
-        return this.execution.status;
-      }, { timeout: IDLE_WAIT, intervals: [1000], message: 'A connected output stream and replay requests must not renew the five-minute visible-Context lifetime' }).toBe('stopped');
+      }
+      await this.waitForExecution(row => row.status === 'stopped', 'five logical idle minutes with live output and an attached stream');
     } finally {
       abort.abort();
       await consuming;
@@ -411,7 +444,7 @@ except (ValueError, OSError) as error:
     }
     assert.ok(liveBytes > 0, 'An actual owner-authenticated output stream must remain attached during the idle test');
     if (streamError && streamError.name !== 'AbortError') throw streamError;
-    assert.ok(Date.now() - began >= 300_000, 'Idle cleanup must use the real five-minute lifetime, not a separate-process activity map');
+    assert.equal(advanced, 300, 'The authenticated control must advance the actual controller clock through all five idle minutes');
     for (let minute = 0; minute < 5; minute++) {
       assert.ok(outputMinutes.has(minute), `The watch command must emit actual output in idle minute ${minute + 1}; observed ${[...outputMinutes]}`);
     }
@@ -445,17 +478,32 @@ except (ValueError, OSError) as error:
   }
 
   async prepareWatch() {
-    await this.prepareNative();
+    await this.prepareNative('watch');
     await this.launch();
-    await this.waitForEvents(events => events.some(event => event.kind === 'command_start' && event.payload.argv?.includes('watch')));
+    await this.waitForEvents(events => events.some(event => isWatchCommand(event)));
   }
 
   async expectReadyWatch() {
     await this.expectReady();
     const events = await this.events();
-    const watch = events.find(event => event.kind === 'command_start' && event.payload.argv?.includes('watch'));
+    const watch = events.find(event => isWatchCommand(event));
     assert.ok(watch);
     assert.ok(!events.some(event => event.kind === 'command_exit' && event.payload.command === watch.payload.command));
+    if (this.nativeWatch && !this.watchSyncVerified) {
+      await this.waitForEvents(rows => rows.some(event => event.payload.text?.includes('Watch enabled')));
+      const marker = `native-watch-${randomUUID()}`;
+      const source = this.nativePrebuiltWatch ? 'watched-site/index.html' : 'site/index.html';
+      const target = this.nativePrebuiltWatch ? '/tmp/watched-inputs/index.html' : '/app/index.html';
+      const html = this.workload.nativeFixtures.get(this.chat.id)[source];
+      await this.writeFiles({ [source]: html + `\n<!-- ${marker} -->\n` });
+      await expect.poll(() => {
+        try {
+          return this.workload.nativeDocker(this.chat.id, 'exec', this.workload.serviceContainer(this.chat.id, 8765),
+            'python', '-c', "from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())", target).includes(marker);
+        } catch { return false; }
+      }, { timeout: 15_000 }).toBe(true);
+      this.watchSyncVerified = true;
+    }
   }
 
   async prepareRespondingTool() {
@@ -476,7 +524,8 @@ except (ValueError, OSError) as error:
 
   async expectApplicationProgress() {
     await expect(this.panel).toContainText(/starting|waiting|application/i);
-    await this.expectReadyWatch();
+    await this.writeFiles({ 'site/application-ready.flag': 'ready\n' });
+    await this.expectReady();
     await this.waitUntilReady();
     await this.expectApplicationOnly();
   }
@@ -489,10 +538,21 @@ except (ValueError, OSError) as error:
   }
 
   async launchBoth() {
-    await this.launchApi();
-    await this.expectReady();
-    const other = await this.workload.openContext(this.otherChat.id);
+    // These are two chat-owned workloads in the same test stack/scenario, not
+    // parallel Cucumber workers or shared reset state.
+    const [, other] = await Promise.all([
+      (async () => { await this.launchApi(); await this.expectReady(); })(),
+      this.workload.openContext(this.otherChat.id),
+    ]);
     assert.equal(other.body.state, 'ready');
+  }
+
+  async launchConfiguration() {
+    await this.launchApi();
+    this.otherChat = await this.createOther();
+    const other = await this.workload.launch(this.otherChat.id);
+    assert.equal(other.status, 200);
+    await Promise.all([this.expectReady(), this.workload.waitForPreview(this.otherChat.id)]);
   }
 
   expectOwnCheckouts() {
@@ -652,10 +712,10 @@ except (ValueError, OSError) as error:
   }
 
   async expectInitializationOrder() {
-    const events = await this.waitForEvents(rows => rows.some(event => event.kind === 'command_start' && event.payload.argv?.includes('watch')));
+    const events = await this.waitForEvents(rows => rows.some(event => isWatchCommand(event)));
     const start = events.find(event => event.kind === 'command_start' && event.payload.argv?.includes('init.py'));
     const exit = events.find(event => event.kind === 'command_exit' && event.payload.command === start.payload.command);
-    const watch = events.find(event => event.kind === 'command_start' && event.payload.argv?.includes('watch'));
+    const watch = events.find(event => isWatchCommand(event));
     assert.ok(start.sequence < exit.sequence && exit.sequence < watch.sequence);
     assert.equal(exit.payload.exit_code, 0);
   }
@@ -670,6 +730,15 @@ except (ValueError, OSError) as error:
     assert.ok(output, 'The continuing Compose command must expose actual output');
   }
 
+  async expectWebsiteAndApi() {
+    await this.expectReady();
+    const services = this.workload.composeDetails(this.chat.id);
+    for (const name of ['website', 'api']) {
+      assert.ok(services.some(container => container.State.Running && container.Config.Labels['com.docker.compose.service'] === name));
+    }
+    this.expectApplicationApi();
+  }
+
   async expectNativeConfiguration() {
     await this.expectReadyWatch();
     const services = this.workload.composeDetails(this.chat.id);
@@ -680,7 +749,7 @@ except (ValueError, OSError) as error:
     const website = services.find(container => container.Config.Labels['com.docker.compose.service'] === 'website');
     assert.ok(website.HostConfig.PortBindings['8765/tcp'].some(binding => binding.HostPort === '8765'));
     assert.ok((await this.events()).filter(event => event.kind === 'command_start').every(event =>
-      event.payload.argv?.includes('watch') || event.payload.argv?.includes('run')));
+      isWatchCommand(event) || event.payload.argv?.includes('run')));
   }
 
   async expectUnchanged() { assert.deepEqual(await this.checkoutFiles(Object.keys(this.savedFiles)), this.savedFiles); }
@@ -688,7 +757,7 @@ except (ValueError, OSError) as error:
   async expectNoLaterStartup() {
     const events = await this.events();
     assert.ok(events.some(event => event.kind === 'command_exit' && event.payload.exit_code === 17));
-    assert.ok(!events.some(event => event.kind === 'command_start' && event.payload.argv?.includes('watch')));
+    assert.ok(!events.some(event => isWatchCommand(event)));
   }
   async expectInitializationFailure() {
     await this.expandOperation();
@@ -713,6 +782,7 @@ except (ValueError, OSError) as error:
 
   async addResourceProcesses() {
     this.resourceBefore = this.workload.inspect(this.chat.id).HostConfig;
+    this.resourceServiceCount = this.workload.composeDetails(this.chat.id).length;
     this.resourceContainer = this.workload.nativeDocker(this.chat.id, 'compose', '--project-directory', '/workspace', 'run', '-d', '--no-deps', 'api',
       'python', '-u', '-c', 'import subprocess,time; children=[subprocess.Popen(["python","-c","import time; time.sleep(90)"]) for _ in range(3)]; print("aggregate-resource-probe",flush=True); time.sleep(90)').trim();
     this.workload.nativeDocker(this.chat.id, 'compose', '--project-directory', '/workspace', 'build', 'api');
@@ -723,7 +793,7 @@ except (ValueError, OSError) as error:
     for (const key of ['Memory', 'MemorySwap', 'NanoCpus', 'PidsLimit', 'Tmpfs']) assert.deepEqual(sandbox.HostConfig[key], this.resourceBefore[key]);
     const processes = this.workload.docker('top', sandbox.Id, '-eo', 'pid,ppid,args');
     assert.ok(processes.includes('aggregate-resource-probe'), 'Nested project processes must be in the outer sandbox process tree/cgroup');
-    assert.ok(this.workload.composeDetails(this.chat.id).length > 5);
+    assert.ok(this.workload.composeDetails(this.chat.id).length > this.resourceServiceCount);
     const probe = `from pathlib import Path
 import json, time
 root = Path('/sys/fs/cgroup')
@@ -815,12 +885,14 @@ print(json.dumps({
   async prepareMissing() { await this.prepareNative('missing'); await this.workload.selectInstructions(null); }
 
   async visibleActivity() {
+    await this.workload.advanceIdleTime(240);
     const heartbeat = this.page.waitForResponse(response => response.request().method() === 'POST' &&
       new URL(response.url()).pathname === `/api/v1/develop/chats/${this.chat.id}/preview/activity`, { timeout: WAIT });
     await this.world.developPage.open(this.token);
     await this.world.developPage.selectChat(this.chat.title);
     await this.open();
     assert.equal((await heartbeat).status(), 200);
+    await this.workload.advanceIdleTime(240);
     await this.waitUntilReady();
     assert.equal(this.workload.isRunning(this.chat.id), true);
   }

@@ -8,7 +8,7 @@ class NativeRoutingPage extends NativePreviewPage {
   async prepareApplication({ instrumentMail = false } = {}) {
     await this.prepareNative();
     if (instrumentMail) {
-      const files = nativeComposeFixture();
+      const files = this.workload.nativeFixtures.get(this.chat.id);
       await this.writeFiles({
         'compose.yml': files['compose.yml'].replace(
           "command: [python, -m, http.server, '8025']",
@@ -100,10 +100,7 @@ HTTPServer(('0.0.0.0', 8025), Handler).serve_forever()
     await this.writeFiles({ 'site/index.html': html.replace('Native preview application', this.markers[0]) });
     await this.world.apiClient.editWorkspaceFile(this.otherChat.id, 'site/index.html',
       html.replace('Native preview application', this.markers[1]));
-    await this.launchApi();
-    await this.expectReady();
-    assert.equal((await this.workload.launch(this.otherChat.id)).status, 200);
-    await this.workload.waitForPreview(this.otherChat.id);
+    await this.launchBoth();
   }
 
   async openEqualPorts() {

@@ -46,6 +46,7 @@ class Controller:
         self.container = {'Id': 'legacy-container', 'Config': {'Labels': {}}, 'State': {'Running': True}}
         self.activity_lock = threading.Lock()
         self.activity = {}
+        self.idle_time = lambda: 12345.0
         self.stops = []
         self.legacy = LegacyRuntime(self)
 
@@ -79,7 +80,7 @@ def test_concurrent_same_execution_launch_reattaches_once(runtime):
     assert path == '/tmp' and uid == 65534
     content, mode = files['preview-legacy-plan.json']
     assert mode == 0o600 and json.loads(content)['execution_id'] == execution_id
-    assert chat in controller.activity
+    assert controller.activity[chat] == controller.idle_time()
     assert chat not in controller.native.terminal
     controller.native.terminal[chat] = {'execution_id': execution_id, 'state': 'stopped'}
     legacy.launch(chat, plan)
