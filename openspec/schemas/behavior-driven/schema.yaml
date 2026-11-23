@@ -45,114 +45,45 @@ artifacts:
     description: Detailed specifications for the change (Markdown structure with fenced Gherkin steps)
     template: spec.md
     instruction: |
-      Create `spec.md` spec files that define WHAT the system should do.
-
-      Create one `spec.md` per capability listed in the proposal's Capabilities
-      section. A spec.md is a standard OpenSpec Markdown spec: the STRUCTURE
-      (capability, requirements, scenarios) is ordinary Markdown headings, and
-      only the Given/When/Then STEPS live inside ```gherkin fences. Prose
-      (context, rationale, links) may appear anywhere.
-
-      This is what makes the spec valid OpenSpec — `openspec validate` and
-      `openspec archive` read the headings. Anything inside a fence is
-      invisible to OpenSpec, which is why no structure may live there.
+      Create one spec.md per capability listed in the proposal. 
+      Specs define WHAT the system should do using OpenSpec Markdown headings 
+      for structure and gherkin fences only for Given/When/Then steps.
 
       Paths:
-      - New capabilities: use the exact kebab-case name from the proposal
-        (specs/<capability>/spec.md).
-      - Modified capabilities: use the existing spec folder name from
-        openspec/specs/<capability>/ when creating the delta spec at
-        specs/<capability>/spec.md.
+      - New: specs/<capability>/spec.md, using the proposal's exact kebab-case capability name.
+      - Modified: preserve the folder name from openspec/specs/<capability>/.
 
-      Structure (how Markdown headings map onto Gherkin):
-      - `# <capability>` — the H1 title. EXACTLY ONE per spec.md. Becomes
-        `Feature:`.
-      - `## ADDED|MODIFIED|REMOVED|RENAMED Requirements` — delta sections, in a
-        change's delta spec. In openspec/specs/ (source of truth) these are
-        instead `## Purpose` (a paragraph of at least 50 characters) followed
-        by `## Requirements`.
-      - `### Requirement: <name>` — one requirement. Becomes `Rule:`. The line
-        directly beneath it is the normative description and MUST contain
-        SHALL or MUST (avoid should/may). It must be plain prose, NOT inside a
-        fence — OpenSpec cannot see fenced text.
-      - `#### Scenario: <name>` — a concrete example. Becomes `Scenario:`.
-        (`#### Scenario Outline: <name>` is also supported.)
-      - Every `### Requirement:` MUST have at least one `#### Scenario:`.
+      Structure:
+      - # <capability> — exactly one; maps to Feature:.
+      - Delta specs use ## ADDED|MODIFIED|REMOVED|RENAMED Requirements.
+      - Source-of-truth specs use ## Purpose (at least 50 characters), then ## Requirements.
+      - ### Requirement: <name> — maps to Rule:. The following prose MUST contain SHALL or MUST.
+      - #### Scenario: <name> — maps to Scenario:. Scenario Outline is also supported.
+      - Every requirement MUST have at least one scenario, except removed requirements.
 
-      Fence contract (the extractor and the acceptance-test runner depend on it):
-      - Steps go in fences opened by ```gherkin at column 0 (info string
-        exactly `gherkin`, nothing more) and closed by ``` at column 0. An
-        indented ```gherkin fence is a hard extraction error; gherkin quoted
-        inside any other fence is treated as prose.
-      - Each `#### Scenario:` heading MUST be followed by a gherkin fence
-        before the next heading.
-      - A fence contains ONLY steps (Given/When/Then/And/But), plus
-        `Examples:` tables and docstrings. Writing `Feature:`, `Rule:`,
-        `Scenario:` or `Scenario Outline:` inside a fence is a hard error —
-        that structure comes from the headings.
-      - Feature-level `Background:` goes under a `## Background` section with
-        its own fence.
+      Gherkin fences:
+      - Each scenario MUST contain a gherkin fence before the next heading.
+      - Fences MUST start and end at column 0.
+      - Fences contain only Given/When/Then/And/But steps, Examples: tables, or docstrings.
+      - Never put Feature:, Rule:, Scenario:, or Scenario Outline: inside a fence.
+      - Feature-level Background: belongs under ## Background with its own fence.
 
-      Delta operations are the `## ... Requirements` section headings; there
-      are no marker comments. Every requirement under a section takes that
-      section's operation:
-      - `## ADDED Requirements` — new requirements (full requirement +
-        scenarios)
-      - `## MODIFIED Requirements` — changed behavior (the FULL updated
-        requirement + all scenarios, not a partial edit)
-      - `## REMOVED Requirements` — deprecated requirements (the
-        `### Requirement: <name>` heading naming each one is enough)
-      - `## RENAMED Requirements` — name changes only, as FROM/TO bullet
-        pairs:
-          - FROM: `### Requirement: <old name>`
-          - TO: `### Requirement: <new name>`
+      Scenario scope:
+      Group related assertions and interactions by condition + user goal:
+      - Same condition + same user goal = same scenario.
+      - Different condition or independently meaningful user goal = different scenario.
+      - Do NOT split scenarios by individual buttons, labels, fields, or actions.
 
-      MODIFIED workflow: locate the existing `### Requirement:` in
-      openspec/specs/<capability>/spec.md, copy the ENTIRE block (description
-      through all scenarios) into the `## MODIFIED Requirements` section, and
-      edit. Partial MODIFIED content loses detail at archive time — if adding
-      new concerns without changing existing behavior, use ADDED instead.
+      Delta operations:
+      - ADDED — full new requirement and scenarios.
+      - MODIFIED — full updated requirement and all scenarios.
+      - REMOVED — requirement heading is sufficient.
+      - RENAMED — FROM/TO requirement-heading pairs.
+      For MODIFIED, copy the entire existing requirement from openspec/specs/<capability>/spec.md before editing it. 
+      Never use a partial requirement. If existing behavior is unchanged and only new behavior is introduced, use ADDED.
+      Specs are executable acceptance-test inputs. Before completion, extract the Gherkin and fix all gherkin-lint 
+      issues using the stack-specific commands from the acceptance-test-authoring skill.
 
-      Example delta spec.md:
-
-      ````markdown
-      # User authentication
-
-      Login is being tightened: accounts must verify their email address
-      before they may log in. See proposal.md for motivation.
-
-      ## ADDED Requirements
-
-      ### Requirement: Email must be verified before login
-      Unverified accounts MUST NOT be able to log in to the system.
-
-      #### Scenario: Unverified user is blocked
-
-      ```gherkin
-      Given an account with an unverified email address
-      When the user attempts to log in
-      Then access is denied
-      ```
-
-      ## REMOVED Requirements
-
-      ### Requirement: Session expires after inactivity
-
-      ## RENAMED Requirements
-
-      - FROM: `### Requirement: Password must meet complexity requirements`
-      - TO: `### Requirement: Password complexity is enforced`
-      ````
-
-      Specs should be testable - each scenario is a potential test case. The
-      whole document renders normally on GitHub; the headings plus their
-      fences are exactly what the acceptance suite executes.
-
-      Before considering a spec complete, extract the Gherkin and lint it with
-      gherkin-lint, fixing every reported issue. Linting is the same for every
-      stack, so a spec that lints clean does so regardless of which runner the
-      project uses. See the acceptance-test-authoring skill for your stack's
-      extraction + lint commands and their required flags.
     requires:
       - proposal
   - id: design
