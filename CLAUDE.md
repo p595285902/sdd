@@ -19,3 +19,5 @@
 - The active zone is defined by pending git changes (staged, unstaged, or untracked): uncommitted code changes block spec edits and vice versa. Committing (or stashing) the pending work releases the zone — no new session needed.
 - Enforced live: the PreToolUse hook `.claude/hooks/zone-guard.sh` (wired in `.claude/settings.json`) denies cross-zone edits based on `git status`. Never commit `openspec/` and code files together — commit each zone separately.
 - If you hit a block, finish and commit the current zone's task first, then start the other zone's edits. See the `bdd-zone-check` skill for the full playbook.
+
+### Rule 3 - responses must be short and easy to understand.
