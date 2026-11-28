@@ -1,0 +1,43 @@
+# Acceptance-test override of the root compose.yml. The suite's lifecycle runs:
+#
+#   docker compose -p <unique> \
+#     -f compose.yml -f acceptance-tests/compose.yml <command>
+#
+# Only `db` and `backend` are started. The backend image builds and serves the
+# frontend itself, so no proxy, Vite, or Traefik is involved, and `db` keeps
+# the root file's lack of a host port.
+#
+# The lifecycle script supplies every value the root file interpolates with
+# `:?` (project, database, superuser, SMTP), plus ACCEPTANCE_PORT, so the test
+# stack never depends on a developer's .env file.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command:
+      - fastapi
+      - run
+      - --workers
+      - "1"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "127.0.0.1:${ACCEPTANCE_PORT:?ACCEPTANCE_PORT is set by the acceptance lifecycle}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "http://localhost:8000/api/v1/utils/health-check/",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    environment:
+      FRONTEND_HOST: "http://127.0.0.1:${ACCEPTANCE_PORT:?ACCEPTANCE_PORT is set by the acceptance lifecycle}"
